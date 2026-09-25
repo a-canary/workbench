@@ -1,49 +1,55 @@
 #!/bin/bash
-# bootstrap.sh: resolve !pass show references and copy configs into place
-# Run once after clone, or after rotating keys in pass.
+# bootstrap.sh: install workbench from pinned component versions
+# Reads manifest.json to pull the exact tested combination.
 #
 # Usage: ./bootstrap.sh [--dry-run]
 
 set -euo pipefail
+WORKBENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 DRY_RUN=0
 if [[ "$1" == "--dry-run" ]]; then DRY_RUN=1; fi
 
-WORKBENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
-PI_DIR="$HOME/.pi"
-
-copy_file() {
-    local src="$1" dst="$2"
+run() {
     if [[ $DRY_RUN -eq 1 ]]; then
-        echo "would copy: $src -> $dst"
+        echo "would run: $*"
     else
-        cp "$src" "$dst"
-        echo "copied: $src -> $dst"
-    fi
-}
-
-copy_dir() {
-    local src="$1" dst="$2"
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo "would copy dir: $src -> $dst"
-    else
-        cp -r "$src"/* "$dst/"
-        echo "copied dir: $src -> $dst"
+        "$@"
     fi
 }
 
 echo "workbench bootstrap (dry-run=$DRY_RUN)"
+echo "qualified: $(jq -r '.qualified' "$WORKBENCH_DIR/manifest.json")"
+echo ""
 
-# 1. Skills
-copy_dir "$WORKBENCH_DIR/skills" "$PI_DIR/skills"
+# --- Skills ---
+echo "skills:"
+SKILLS_REPO=$(jq -r '.components.skills.repo' "$WORKBENCH_DIR/manifest.json")
+SKILLS_REF=$(jq -r '.components.skills.ref' "$WORKBENCH_DIR/manifest.json")
+run git clone --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" /tmp/wb-skills 2>/dev/null || true
+run rm -rf ~/.pi/skills
+run ln -sfn "/tmp/wb-skills/skills" ~/.pi/skills
+echo "  → ~/.pi/skills (from $SKILLS_REPO @ $SKILLS_REF)"
 
-# 2. Pi config (models.json has !pass show refs — resolved at runtime by pi)
-copy_file "$WORKBENCH_DIR/pi/models.json" "$PI_DIR/agent/models.json"
-copy_file "$WORKBENCH_DIR/pi/settings.json" "$PI_DIR/agent/settings.json"
-copy_file "$WORKBENCH_DIR/pi/pi-settings.json" "$PI_DIR/settings.json"
+# --- Proxy ---
+echo "proxy:"
+PROXY_REPO=$(jq -r '.components.proxy.repo' "$WORKBENCH_DIR/manifest.json")
+PROXY_REF=$(jq -r '.components.proxy.ref' "$WORKBENCH_DIR/manifest.json")
+run git clone --depth 1 --branch "$PROXY_REF" "$PROXY_REPO" ~/repos/arc-llm-proxy 2>/dev/null || true
+echo "  → ~/repos/arc-llm-proxy (from $PROXY_REPO @ $PROXY_REF)"
 
-# 3. Extensions
-copy_dir "$WORKBENCH_DIR/pi/extensions" "$PI_DIR/agent/extensions"
+# --- Pi config ---
+echo "pi config:"
+run cp "$WORKBENCH_DIR/pi/models.json" ~/.pi/agent/models.json
+run cp "$WORKBENCH_DIR/pi/settings.json" ~/.pi/agent/settings.json
+run cp "$WORKBENCH_DIR/pi/pi-settings.json" ~/.pi/settings.json
+echo "  → ~/.pi/"
+
+# --- Pi extensions ---
+echo "extensions:"
+run cp "$WORKBENCH_DIR/pi/extensions/"*.ts ~/.pi/agent/extensions/
+run cp "$WORKBENCH_DIR/pi/extensions/"*.json ~/.pi/agent/extensions/ 2>/dev/null || true
+echo "  → ~/.pi/agent/extensions/"
 
 echo ""
-echo "done. pass references in models.json resolve at runtime (pi reads them)."
-echo "if a key is missing from pass, the provider will fail with 401."
+echo "done."
+echo "verify: ~/repos/harness-bench/bin/bench run smoke --label verify"
