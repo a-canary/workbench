@@ -1,0 +1,7 @@
+{
+  "packages": [],
+  "extensions": [
+    "~/.pi/agent/extensions/auto-remind.ts",
+    "~/.pi/agent/extensions/ke-hooks.ts"
+  ]
+}

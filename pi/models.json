@@ -1,0 +1,267 @@
+{
+  "providers": {
+    "llama-103": {
+      "baseUrl": "http://192.168.1.103:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "models": [
+        {
+          "id": "Bonsai-27B-Q1_0.gguf",
+          "name": "Bonsai 27B 1-bit (llama.cpp, .103 4060)",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "compat": {
+            "supportsDeveloperRole": false
+          }
+        }
+      ]
+    },
+    "lm-studio": {
+      "baseUrl": "http://100.73.201.58:1234/v1",
+      "api": "openai-completions",
+      "apiKey": "lmstudio",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "qwen3-4b-thinking-2507-distill-claude-opus-4.6-reasoning-abliterated-i1",
+          "name": "Qwen 3.4B Thinking (LM Studio)",
+          "reasoning": true,
+          "contextWindow": 32000
+        },
+        {
+          "id": "qwen3.5-9b-claude-4.6-opus-reasoning-distilled-v2",
+          "name": "Qwen 3.5 9B (LM Studio)",
+          "reasoning": true,
+          "contextWindow": 32000
+        },
+        {
+          "id": "Bonsai-27B-Q1_0.gguf",
+          "name": "Bonsai 27B 1-bit (local)",
+          "reasoning": true,
+          "contextWindow": 64000
+        }
+      ]
+    },
+    "tokenrouter": {
+      "baseUrl": "https://api.tokenrouter.com/v1",
+      "api": "openai-completions",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "z-ai/glm-5.3-free",
+          "name": "z-ai/glm-5.3-free",
+          "reasoning": true,
+          "contextWindow": 262144
+        }
+      ]
+    },
+    "alibaba": {
+      "baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-sp-H.IMPDH.7QTd.MEYCIQDpviQbmzD1uZd2-qIJcElOD2cSpy0dehueqMwfNMFoDAIhAM06wq6SVv9OWg-G_mXztQB71OmZSbaavsXavyXQVUPl",
+      "models": [
+        {
+          "id": "qwen3.8-max",
+          "name": "Qwen3.8 max",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "input": [
+            "text",
+            "image"
+          ],
+          "compat": {
+            "supportsDeveloperRole": false
+          }
+        }
+      ]
+    },
+    "pool": {
+      "baseUrl": "http://192.168.1.159:8091/v1",
+      "api": "openai-completions",
+      "apiKey": "!pass show api/arc-llm-proxy/api-key",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "default/auto-llm",
+          "name": "Pool auto-llm (classify+routed)",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "default/worker",
+          "name": "Pool Worker combo (automations)",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "director/planning",
+          "name": "Director Planning (speed 10, UX lane)",
+          "reasoning": true,
+          "contextWindow": 131072
+        },
+        {
+          "id": "director/hard",
+          "name": "Director Hard (speed 10, UX lane)",
+          "reasoning": true,
+          "contextWindow": 131072
+        },
+        {
+          "id": "director/driver",
+          "name": "Director Driver (speed 10, UX lane)",
+          "reasoning": true,
+          "contextWindow": 131072
+        }
+      ]
+    },
+    "arc-priv": {
+      "baseUrl": "http://127.0.0.1:8093/v1",
+      "api": "openai-completions",
+      "apiKey": "ek_priv_f7e08f0d06389796a1f2e6d736734691",
+      "models": [
+        {
+          "id": "glm-5.3",
+          "name": "GLM-5.3 (private, OllamaCloud)"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "name": "GLM-5.3-flash (private driver/judge)"
+        },
+        {
+          "id": "driver",
+          "name": "private driver alias"
+        },
+        {
+          "id": "planning",
+          "name": "private planning/Director alias"
+        },
+        {
+          "id": "hard",
+          "name": "private attack/critic alias"
+        },
+        {
+          "id": "judge",
+          "name": "private judge alias (flash)"
+        },
+        {
+          "id": "local",
+          "name": "local V100 ollama (qwen3:8b)"
+        }
+      ]
+    },
+    "ollama-cloud": {
+      "baseUrl": "https://ollama.com/v1",
+      "api": "openai-completions",
+      "compat": {
+        "sendSessionAffinityHeaders": true
+      },
+      "models": [
+        {
+          "id": "kimi-k2.6",
+          "name": "kimi-k2.6 (OllamaCloud)"
+        },
+        {
+          "id": "nemotron-3-super",
+          "name": "nemotron-3-super (OllamaCloud)"
+        },
+        {
+          "id": "kimi-k3",
+          "name": "kimi-k3 (OllamaCloud)"
+        },
+        {
+          "id": "nemotron-3-ultra",
+          "name": "nemotron-3-ultra (OllamaCloud)"
+        },
+        {
+          "id": "glm-5.3",
+          "name": "glm-5.3 (OllamaCloud)"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "name": "glm-5.3-flash (OllamaCloud)"
+        },
+        {
+          "id": "deepseek-v4-flash:0731",
+          "name": "deepseek-v4-flash:0731 (OllamaCloud)"
+        },
+        {
+          "id": "gpt-oss:120b",
+          "name": "gpt-oss:120b (OllamaCloud)"
+        },
+        {
+          "id": "nemotron-3-nano:30b",
+          "name": "nemotron-3-nano:30b (OllamaCloud)"
+        },
+        {
+          "id": "gpt-oss:20b",
+          "name": "gpt-oss:20b (OllamaCloud)"
+        },
+        {
+          "id": "glm-5.1",
+          "name": "glm-5.1 (OllamaCloud)"
+        },
+        {
+          "id": "glm-5.2",
+          "name": "glm-5.2 (OllamaCloud)"
+        },
+        {
+          "id": "deepseek-v4-pro:0813",
+          "name": "deepseek-v4-pro:0813 (OllamaCloud)"
+        },
+        {
+          "id": "mistral-large-3:675b",
+          "name": "mistral-large-3:675b (OllamaCloud)"
+        },
+        {
+          "id": "qwen3.5:397b",
+          "name": "qwen3.5:397b (OllamaCloud)"
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "name": "kimi-k2.7-code (OllamaCloud)"
+        },
+        {
+          "id": "minimax-m3",
+          "name": "minimax-m3 (OllamaCloud)"
+        },
+        {
+          "id": "gemma4:31b",
+          "name": "gemma4:31b (OllamaCloud)"
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "minimax-m2.7 (OllamaCloud)"
+        }
+      ]
+    },
+    "v100": {
+      "baseUrl": "http://127.0.0.1:8099/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "models": [
+        {
+          "id": "local",
+          "name": "Qwen3.8-27B Q6_K (V100 llama.cpp :8099)",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "compat": {
+            "supportsDeveloperRole": false
+          }
+        }
+      ]
+    }
+  }
+}
