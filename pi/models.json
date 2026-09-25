@@ -62,7 +62,7 @@
     "alibaba": {
       "baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
       "api": "openai-completions",
-      "apiKey": "YOUR-ALIBABA-API-KEY",
+      "apiKey": "!pass show api/alibaba/api-key",
       "models": [
         {
           "id": "qwen3.8-max",
@@ -130,7 +130,7 @@
     "arc-priv": {
       "baseUrl": "http://127.0.0.1:8093/v1",
       "api": "openai-completions",
-      "apiKey": "YOUR-ARC_PRIV-API-KEY",
+      "apiKey": "!pass show api/arc-llm-proxy-private/key",
       "models": [
         {
           "id": "glm-5.3",
