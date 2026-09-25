@@ -11,6 +11,7 @@ Complete, tested agent configuration: model through skills. Not a generic tool â
 | harness | `pi/` | pi config, extensions, hooks, skills symlink |
 | skills | `skills/` | the actual know-how (symlinked from arc-skills) |
 | hardware | `hardware/` | V100, local GPU, vast instance playbooks |
+| bench-plans | `bench-plans/` | V100 inference, pi-vcc-fork testing plans |
 
 ## Qualification
 
