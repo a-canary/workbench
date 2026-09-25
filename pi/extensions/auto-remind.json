@@ -1,0 +1,11 @@
+{
+  "defaultSkill": "journal",
+  "defaultInterval": 5,
+  "perAgent": {
+    "director": { "interval": 8 },
+    "admin": { "interval": 10 },
+    "dev-trading": { "interval": 6 },
+    "dev-cc": { "interval": 6 },
+    "dev-onenation": { "interval": 6 }
+  }
+}

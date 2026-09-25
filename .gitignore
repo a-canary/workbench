@@ -1,0 +1,7 @@
+.pi-cache-optimizer-stats.d/
+node_modules/
+*.log
+results/
+runs/
+/tmp/
+scratch/

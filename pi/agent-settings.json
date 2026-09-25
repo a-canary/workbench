@@ -1,0 +1,47 @@
+{
+  "packages": [
+    "git:github.com/DietrichGebert/ponytail",
+    "npm:pi-background-tasks",
+    "npm:pi-agent-browser-native",
+    "npm:pi-cache-optimizer",
+    "npm:@jamiefutch/pi-timeout",
+    "npm:@abix5/pi-beads",
+    "npm:pi-vcc"
+  ],
+  "extensions": [
+    "~/.pi/agent/extensions/auto-remind.ts",
+    "~/.pi/agent/extensions/ke-hooks.ts"
+  ],
+  "skills": [
+    "~/repos/arc-skills/skills",
+    "~/repos/arc-agents/skills",
+    "-../../repos/arc-skills/skills/anti-sycophancy/SKILL.md",
+    "-../../repos/arc-skills/skills/ask-claude/SKILL.md",
+    "-../../repos/arc-skills/skills/auto-oversight/SKILL.md",
+    "-../../repos/arc-agents/skills/bookie/SKILL.md",
+    "-../../repos/arc-agents/skills/bookie-tdd/SKILL.md",
+    "-../../repos/arc-skills/skills/caveman/SKILL.md",
+    "-../../repos/arc-agents/skills/claude-afk/SKILL.md",
+    "-../../repos/arc-skills/skills/karpathy-guidelines/SKILL.md",
+    "-../../repos/arc-skills/skills/lite/SKILL.md",
+    "-../../repos/arc-agents/skills/replay-shadow/SKILL.md",
+    "+../../repos/arc-skills/skills/skillopt-lite/SKILL.md",
+    "-../../repos/arc-skills/skills/slow-lane/SKILL.md"
+  ],
+  "lastChangelogVersion": "0.87.1",
+  "theme": "dark",
+  "defaultProvider": "v100",
+  "defaultModel": "local",
+  "defaultThinkingLevel": "medium",
+  "steeringMode": "all",
+  "followUpMode": "all",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 32000,
+    "keepRecentTokens": 32000
+  },
+  "sendSessionAffinityHeaders": true,
+  "runTimeout": {
+    "fallbackMaxSeconds": 300
+  }
+}
