@@ -5,7 +5,7 @@ description: Route LLM calls for long-running, non-user-facing work (cron, pipel
 
 # slow-lane
 
-`arc-llm-proxy` runs on the operator box (LAN `192.168.1.159`, local `127.0.0.1`) on port `8091`, fronting two upstream endpoints: the model box's llama-server (192.168.1.103:1234, Bonsai-27B) and the Veles cloud GPU (Qwen3.8-27B-GGUF via trycloudflare tunnel). One port, six role aliases — `/v1/models` is the whole model surface:
+`arc-llm-proxy` runs on the operator box (LAN `YOUR-OPERATOR-BOX-IP`, local `127.0.0.1`) on port `8091`, fronting two upstream endpoints: the model box's llama-server (YOUR-GPU-BOX-IP:1234, Bonsai-27B) and the Veles cloud GPU (Qwen3.8-27B-GGUF via trycloudflare tunnel). One port, six role aliases — `/v1/models` is the whole model surface:
 
 | alias | lane | use |
 |---|---|---|
@@ -25,8 +25,8 @@ Long-running or non-user-facing LLM calls use a slow-lane alias (`bench`/`driver
 ## Usage
 
 ```bash
-source /home/aaron/repos/arc-llm-proxy/deploy/.keys.env   # FACTORY_KEY for cron/agent use
-curl -s http://192.168.1.159:8091/v1/chat/completions \
+source ~/repos/arc-llm-proxy/deploy/.keys.env   # FACTORY_KEY for cron/agent use
+curl -s http://YOUR-OPERATOR-BOX-IP:8091/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $FACTORY_KEY" \
   -d '{"model":"bench","max_tokens":512,"messages":[{"role":"user","content":"..."}]}'
@@ -43,7 +43,7 @@ curl -s http://192.168.1.159:8091/v1/chat/completions \
 
 | endpoint | host | model | auth |
 |---|---|---|---|
-| `e103` | llama-server 192.168.1.103:1234 (model box) | Bonsai-27B-Q1_0.gguf | none |
+| `e103` | llama-server YOUR-GPU-BOX-IP:1234 (model box) | Bonsai-27B-Q1_0.gguf | none |
 | `eVeles` | Veles cloud GPU, trycloudflare tunnel | unsloth/Qwen3.8-27B-GGUF | Bearer key in `deploy/veles.key` |
 
 Dispatch ladder per alias: e103 first, eVeles failover on all six aliases (see `deploy/switchboard.local.json`). When e103 is down, slow-lane traffic runs entirely on Veles — still queued by the proxy, just no local interactive slots to protect. The tunnel URL is ephemeral (`*.trycloudflare.com`): if the Veles box re-exposes, update `eVeles.url` in the switchboard and restart the proxy.
@@ -51,7 +51,7 @@ Dispatch ladder per alias: e103 first, eVeles failover on all six aliases (see `
 ## Proxy ops
 
 - Source of truth: `~/repos/arc-llm-proxy` (git). Local run: `deploy/keys.local.json` (key→user, chmod 600), `deploy/aliases.local.json` (per-host alias map), `deploy/.keys.env` (key values, chmod 600, gitignored).
-- Restart: kill by PID (`ss -ltnp | grep 8091`), then relaunch with `LLAMA_URL=http://192.168.1.103:1234 PORT=8091 POLL_MS=2000 KEYS_FILE=deploy/keys.local.json ALIASES_FILE=deploy/aliases.local.json node server.ts`. No hot reload — key/alias edits need a restart.
+- Restart: kill by PID (`ss -ltnp | grep 8091`), then relaunch with `LLAMA_URL=http://YOUR-GPU-BOX-IP:1234 PORT=8091 POLL_MS=2000 KEYS_FILE=deploy/keys.local.json ALIASES_FILE=deploy/aliases.local.json node server.ts`. No hot reload — key/alias edits need a restart.
 - Alias changes: sync per the `_note` in `aliases.default.json` (arc-agents config, pi models.json, this skill).
 - Model box: single slot (`-np 1`) — one slow request at a time, others queue. llama-server currently runs WITHOUT `--mmproj` (vision off); enabling it needs an authorized restart.
 - Restarting either service needs authorization — don't bounce it speculatively.

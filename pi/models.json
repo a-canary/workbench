@@ -1,7 +1,7 @@
 {
   "providers": {
     "llama-103": {
-      "baseUrl": "http://192.168.1.103:1234/v1",
+      "baseUrl": "http://YOUR-192_168_1_103-IP:1234/v1",
       "api": "openai-completions",
       "apiKey": "not-needed",
       "models": [
@@ -17,7 +17,7 @@
       ]
     },
     "lm-studio": {
-      "baseUrl": "http://100.73.201.58:1234/v1",
+      "baseUrl": "http://YOUR-100_73_201_58-IP:1234/v1",
       "api": "openai-completions",
       "apiKey": "lmstudio",
       "compat": {
@@ -62,7 +62,7 @@
     "alibaba": {
       "baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
       "api": "openai-completions",
-      "apiKey": "sk-sp-H.IMPDH.7QTd.MEYCIQDpviQbmzD1uZd2-qIJcElOD2cSpy0dehueqMwfNMFoDAIhAM06wq6SVv9OWg-G_mXztQB71OmZSbaavsXavyXQVUPl",
+      "apiKey": "YOUR-ALIBABA-API-KEY",
       "models": [
         {
           "id": "qwen3.8-max",
@@ -80,7 +80,7 @@
       ]
     },
     "pool": {
-      "baseUrl": "http://192.168.1.159:8091/v1",
+      "baseUrl": "http://YOUR-192_168_1_159-IP:8091/v1",
       "api": "openai-completions",
       "apiKey": "!pass show api/arc-llm-proxy/api-key",
       "compat": {
@@ -130,7 +130,7 @@
     "arc-priv": {
       "baseUrl": "http://127.0.0.1:8093/v1",
       "api": "openai-completions",
-      "apiKey": "ek_priv_f7e08f0d06389796a1f2e6d736734691",
+      "apiKey": "YOUR-ARC_PRIV-API-KEY",
       "models": [
         {
           "id": "glm-5.3",

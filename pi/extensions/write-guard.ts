@@ -29,7 +29,7 @@ function isInWorktree(path: string): boolean {
 }
 
 function isTmp(path: string): boolean {
-  return path.startsWith("/tmp/") || path.startsWith("/home/aaron/tmp/");
+  return path.startsWith("/tmp/") || path.startsWith("~/tmp/");
 }
 
 function isAgentsPubPlan(path: string): boolean {

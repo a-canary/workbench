@@ -46,7 +46,7 @@ For **cli-proxy** specifically, set `base: http://127.0.0.1:7890/v1` with `probe
 Three tiers, cheapest-first for routine work, escalation only when warranted:
 
 1. **veles/qwen3.8-27b** — PRIMARY WORKHORSE: wayfinder, planning, grilling, driver, bench. Cloudflare tunnel (URL in `~/.pi/agent/models.json` provider `Veles`, model `unsloth/Qwen3.8-27B-GGUF`; key `api/veles/api-key`). Factory aliases: `planning` / `minimax-build` / `driver` / `bench`.
-2. **llama-103/bonsai** — LITE REASONING: extraction, websearch, routing, hygiene. http://192.168.1.103:1234/v1, model `Bonsai-27B-Q1_0.gguf` (pi provider `llama-103`). Factory aliases: `easy` / `hygiene`.
+2. **llama-103/bonsai** — LITE REASONING: extraction, websearch, routing, hygiene. http://YOUR-GPU-BOX-IP:1234/v1, model `Bonsai-27B-Q1_0.gguf` (pi provider `llama-103`). Factory aliases: `easy` / `hygiene`.
 3. **Opus-Medium** — defense and really difficult escalations ONLY. `claude` CLI in tmux|herdr (`claude-afk --model opus --effort medium`, OAuth key `api/claude/oauth-token`). Factory aliases: `hard` / `opus-max` (with Veles fallback candidate).
 
 The factory lane encodes this table in `arc-agents/config.json` `exec_cli_alias` (direct providers, no proxy hop). Supersedes the 2026-08-24 "veles as last-resort fallback" policy — veles is now tier 1. Cloud endpoints (anthropic/minimax/openrouter/chutes/cerebras) stay available for explicit one-off use; they are not on default factory routing.

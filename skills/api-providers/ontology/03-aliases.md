@@ -17,7 +17,7 @@ Canonical set: `arc-llm-proxy/aliases.default.json`. Model name at the proxy: `a
 
 `#slow` / `#fast` suffix on any alias overrides its lane.
 
-**Deploy reality (2026-08-25):** the live switchboard (`deploy/switchboard.local.json`) maps **all six aliases to the single endpoint `e103` = 192.168.1.103:1234 serving Bonsai-27B**. The per-alias model split above is the intended design; the local deploy has not wired the Veles/other endpoints into the switchboard. Consequence: 103 down ⇒ all six aliases dead.
+**Deploy reality (2026-08-25):** the live switchboard (`deploy/switchboard.local.json`) maps **all six aliases to the single endpoint `e103` = YOUR-GPU-BOX-IP:1234 serving Bonsai-27B**. The per-alias model split above is the intended design; the local deploy has not wired the Veles/other endpoints into the switchboard. Consequence: 103 down ⇒ all six aliases dead.
 
 ## B. cli-proxy pools (the interactive lane)
 
