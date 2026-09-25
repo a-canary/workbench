@@ -1,60 +1,59 @@
 # workbench
 
-Complete, tested agent configuration: model through skills. Not a generic tool — this is the working setup, qualified by harness-bench.
+Tested agent configuration: model through skills. Pins exact component versions, qualifies the combination with harness-bench, ships what works.
+
+## Model
+
+```
+arc-skills (skills axis) ──┐
+arc-llm-proxy (routing) ───┼──► workbench (pins versions, qualifies, ships)
+harness-bench (testing) ───┘
+```
+
+Each component repo improves its own axis. workbench's job is integration + qualification — "this specific combo, tested together, works."
 
 ## Layers
 
-| layer | directory | what it does |
+| layer | where | what |
 |---|---|---|
-| model | `models/` | weights, quant, parameters (context, KV, temp) |
-| proxy | `proxy/` | routing, load balancing, failover (arc-llm-proxy) |
-| harness | `pi/` | pi config, extensions, hooks, skills symlink |
-| skills | `skills/` | the actual know-how (symlinked from arc-skills) |
-| hardware | `hardware/` | V100, local GPU, vast instance playbooks |
-| bench-plans | `bench-plans/` | V100 inference, pi-vcc-fork testing plans |
+| skills | `arc-skills` (pinned) | the know-how |
+| proxy | `arc-llm-proxy` (pinned) | routing, load balancing, failover |
+| pi config | `pi/` (here) | models.json, extensions, settings |
+| model params | `models/` (here) | context, KV, quant, per-model tuning |
+| hardware | `hardware/` (here) | V100, vast instance playbooks |
+| bench plans | `bench-plans/` (here) | V100 inference, pi-vcc-fork |
+| nightly | `nightly/` (here) | qualification build |
+
+## Install
+
+```sh
+git clone https://github.com/a-canary/workbench
+cd workbench
+./bootstrap.sh
+```
+
+Pulls the pinned component versions, installs config, symlinks skills.
 
 ## Qualification
 
-Every change must pass `harness-bench` with no quality regression:
+Every change must pass harness-bench with no quality regression:
 
 ```sh
-# Before
 ~/repos/harness-bench/bin/bench run core --model <model> --label before
-# After
+# ... make change ...
 ~/repos/harness-bench/bin/bench run core --model <model> --label after
-# Compare
 ~/repos/harness-bench/bin/bench compare before after
 ```
 
-Latest results in `BENCH/`.
+Results in `BENCH/`. Nightly build in `nightly/`.
 
 ## Nightly policy
 
-1. PRs must contain tests + harness-bench delta + evidence of value
-2. Nightly build = stable + all open PRs (run by agents-pub)
-3. PR merges to stable when: nightly users approve OR survives 3 nightly builds without related errors
+1. PRs require tests + harness-bench delta + evidence of value
+2. Nightly build runs stable + all open PRs through harness-bench
+3. Auto-merge: survive 3 nightlies with no related regressions
 4. Private (aaron) uses stable + own WIP PRs
 
-## Replicate
+## Manifest
 
-```sh
-# 1. Clone and install skills
-git clone https://github.com/a-canary/workbench
-cd workbench
-ln -sfn $(pwd)/skills ~/.pi/skills
-
-# 2. Copy pi config
-cp pi/models.json ~/.pi/agent/
-cp pi/settings.json ~/.pi/agent/
-cp pi/pi-settings.json ~/.pi/
-
-# 3. Copy extensions
-cp pi/extensions/*.ts ~/.pi/agent/extensions/
-
-# 4. Configure proxy (or use your own)
-# See proxy/README.md
-
-# 5. Verify with harness-bench
-cd ~/repos/harness-bench
-bin/bench run smoke --model <your-model> --label verify
-```
+`manifest.json` pins the exact tested combination. Bump a component's `ref` and re-run nightly qualification before committing the manifest change.
