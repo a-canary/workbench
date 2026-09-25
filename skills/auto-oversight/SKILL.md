@@ -68,7 +68,7 @@ near-identical log row.
 
 Mission → surfaces:
 - **trading**: repo `~/repos/trading`, director `.arc/director/*`, crons (shadow rebalance, director-tick), open PRs, `/m/trading`
-- **onenation**: TWO checkouts — deploy/prod `/home/aaron/projects/OneNation` AND director-dev `/home/aaron/repos/OneNation` (the 2h director cron plans from repos/; verify BOTH synced to origin/main or the director plans against stale code). Docker stack, QA journey cron log `.claude/qa-journey-cron.log`, deploy-drift cron `~/vault/onenation/deploy-drift.log`, open PRs, `/m/onenation`
+- **onenation**: TWO checkouts — deploy/prod `~/projects/OneNation` AND director-dev `~/repos/OneNation` (the 2h director cron plans from repos/; verify BOTH synced to origin/main or the director plans against stale code). Docker stack, QA journey cron log `.claude/qa-journey-cron.log`, deploy-drift cron `~/vault/onenation/deploy-drift.log`, open PRs, `/m/onenation`
 - **autonomy**: repos `~/repos/arc-agents`, `~/repos/arc-webui` (GitHub remote is `a-canary/webui`, NOT `a-canary/arc-webui` — the latter 404s every `gh pr list`), `~/repos/arc-skills`; feedback drain cron; webui :8080 up; open PRs
 - **local-models**: `~/repos/starlight-slm` (symlink → /mnt/Storage1; unmounted = parked, say so and move on)
 

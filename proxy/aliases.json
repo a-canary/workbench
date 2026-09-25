@@ -1,5 +1,5 @@
 {
-  "_note": "CANONICAL alias set. When aliases are added/removed/renamed here, sync: (1) /home/aaron/repos/arc-agents/config.json exec_cli_alias + default/fast/smart_alias, (2) ~/.pi/agent/models.json arc-proxy provider models, (3) arc-skills skills/slow-lane/SKILL.md, (4) per-host deploy/aliases.*.json overrides.",
+  "_note": "CANONICAL alias set. When aliases are added/removed/renamed here, sync: (1) ~/repos/arc-agents/config.json exec_cli_alias + default/fast/smart_alias, (2) ~/.pi/agent/models.json arc-proxy provider models, (3) arc-skills skills/slow-lane/SKILL.md, (4) per-host deploy/aliases.*.json overrides.",
   "aliases": {
     "planning": {
       "model": "unsloth/Qwen3.8-27B-GGUF",

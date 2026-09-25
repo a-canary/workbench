@@ -7,10 +7,10 @@ Intel = curated score (Artificial Analysis index or internal ProgramBench) — f
 
 | Model | Host | Served as | ctx | Notes |
 |---|---|---|---|---|
-| Bonsai-27B-Q1_0.gguf | 192.168.1.103:1234 (llama.cpp, 4060) | pi `llama-103`, arc-proxy endpoint `e103` | 131072 | The factory workhorse. 1-bit. Thinking model — reasoning eats `max_tokens` before content (~20 tokens ≈ empty content). |
-| Bonsai-27B-Q1_0.gguf | 100.73.201.58:1234 (LM Studio) | pi `lm-studio` | 64000 | Local fallback copy |
-| qwen3-4b-thinking-2507-distill-…-abliterated-i1 | 100.73.201.58:1234 | pi `lm-studio` | 32000 | small distill |
-| qwen3.5-9b-claude-4.6-opus-reasoning-distilled-v2 | 100.73.201.58:1234 | pi `lm-studio` | 32000 | small distill |
+| Bonsai-27B-Q1_0.gguf | YOUR-GPU-BOX-IP:1234 (llama.cpp, 4060) | pi `llama-103`, arc-proxy endpoint `e103` | 131072 | The factory workhorse. 1-bit. Thinking model — reasoning eats `max_tokens` before content (~20 tokens ≈ empty content). |
+| Bonsai-27B-Q1_0.gguf | YOUR-LM-STUDIO-IP:1234 (LM Studio) | pi `lm-studio` | 64000 | Local fallback copy |
+| qwen3-4b-thinking-2507-distill-…-abliterated-i1 | YOUR-LM-STUDIO-IP:1234 | pi `lm-studio` | 32000 | small distill |
+| qwen3.5-9b-claude-4.6-opus-reasoning-distilled-v2 | YOUR-LM-STUDIO-IP:1234 | pi `lm-studio` | 32000 | small distill |
 | unsloth/Qwen3.8-27B-GGUF | Veles tunnel | pi `Veles` | 100000 / maxTok 65536 | `veles/qwen3.8-27b` — **last-resort fallback** (captain policy 2026-08-24) |
 | unsloth/DeepSeek-V4-Flash-0731-GGUF | Veles tunnel | pi `Veles` | 100000 / maxTok 65536 | `ds v4 flash` |
 | DavidAU/Qwen3.8-27B-Cold-Fusion-…-MTP-GGUF | Veles tunnel | pi `Veles` | 100000 / maxTok 65536 | experimental |

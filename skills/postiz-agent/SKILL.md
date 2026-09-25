@@ -23,7 +23,7 @@ To opt a project in, add to its `AGENTS.md` **or** `CHOICES.md`:
 ```markdown
 ## Postiz
 This project may use the postiz-agent skill.
-api-url: http://100.91.151.13:4007
+api-url: http://YOUR-POSTIZ-IP:4007
 ```
 
 (`api-url` optional; defaults to `http://localhost:4007`.)
