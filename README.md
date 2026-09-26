@@ -54,6 +54,17 @@ Results in `BENCH/`. Nightly build in `nightly/`.
 3. Auto-merge: survive 3 nightlies with no related regressions
 4. Private (aaron) uses stable + own WIP PRs
 
+
+## Daily sweep (automated)
+
+ runs daily (03:00 UTC cron):
+1. Checks pinned component repos for new commits
+2. If changes: runs harness-bench core suite
+3. If tests pass: updates  with new  ref, commits, pushes
+4. If tests fail: leaves manifest as-is, logs failure
+
+This is the automation that keeps the workbench current with component improvements.
+
 ## Manifest
 
 `manifest.json` pins the exact tested combination. Bump a component's `ref` and re-run nightly qualification before committing the manifest change.
