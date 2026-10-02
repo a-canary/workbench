@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "description": "Tested agent configuration: model through skills",
-  "qualified": "2026-09-26",
+  "qualified": "2026-10-02",
   "components": {
     "skills": {
       "repo": "https://github.com/a-canary/arc-skills",
@@ -26,5 +26,13 @@
   "bench": {
     "repo": "https://github.com/a-canary/harness-bench",
     "suite": "core"
+  },
+  "baseline": {
+    "run_id": "202610021429166-f4f3cc",
+    "model": "v100/local",
+    "suite": "smoke",
+    "passed": 8,
+    "total": 8,
+    "quality": 100.0
   }
 }
