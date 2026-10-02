@@ -8,7 +8,7 @@
       "ref": "main",
       "path": "skills",
       "dest": "~/.pi/skills",
-      "last_tested": "50e0d3611d202c1021ce132be834c33731401280"
+      "last_tested": "a8eab4b14ea539bed6f82f2258fbcca9b233c549"
     },
     "proxy": {
       "repo": "https://github.com/a-canary/arc-llm-proxy",
