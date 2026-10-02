@@ -1,0 +1,20 @@
+{
+  "run_id": "202610021429166-f4f3cc",
+  "label": "workbench-pre-deploy-baseline",
+  "date": "2026-10-02T14:29:16Z",
+  "model": "v100/local",
+  "suite": "smoke",
+  "passed": 8,
+  "total": 8,
+  "quality": 100.0,
+  "tasks": [
+    {"name": "file-operations-hello-world", "status": "PASS", "ms": 7747, "tokens": 3417},
+    {"name": "file-operations-heterogeneous-dates", "status": "PASS", "ms": 27988, "tokens": 10938},
+    {"name": "math-definite-integral", "status": "PASS", "ms": 30377, "tokens": 13348},
+    {"name": "quixbugs-python-gcd", "status": "PASS", "ms": 12945, "tokens": 7942},
+    {"name": "quixbugs-python-levenshtein", "status": "PASS", "ms": 17303, "tokens": 8599},
+    {"name": "games-sha-puzzle", "status": "PASS", "ms": 78265, "tokens": 14046},
+    {"name": "security-sql-injection", "status": "PASS", "ms": 29881, "tokens": 18652},
+    {"name": "perf-slow-sort", "status": "PASS", "ms": 31168, "tokens": 15047}
+  ]
+}
