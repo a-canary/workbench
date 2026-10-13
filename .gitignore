@@ -11,3 +11,7 @@ scratch/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Auto-generated sweep artifacts
+.sweep-skills/
+BENCH/
