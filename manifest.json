@@ -21,6 +21,11 @@
       "ref": "main",
       "path": "pi/extensions",
       "dest": "~/.pi/agent/extensions"
+    },
+    "health-monitor": {
+      "path": "services/health",
+      "schedule": "*/5",
+      "description": "Service health probes with Discord alerts"
     }
   },
   "bench": {
