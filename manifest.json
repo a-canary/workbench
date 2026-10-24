@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "image-qa-toolkit": {
+      "path": "image-qa-toolkit",
+      "status": "wip",
+      "vet": "no test suite yet; prove via benchmark/run_benchmarks.py smoke on fixture screenshots vs benchmark_results.json baseline"
     }
   },
   "bench": {

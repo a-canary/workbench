@@ -1,0 +1,59 @@
+{
+  "benchmarks": [
+    {
+      "tool": "pixelmatch (image_diff.py)",
+      "category": "visual_regression",
+      "task": "detect_diff",
+      "elapsed_ms": 151.58,
+      "success": true,
+      "output_summary": "diff_ratio=0.0077, 7412 pixels changed, pass=False",
+      "error": null
+    },
+    {
+      "tool": "OpenCV (Canny edges)",
+      "category": "edge_detection",
+      "task": "detect_edges",
+      "elapsed_ms": 35.22,
+      "success": true,
+      "output_summary": "edge_density=0.0108",
+      "error": null
+    },
+    {
+      "tool": "OpenCV (layout analysis)",
+      "category": "layout",
+      "task": "analyze_layout",
+      "elapsed_ms": 37.58,
+      "success": true,
+      "output_summary": "elements=1, size={'width': 1200, 'height': 800}",
+      "error": null
+    },
+    {
+      "tool": "WCAG contrast formula (built-in)",
+      "category": "color_contrast",
+      "task": "calculate_contrast",
+      "elapsed_ms": 0.03,
+      "success": true,
+      "output_summary": "white on dark blue: 9.3:1; black on white: 21.0:1; light gray on white: 3.0:1; blue button text: 3.2:1",
+      "error": null
+    },
+    {
+      "tool": "fonttools",
+      "category": "typography",
+      "task": "font_metrics",
+      "elapsed_ms": 20.18,
+      "success": true,
+      "output_summary": "font=ipagp.ttf, unitsPerEm=2048, ascent=1802, descent=-246",
+      "error": null
+    },
+    {
+      "tool": "imagededup (pHash)",
+      "category": "image_dedup",
+      "task": "find_duplicates",
+      "elapsed_ms": 3671.39,
+      "success": true,
+      "output_summary": "3 images hashed, 3 duplicate groups found",
+      "error": null
+    }
+  ],
+  "timestamp": "2026-09-21 15:47:50"
+}

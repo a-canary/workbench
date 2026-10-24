@@ -1,0 +1,24 @@
+# Image QA Toolkit for qwen3.8-27B on V100
+# Core CV
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+scipy>=1.10.0
+
+# Image deduplication
+imagededup>=0.4.0
+
+# Visual diff
+pixelmatch-py>=0.2.0
+
+# OCR (fallback)
+paddleocr>=2.7.0
+paddlepaddle>=2.5.0
+
+# Benchmark
+pyyaml>=6.0
+tqdm>=4.65.0
+requests>=2.31.0
+
+# VLM client (for qwen3.8-27B API calls)
+openai>=1.30.0
