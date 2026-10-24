@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "arc-agents": {
+      "path": "arc-agents",
+      "status": "wip",
+      "vet": "own tests (bun 1332/8 = source) + decide retire-vs-keep per subsystem: bookie/ledger superseded by beads"
     }
   },
   "bench": {
