@@ -10,21 +10,32 @@ import { homedir } from "node:os";
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 const HOOK = join(REPO, "hooks", "pre-tool-use.sh");
 
-function runHook(tool: string, payload: string) {
-  const r = spawnSync("bash", [HOOK, tool, payload], { encoding: "utf8" });
-  return { stdout: r.stdout, status: r.status ?? 1 };
+// Real Claude Code contract: JSON on stdin, exit 2 + stderr blocks.
+function runHook(tool: string, command: string) {
+  const input = JSON.stringify({ tool_name: tool, tool_input: { command } });
+  const r = spawnSync("bash", [HOOK], { input, encoding: "utf8" });
+  return { stdout: r.stderr, status: r.status ?? 1 };
 }
 
 test("blocks rm -rf", () => {
   const r = runHook("Bash", "rm -rf /tmp/foo");
-  expect(r.status).toBe(1);
+  expect(r.status).toBe(2);
   expect(r.stdout).toMatch(/HOOK_BLOCKED/);
 });
 
 test("blocks git push --force", () => {
   const r = runHook("Bash", "git push --force origin main");
-  expect(r.status).toBe(1);
+  expect(r.status).toBe(2);
   expect(r.stdout).toMatch(/HOOK_BLOCKED/);
+});
+
+test("blocks rm -fr and rm -f", () => {
+  expect(runHook("Bash", "cd /x && rm -fr build").status).toBe(2);
+  expect(runHook("Bash", "rm -f a.txt").status).toBe(2);
+});
+
+test("ignores non-Bash tools", () => {
+  expect(runHook("Write", "rm -rf /").status).toBe(0);
 });
 
 test("allows benign Bash", () => {
