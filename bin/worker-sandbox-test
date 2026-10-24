@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# worker-sandbox-test — prove the jail holds. Needs the private-lane endpoint up.
+#   worker-sandbox-test [WORKTREE]   (default: throwaway git worktree of this repo)
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+port=${WORKER_PRIVATE_PORT:-8099}
+
+wt=${1:-}
+if [ -z "$wt" ]; then
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/sbx-test.XXXXXX")/wt
+  git -C "$here" worktree add -q --detach "$wt" HEAD || exit 2
+  trap 'git -C "$here" worktree remove --force "$wt"' EXIT
+fi
+
+# each line: expectation<TAB>shell check run inside the jail (exit 0 = expectation met)
+checks=$(cat <<EOF
+no password store	! ls "$HOME/.password-store" 2>/dev/null
+no ssh keys	! ls "$HOME/.ssh" 2>/dev/null
+no vault	! ls "$HOME/vault" 2>/dev/null
+no claude config	! ls "$HOME/.claude" 2>/dev/null
+no gnupg	! ls "$HOME/.gnupg" 2>/dev/null
+host home invisible	[ "\$(ls /home)" = worker ]
+worktree writable	touch /work/.sbx-probe && rm /work/.sbx-probe
+/usr read-only	! touch /usr/.sbx-probe 2>/dev/null
+/etc read-only	! touch /etc/.sbx-probe 2>/dev/null
+.git masked	! git -C /work log -1 >/dev/null 2>&1
+host pids invisible	[ "\$(ls /proc | grep -c '^[0-9]')" -lt 20 ]
+env carries no secrets	! env | grep -Eiq '^[^=]*(key|token|secret|pass)'
+internet blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+dns blocked	! curl -s -m 3 -o /dev/null https://github.com
+other localhost blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/
+public lane port blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:20128/v1/models
+endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/v1/models
+EOF
+)
+
+fail=0
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$checks"
+
+# fail-closed: public lane must refuse a non-PUBLIC (or unresolvable) repo
+nogh=$(mktemp -d)
+if "$here/worker-sandbox" --worktree "$nogh" --lane public --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses non-github dir"; fail=1
+else echo "PASS  public lane refuses non-github dir"; fi
+rmdir "$nogh"
+
+exit $fail
