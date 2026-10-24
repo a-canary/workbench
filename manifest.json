@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "director": {
+      "path": "director",
+      "status": "wip",
+      "vet": "own tests (bun test 129/0) + write-lane hook verdict probe; not pass-rate benchable"
     }
   },
   "bench": {
