@@ -27,9 +27,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -d "$wt" ] && [ -f "$task" ] && [ -n "$test" ] && [ -n "$lane" ] || die "--worktree --lane --task --test required"
-git -C "$wt" diff --quiet HEAD && [ -z "$(git -C "$wt" status --porcelain)" ] || die "worktree not clean"
+# host git never runs worker-controlled config (fsmonitor) and never descends into submodules
+g() { git -C "$wt" -c core.fsmonitor= "$@"; }
+g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] || die "worktree not clean"
 
-sbx() { "$here/worker-sandbox" --worktree "$wt" --lane "$lane" "$@"; }
+sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 log() { echo "worker-task: $*" >&2; }
 
 mapfile -t protected < <(git -C "$wt" show --name-only --format= HEAD)
@@ -43,9 +45,12 @@ t0=$(date +%s)
 sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
 log "worker took $(( $(date +%s) - t0 ))s"
 
-git -C "$wt" diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
-git -C "$wt" add -A
-git -C "$wt" diff --cached --quiet && die "worker produced no changes"
+# a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
+[ -z "$(find "$wt" -mindepth 2 -name .git -print -quit)" ] || die "worker created a nested .git"
+g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
+g add -A
+g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
+g diff --cached --quiet && die "worker produced no changes"
 
 log "GREEN: $test"
 sbx --timeout 300 --exec sh -c "$test" >&2 || die "test still fails after worker"

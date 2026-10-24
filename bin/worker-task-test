@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# worker-task-test — host-side guards of worker-task, no LLM needed.
+# A stub replaces worker-sandbox: --exec runs the command, --task plays a hostile worker.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+wt=$2; cd "$wt" || exit 9
+while [ $# -gt 0 ]; do [ "$1" = --exec ] && { shift; exec "$@"; }; shift; done
+touch ok && eval "$ATTACK"
+EOF
+chmod +x "$tmp/stub"
+
+# $1 name, $2 attack (run as the worker, in the worktree), $3 expected rc class: ok|refused
+run() {
+  local wt="$tmp/wt-$RANDOM"
+  git init -q "$wt"
+  echo 'test -f ok' > "$wt/t.sh"
+  git -C "$wt" add t.sh && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm red
+  echo 'make ok exist' > "$tmp/task"
+  rm -f "$tmp/pwned"
+  ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane private \
+    --task "$tmp/task" --test 'sh t.sh' >/dev/null 2>&1
+  local rc=$?
+  git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
+  if [ -e "$tmp/pwned" ]; then echo "FAIL  $1 (host code ran)"; fail=1
+  elif [ "$3" = ok ] && [ $rc -ne 0 ]; then echo "FAIL  $1 (rc=$rc)"; fail=1
+  elif [ "$3" = refused ] && [ $rc -eq 0 ]; then echo "FAIL  $1 (not refused)"; fail=1
+  else echo "PASS  $1"; fi
+}
+
+run "honest worker commits" 'true' ok
+run "nested repo fsmonitor refused" "git init -q sub && touch sub/f && git -C sub add f && git -C sub -c user.name=x -c user.email=x@x commit -qm x && git -C sub config core.fsmonitor 'touch $tmp/pwned' && touch sub/g" refused
+run "nested .git file refused" "mkdir d && echo 'gitdir: /tmp' > d/.git" refused
+exit $fail
