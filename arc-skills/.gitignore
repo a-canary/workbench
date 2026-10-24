@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+
+
+# git worktrees created inside the repo. Worker worktrees belong at
+# ~/worktrees/<repo>-<slug>/ (per arc-agents/CLAUDE.md); an embedded one is
+# almost always stale and pollutes `git status`.
+.claude/worktrees/
+
+# (skills/ gitignore block removed — all skills are tracked content)
+
+
+.env
+.env.*
+!.env.example
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
