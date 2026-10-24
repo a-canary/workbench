@@ -9,12 +9,12 @@
 #   sudo cp systemd/arc-factory.logrotate /etc/logrotate.d/arc-factory
 #
 # The system logrotate cron (/etc/cron.daily/logrotate) will then rotate
-# this file. `su aaron aaron` lets root touch the user-owned file.
+# this file. `su <user> <group>` lets root touch the user-owned file.
 # `copytruncate` is used because the systemd unit opens the log with
 # `StandardOutput=append:` — there is no SIGHUP path to make it reopen.
 
-/home/aaron/.cache/arc-factory.log {
-    su aaron aaron
+/home/<user>/.cache/arc-factory.log {
+    su <user> <group>
     daily
     rotate 7
     maxsize 10M

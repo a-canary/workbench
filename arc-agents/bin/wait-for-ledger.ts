@@ -1,4 +1,4 @@
-#!/home/aaron/.bun/bin/bun
+#!/usr/bin/env bun
 // Poll ~/vault/ledger.db every 3s. Emit one JSON line to stdout when
 // claimable rows exist for the given mode. Silent when zero.
 // Consumed by claude Monitor tool in interactive panes.
