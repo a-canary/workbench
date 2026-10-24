@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "evolutionary": {
+      "path": "evolutionary",
+      "status": "wip",
+      "vet": "own suite (vitest 47/52; 5 pre-existing heuristics failures must go green) + tsc --noEmit clean; not pass-rate benchable"
     }
   },
   "bench": {

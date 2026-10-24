@@ -1,0 +1,48 @@
+{
+  "name": "evolutionary",
+  "version": "1.0.0",
+  "description": "TypeScript library for running Evolutionary Algorithms on LLM artifacts — prompts, skills, configs, pipelines, code",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/a-canary/workbench",
+    "directory": "evolutionary"
+  },
+  "keywords": [
+    "evolutionary-algorithm",
+    "ea",
+    "genetic-algorithm",
+    "llm-evolution",
+    "prompt-evolution",
+    "text-evolution",
+    "hyperparameter-optimization",
+    " Hermes"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "example:preamble": "ts-node examples/01-preamble-evolution.ts",
+    "example:config": "ts-node examples/02-config-evolution.ts",
+    "example:pipeline": "ts-node examples/03-pipeline-llm-judge.ts",
+    "test": "ts-node --evaluate 'console.log(\"ok\")'",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src/"
+  ]
+}

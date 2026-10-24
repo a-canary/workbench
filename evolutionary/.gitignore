@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+*.js.map
+*.d.ts.map
+
+# logs
+ea_log*.jsonl
+lineage_postmortem/
+*.log
+
+# temp / scratch
+tmp/
+.tmp/
+.DS_Store
+*.swp
+*.swo
+
+# env
+.env
+.env.local
+
+# outputs from runs
+ea_out/
+ea_results/
+out/
+
+# ide
+.vscode/
+.idea/
+*.iml
+
+# archive
+.archive/
+.env.*
+!.env.example
