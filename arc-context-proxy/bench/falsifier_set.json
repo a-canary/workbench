@@ -1,0 +1,506 @@
+[
+ {
+  "instance_id": "instance_ansible__ansible-935528e22e5283ee3f63a8772830d3d01f55ed8c-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 63348,
+  "n_files": 8,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-935528e22e5283ee3f63a8772830d3d01f55ed8c-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 43104,
+  "n_files": 8,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-a02e22e902a69aeb465f16bf03f7f5a91b2cb828-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 40560,
+  "n_files": 5,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-a02e22e902a69aeb465f16bf03f7f5a91b2cb828-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-a26c325bd8f6e2822d9d7e62f77a424c1db4fbf6-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 41148,
+  "n_files": 5,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-a26c325bd8f6e2822d9d7e62f77a424c1db4fbf6-v0f01c69f1e2528b935359cfe578530722bca2c59"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 41520,
+  "n_files": 5,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-bec27fb4c0a40c5f8bbcf26a475704227d65ee73-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 40536,
+  "n_files": 7,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-bec27fb4c0a40c5f8bbcf26a475704227d65ee73-v30a923fb5c164d6cd18280c02422f75e611e8fb2"
+ },
+ {
+  "instance_id": "instance_ansible__ansible-d33bedc48fdd933b5abd65a77c081876298e2f07-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "repo": "ansible/ansible",
+  "est_read_tokens": 54288,
+  "n_files": 7,
+  "lang": "python",
+  "dockerhub_tag": "ansible.ansible-ansible__ansible-d33bedc48fdd933b5abd65a77c081876298e2f07-v0f01c69f1e2528b935359cfe578530722bca2c59"
+ },
+ {
+  "instance_id": "instance_element-hq__element-web-71fe08ea0f159ccb707904d87f0a4aef205a167c-vnan",
+  "repo": "element-hq/element-web",
+  "est_read_tokens": 53832,
+  "n_files": 8,
+  "lang": "js",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-71fe08ea0f159ccb707904d87f0a4aef205a167c"
+ },
+ {
+  "instance_id": "instance_element-hq__element-web-9a31cd0fa849da810b4fac6c6c015145e850b282-vnan",
+  "repo": "element-hq/element-web",
+  "est_read_tokens": 42012,
+  "n_files": 3,
+  "lang": "js",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-9a31cd0fa849da810b4fac6c6c015145e850b282"
+ },
+ {
+  "instance_id": "instance_element-hq__element-web-aeabf3b18896ac1eb7ae9757e66ce886120f8309-vnan",
+  "repo": "element-hq/element-web",
+  "est_read_tokens": 49428,
+  "n_files": 8,
+  "lang": "js",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-aeabf3b18896ac1eb7ae9757e66ce886120f8309"
+ },
+ {
+  "instance_id": "instance_element-hq__element-web-e15ef9f3de36df7f318c083e485f44e1de8aad17",
+  "repo": "element-hq/element-web",
+  "est_read_tokens": 48276,
+  "n_files": 6,
+  "lang": "js",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-e15ef9f3de36df7f318c083e485f44e1de8aad17"
+ },
+ {
+  "instance_id": "instance_element-hq__element-web-f63160f38459fb552d00fcc60d4064977a9095a6-vnan",
+  "repo": "element-hq/element-web",
+  "est_read_tokens": 42996,
+  "n_files": 3,
+  "lang": "js",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-f63160f38459fb552d00fcc60d4064977a9095a6"
+ },
+ {
+  "instance_id": "instance_flipt-io__flipt-86906cbfc3a5d3629a583f98e6301142f5f14bdb-v6bea0cc3a6fc532d7da914314f2944fc1cd04dee",
+  "repo": "flipt-io/flipt",
+  "est_read_tokens": 68436,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-86906cbfc3a5d3629a583f98e6301142f5f14bdb-v6bea0cc3a6fc532d7da914314f2944fc1cd04dee"
+ },
+ {
+  "instance_id": "instance_flipt-io__flipt-967855b429f749c28c112b8cb1b15bc79157f973",
+  "repo": "flipt-io/flipt",
+  "est_read_tokens": 70284,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-967855b429f749c28c112b8cb1b15bc79157f973"
+ },
+ {
+  "instance_id": "instance_flipt-io__flipt-aebaecd026f752b187f11328b0d464761b15d2ab",
+  "repo": "flipt-io/flipt",
+  "est_read_tokens": 41904,
+  "n_files": 3,
+  "lang": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-aebaecd026f752b187f11328b0d464761b15d2ab"
+ },
+ {
+  "instance_id": "instance_flipt-io__flipt-cf06f4ebfab7fa21eed3e5838592e8e44566957f",
+  "repo": "flipt-io/flipt",
+  "est_read_tokens": 67296,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-cf06f4ebfab7fa21eed3e5838592e8e44566957f"
+ },
+ {
+  "instance_id": "instance_flipt-io__flipt-e42da21a07a5ae35835ec54f74004ebd58713874",
+  "repo": "flipt-io/flipt",
+  "est_read_tokens": 79188,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-e42da21a07a5ae35835ec54f74004ebd58713874"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-3f8de0268376e1f0fa6d9d61abb0d9d3d580ea7d",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 50280,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-3f8de0268376e1f0fa6d9d61abb0d9d3d580ea7d"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-4a72295de7b91faa59d90a5bee91535bbe76755d",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 46608,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-4a72295de7b91faa59d90a5bee91535bbe76755d"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-78b52d6a7f480bd610b692de9bf0c86f57332f23",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 48384,
+  "n_files": 8,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-78b52d6a7f480bd610b692de9bf0c86f57332f23"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-83bcca6e669ba2e4102f26c4a2b52f78c7861f1a",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 53316,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-83bcca6e669ba2e4102f26c4a2b52f78c7861f1a"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-9aa0d87a21bede91c2b45c32187456bb69455e92",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 41340,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-9aa0d87a21bede91c2b45c32187456bb69455e92"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-ad2edbb8448e2c41a097f1c0b52696c0f6c5924d",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 40116,
+  "n_files": 8,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-ad2edbb8448e2c41a097f1c0b52696c0f6c5924d"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-e049df50fa1eecdccc5348e27845b5c783ed7c76-v73dc95f6b90883d8a87e01e5e9bb6d3cc32add6d",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 66636,
+  "n_files": 8,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-e049df50fa1eecdccc5348e27845b5c783ed7c76-v73dc95f6b90883d8a87e01e5e9bb6d3cc32add6d"
+ },
+ {
+  "instance_id": "instance_future-architect__vuls-f0b3a8b1db98eb1bd32685f1c36c41a99c3452ed",
+  "repo": "future-architect/vuls",
+  "est_read_tokens": 51228,
+  "n_files": 6,
+  "lang": "go",
+  "dockerhub_tag": "future-architect.vuls-future-architect__vuls-f0b3a8b1db98eb1bd32685f1c36c41a99c3452ed"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-3fa6904377c006497169945428e8197158667910-v626ec2a48416b10a88641359a169d99e935ff037",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 54528,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-3fa6904377c006497169945428e8197158667910-v626ec2a48416b10a88641359a169d99e935ff03"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-6a14edcf1ff010172fdbac622d0a474ed6af46de",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 48948,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-6a14edcf1ff010172fdbac622d0a474ed6af46de"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-769b4b5eec7286b7b14e179f2cc52e6b15d2d9f3-v626ec2a48416b10a88641359a169d99e935ff037",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 45228,
+  "n_files": 6,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-769b4b5eec7286b7b14e179f2cc52e6b15d2d9f3-v626ec2a48416b10a88641359a169d99e935ff03"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-af5e2517de7d18406b614e413aca61c319312171-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 48204,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-af5e2517de7d18406b614e413aca61c319312171-vee9b09fb20c43af7e520f57e9239bbcf46b7113"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-b5d8169fc0a5e43fee2616c905c6d32164654dc6",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 42300,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-b5d8169fc0a5e43fee2616c905c6d32164654dc6"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-ba6c4a135412c4296dd5551bd94042f0dc024504-v626ec2a48416b10a88641359a169d99e935ff037",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 44136,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-ba6c4a135412c4296dd5551bd94042f0dc024504-v626ec2a48416b10a88641359a169d99e935ff03"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-c782838c3a174fdff80cafd8cd3b1aa4dae8beb2",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 52080,
+  "n_files": 6,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-c782838c3a174fdff80cafd8cd3b1aa4dae8beb2"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-d873ea4fa67d3132eccba39213c1ca2f52064dcc-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 69972,
+  "n_files": 7,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-d873ea4fa67d3132eccba39213c1ca2f52064dcc-vce94f93ad1030e3136852817f2423c1b3ac37bc"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-db89206db6c2969266e664c7c0fb51b70e958b64",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 84984,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-db89206db6c2969266e664c7c0fb51b70e958b64"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-dd3977957a67bedaf604ad6ca255ba8c7b6704e9",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 40380,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-dd3977957a67bedaf604ad6ca255ba8c7b6704e9"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-e6681abe6a7113cfd2da507f05581b7bdf398540-v626ec2a48416b10a88641359a169d99e935ff037",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 77460,
+  "n_files": 8,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-e6681abe6a7113cfd2da507f05581b7bdf398540-v626ec2a48416b10a88641359a169d99e935ff03"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-e6d86299a855687b21970504fbf06f52a8f80c74-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 54888,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-e6d86299a855687b21970504fbf06f52a8f80c74-vce94f93ad1030e3136852817f2423c1b3ac37bc"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-fb0ab2b9b771377a689fd0d0374777c251e58bbf",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 53124,
+  "n_files": 5,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-fb0ab2b9b771377a689fd0d0374777c251e58bbf"
+ },
+ {
+  "instance_id": "instance_gravitational__teleport-fd2959260ef56463ad8afa4c973f47a50306edd4",
+  "repo": "gravitational/teleport",
+  "est_read_tokens": 46032,
+  "n_files": 4,
+  "lang": "go",
+  "dockerhub_tag": "gravitational.teleport-gravitational__teleport-fd2959260ef56463ad8afa4c973f47a50306edd4"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-09865f5fb549694d969f0a8e49b9d204ef1853ca-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 55524,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-09865f5fb549694d969f0a8e49b9d204ef1853ca-ve8c8d62a2b60610a3c4631f5f23ed"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-308a35d6999427c02b1dbf5211c033ad3b352556-ve8c8d62a2b60610a3c4631f5f23ed866bada9818",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 47808,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-308a35d6999427c02b1dbf5211c033ad3b352556-ve8c8d62a2b60610a3c4631f5f23ed"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-4a5d2a7d24c9e4c11d3069220c0685b736d5ecde-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 79284,
+  "n_files": 3,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-4a5d2a7d24c9e4c11d3069220c0685b736d5ecde-v13642507b4fc1f8d234172bf81299"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-5fb312632097be7e9ac6ab657964af115224d15d-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 45072,
+  "n_files": 8,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-5fb312632097be7e9ac6ab657964af115224d15d-v0f5aece3601a5b4419f7ccec1dbda"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-6a117fab6c963b74dc1ba907d838e74f76d34a4b-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 50160,
+  "n_files": 7,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-6a117fab6c963b74dc1ba907d838e74f76d34a4b-v13642507b4fc1f8d234172bf81299"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-6fdbbeee4c0a7e976ff3e46fb1d36f4eb110c428-v08d8e8889ec945ab821fb156c04c7d2e2810debb",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 44664,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-6fdbbeee4c0a7e976ff3e46fb1d36f4eb110c428-v08d8e8889ec945ab821fb156c04c7"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 47712,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-e010b2a13697de70170033902ba2e27a1e1acbe9-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 50304,
+  "n_files": 7,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-e010b2a13697de70170033902ba2e27a1e1acbe9-v0f5aece3601a5b4419f7ccec1dbda"
+ },
+ {
+  "instance_id": "instance_internetarchive__openlibrary-e1e502986a3b003899a8347ac8a7ff7b08cbfc39-v08d8e8889ec945ab821fb156c04c7d2e2810debb",
+  "repo": "internetarchive/openlibrary",
+  "est_read_tokens": 55464,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "internetarchive.openlibrary-internetarchive__openlibrary-e1e502986a3b003899a8347ac8a7ff7b08cbfc39-v08d8e8889ec945ab821fb156c04c7"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-0aa57e4f7243024fa4bba8853306691b5dbd77b3-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 65964,
+  "n_files": 3,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-0aa57e4f7243024fa4bba8853306691b5dbd77b3-v5149fcda2a9a6fe1d35dfed1bade1444a11ef"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-16de05407111ddd82fa12e54389d532362489da9-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 51372,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-16de05407111ddd82fa12e54389d532362489da9-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-233cb1cc48635130e5602549856a6fa4ab4c087f-v35616345bb8052ea303186706cec663146f0f184",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 72876,
+  "n_files": 7,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-233cb1cc48635130e5602549856a6fa4ab4c087f-v35616345bb8052ea303186706cec663146f0f"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-2e961080a85d660148937ee8f0f6b3445a8f2c01-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 56904,
+  "n_files": 3,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-2e961080a85d660148937ee8f0f6b3445a8f2c01-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 51372,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-473a15f7908f2bb6d670b0e908ab34a28d8cf7e2-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-66cfa15c372fa9e613ea5a82d3b03e4609399fb6-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 54420,
+  "n_files": 5,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-66cfa15c372fa9e613ea5a82d3b03e4609399fb6-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-8cd06741bb56cdca49f5cdc0542da97681154315-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 65652,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-8cd06741bb56cdca49f5cdc0542da97681154315-v5149fcda2a9a6fe1d35dfed1bade1444a11ef"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-99029144b5109bb1b2a53964a7c129e009980cd9-va0fd88aac89cde702ec1ba84877234da33adce8a",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 66600,
+  "n_files": 5,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-99029144b5109bb1b2a53964a7c129e009980cd9-va0fd88aac89cde702ec1ba84877234da33adc"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-9b71c1ea67a9e7eb70dd83214d881c2031db6541-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 51372,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-9b71c1ea67a9e7eb70dd83214d881c2031db6541-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 43152,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-ef5ba1a0360b39f9eff027fbdc57f363597c3c3b-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 51372,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-ef5ba1a0360b39f9eff027fbdc57f363597c3c3b-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-f8e7fea0becae25ae20606f1422068137189fe9e",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 57504,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-f8e7fea0becae25ae20606f1422068137189fe9e"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 81000,
+  "n_files": 6,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c"
+ },
+ {
+  "instance_id": "instance_qutebrowser__qutebrowser-ff1c025ad3210506fc76e1f604d8c8c27637d88e-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+  "repo": "qutebrowser/qutebrowser",
+  "est_read_tokens": 49440,
+  "n_files": 4,
+  "lang": "python",
+  "dockerhub_tag": "qutebrowser.qutebrowser-qutebrowser__qutebrowser-ff1c025ad3210506fc76e1f604d8c8c27637d88e-v363c8a7e5ccdf6968fc7ab84a2053ac780366"
+ },
+ {
+  "instance_id": "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+  "repo": "tutao/tutanota",
+  "est_read_tokens": 56784,
+  "n_files": 8,
+  "lang": "ts",
+  "dockerhub_tag": "tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b"
+ }
+]

@@ -1,0 +1,18 @@
+{
+    "job_name": "armA-sweep",
+    "jobs_dir": "bench/jobs",
+    "n_concurrent_trials": 1,
+    "agents": [
+        {
+            "name": "harness.pi_proxy_agent:PiDirect",
+            "model_name": "deepseek-ai/DeepSeek-V4-Flash"
+        }
+    ],
+    "datasets": [
+        {
+            "name": "terminal-bench",
+            "version": "2.0",
+            "task_names": ["build-cython-ext", "regex-chess", "fix-code-vulnerability"]
+        }
+    ]
+}

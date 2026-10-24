@@ -1,0 +1,47 @@
+{
+    "id": "1e6a7b1a-ff93-43dd-9d53-7db8432dd7a7",
+    "started_at": "2026-08-04T00:24:26.694015",
+    "updated_at": "2026-08-04T00:56:41.204095",
+    "finished_at": "2026-08-04T00:56:41.204095",
+    "n_total_trials": 3,
+    "stats": {
+        "n_completed_trials": 3,
+        "n_errored_trials": 1,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "pi-direct__DeepSeek-V4-Flash__terminal-bench": {
+                "n_trials": 3,
+                "n_errors": 1,
+                "metrics": [
+                    {
+                        "mean": 0.3333333333333333
+                    }
+                ],
+                "pass_at_k": {},
+                "reward_stats": {
+                    "reward": {
+                        "0.0": [
+                            "regex-chess__3YWLKfj",
+                            "build-cython-ext__b98NRwS"
+                        ],
+                        "1.0": [
+                            "fix-code-vulnerability__baufi48"
+                        ]
+                    }
+                },
+                "exception_stats": {
+                    "AgentTimeoutError": [
+                        "build-cython-ext__b98NRwS"
+                    ]
+                }
+            }
+        },
+        "n_input_tokens": 2564507,
+        "n_cache_tokens": 0,
+        "n_output_tokens": 47864,
+        "cost_usd": null
+    }
+}

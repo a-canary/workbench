@@ -1,0 +1,30 @@
+{
+  "run_id": "quick-check-2026-08-05",
+  "timestamp": "2026-08-05T22:23:00.000Z",
+  "proxy_url": "http://127.0.0.1:7890/v1/chat/completions",
+  "models_tested": [
+    {
+      "model": "featherless/deepseek-ai/DeepSeek-V4-Flash",
+      "census_count": 2,
+      "census_calls": 1,
+      "census_ms": 5256,
+      "census_tokens": 210,
+      "baseline_count": null,
+      "baseline_ms": null,
+      "baseline_tokens": 70,
+      "status": "pass"
+    },
+    {
+      "model": "kimi-k3",
+      "census_count": 2,
+      "census_calls": 1,
+      "census_ms": 7680,
+      "census_tokens": 208,
+      "baseline_count": null,
+      "baseline_ms": null,
+      "baseline_tokens": 171,
+      "status": "pass"
+    }
+  ],
+  "notes": "Smoke test: 4-unit billing-census task. Both models return correct count=2 via census path. Baseline path fails because the prompt template expects full task content injection; this is expected behavior for a bare prompt smoke test."
+}

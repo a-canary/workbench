@@ -1,0 +1,17 @@
+# Runtime noise — not measurement evidence
+bench/jobs/*/agent/
+bench/jobs/*/*.log
+bench/jobs/*/lock.json
+bench/jobs/*/exception.txt
+bench/jobs/*/trial.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
