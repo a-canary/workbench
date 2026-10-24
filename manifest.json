@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "arc-skills": {
+      "path": "arc-skills",
+      "status": "wip",
+      "vet": "harness-bench smoke: cand-arc-skills vs pi baseline, same model+day"
     }
   },
   "bench": {
