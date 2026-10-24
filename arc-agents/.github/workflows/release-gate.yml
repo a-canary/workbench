@@ -1,0 +1,57 @@
+name: Release Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+      - release/**
+  push:
+    branches:
+      - main
+      - release/**
+
+jobs:
+  release-gate:
+    name: Release Gate
+    runs-on: ubuntu-latest
+    # Only block merge on PRs targeting main or release/* — skip on direct push to main
+    if: github.event_name == 'push' || github.event.pull_request.head.ref != github.event.pull_request.base.ref
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 — full history + all branches so origin/main exists.
+          # Several tests anchor on the 'main' / 'origin/main' refs (worker-shell
+          # worktree base, ledger merge-base verification). The default shallow,
+          # detached-HEAD checkout has neither, so those tests fail only in CI.
+          fetch-depth: 0
+
+      - name: Provide local main ref (tests use 'main' as worktree base)
+        # PR builds check out a detached merge commit with no local 'main'
+        # branch; create one from origin/main when missing. On push-to-main
+        # builds 'main' is already checked out, so this is a no-op.
+        run: git rev-parse --verify --quiet main >/dev/null || git branch main origin/main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install gitleaks
+        # estate-secret-inventory shells out to gitleaks; runner lacks it
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz \
+            | tar xz -C /usr/local/bin gitleaks
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+        timeout-minutes: 5
+
+  # Future: extend to run cc plugin tests when cc/ workspace is added.
+  # When multiple plugin suites exist, matrix over ${{ matrix.suite }}
+  # and set 'cc-plugin-tests' job with `working-directory: plugins/${{ matrix.suite }}`.

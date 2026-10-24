@@ -1,0 +1,59 @@
+{
+  "model": "claude-opus-4-7",
+  "alwaysThinkingEnabled": false,
+  "effortLevel": "max",
+  "autoCompactWindow": 100000,
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(docker build:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker run --rm arcsim:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/pre-tool-use.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/session-start.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/stop.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/session-end.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

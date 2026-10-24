@@ -1,0 +1,25 @@
+{
+  "agent": "director",
+  "context_summary": "Ledger-side claimant for kind=prd rows (PRD-review-gate intake: grill-with-docs to align scope/intent, choose-wisely to cascade CHOICES.md; HITL prompts via arc-ux modules; decomposes aligned intent into ledger rows via bookie). Deprecated as the canonical mission-planning role \u2014 see a-canary/arc-skills' /director skill, which is self-sufficient (own feedback watcher, 12hr cron backstop, flat-file PRD.md by default) and arc-agents-optional. This profile remains only as one possible planning-target binding (a ledger-backed kind=prd queue) for repos that opt into it. Never edits repo code directly \u2014 delegates via tasks.",
+  "context_files": [
+    "roles/AGENTS.md",
+    "CLAUDE.md",
+    "CONTEXT.md",
+    "CHOICES.md",
+    "PRD-v1.md"
+  ],
+  "boot_skills": [
+    "ke-recall",
+    "grill-with-docs",
+    "choose-wisely",
+    "to-prd",
+    "to-issues",
+    "triage"
+  ],
+  "stop_skills": [
+    "ke-learn"
+  ],
+  "exec_cli_alias": "opus-max",
+  "max_concurrency": 1,
+  "worktree": false
+}
