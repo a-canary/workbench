@@ -1,0 +1,20 @@
+{
+  "name": "context-graph",
+  "version": "0.0.1",
+  "type": "module",
+  "engines": {
+    "node": ">=23"
+  },
+  "scripts": {
+    "demo": "node src/demo.js",
+    "test": "node src/test.js",
+    "loop": "node src/loop.js",
+    "test:loop": "node src/test-loop.js",
+    "test:harness": "node src/test-harness-v2.js",
+    "test:budget": "node src/test-budget-compute.js",
+    "harness": "node src/harness-cli.js"
+  },
+  "keywords": ["context", "graph", "buffer", "location-tagged"],
+  "author": "arc-agents",
+  "license": "MIT"
+}

@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "context-graph": {
+      "path": "context-graph",
+      "status": "wip",
+      "vet": "own tests (npm test 10/0, test:loop 7/7, test:harness 3 checks, test:budget 14/0) + harness-bench toy canary vs flat-truncation baseline"
     }
   },
   "bench": {
