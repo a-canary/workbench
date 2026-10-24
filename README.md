@@ -68,3 +68,9 @@ This is the automation that keeps the workbench current with component improveme
 ## Manifest
 
 `manifest.json` pins the exact tested combination. Bump a component's `ref` and re-run nightly qualification before committing the manifest change.
+
+## License
+
+[PolyForm Small Business 1.0.0](LICENSE.md): free for personal use and for businesses under 100 people and US$1M revenue.
+The code is public and source-available; larger companies need a separate commercial license.
+This is not an OSI open-source license.
