@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "arc-context-proxy": {
+      "path": "arc-context-proxy",
+      "status": "wip",
+      "vet": "harness-bench smoke: cand-arc-context-proxy (model via proxy) vs pi baseline"
     }
   },
   "bench": {
