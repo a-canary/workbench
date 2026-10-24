@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# worker-task — one TDD worker run: RED -> sandboxed pi -> GREEN -> leak scan -> commit.
+#
+#   worker-task --worktree DIR --lane private|public --task FILE --test CMD \
+#               [--tools read,edit,write,bash] [--timeout 600] [--push]
+#
+# Contract: the worktree's HEAD commit is the director's failing test (RED commit).
+# The worker may not touch any file that commit touched, so it can't "pass" by
+# editing the test. Tests run inside the jail too: worker-written code never runs
+# on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
+set -euo pipefail
+
+die() { echo "worker-task: $*" >&2; exit 2; }
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+wt= lane= task= test= tools=read,edit,write,bash tmo=600 push=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --worktree) wt=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
+    --task) task=$2; shift 2 ;;
+    --test) test=$2; shift 2 ;;
+    --tools) tools=$2; shift 2 ;;
+    --timeout) tmo=$2; shift 2 ;;
+    --push) push=1; shift ;;
+    *) die "unknown arg $1" ;;
+  esac
+done
+[ -d "$wt" ] && [ -f "$task" ] && [ -n "$test" ] && [ -n "$lane" ] || die "--worktree --lane --task --test required"
+git -C "$wt" diff --quiet HEAD && [ -z "$(git -C "$wt" status --porcelain)" ] || die "worktree not clean"
+
+sbx() { "$here/worker-sandbox" --worktree "$wt" --lane "$lane" "$@"; }
+log() { echo "worker-task: $*" >&2; }
+
+mapfile -t protected < <(git -C "$wt" show --name-only --format= HEAD)
+[ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
+
+log "RED: $test"
+if sbx --timeout 300 --exec sh -c "$test" >&2; then die "test already passes — not a RED commit"; fi
+
+log "worker: lane=$lane tools=$tools"
+t0=$(date +%s)
+sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
+log "worker took $(( $(date +%s) - t0 ))s"
+
+git -C "$wt" diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
+git -C "$wt" add -A
+git -C "$wt" diff --cached --quiet && die "worker produced no changes"
+
+log "GREEN: $test"
+sbx --timeout 300 --exec sh -c "$test" >&2 || die "test still fails after worker"
+
+# leak scan: generic secrets, plus the lane key itself when one entered the jail
+(cd "$wt" && gitleaks protect --staged --redact --no-banner >&2) || die "gitleaks flagged the diff"
+if [ "$lane" = public ]; then
+  key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)}
+  git -C "$wt" diff --cached | grep -qF -- "$key" && die "lane key found in diff"
+fi
+
+subj="worker: $(head -c 60 "$task" | head -1)"
+git -C "$wt" -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL:-pi-worker@localhost}" \
+  commit -q -m "$subj" -m "Test: $test (RED->GREEN in sandbox, lane=$lane)"
+log "committed $(git -C "$wt" rev-parse --short HEAD)"
+
+if [ -n "$push" ]; then
+  git -C "$wt" push -q -u origin HEAD
+  (cd "$wt" && gh pr create --fill --head "$(git branch --show-current)")
+fi
