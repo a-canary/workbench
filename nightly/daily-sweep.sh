@@ -99,7 +99,7 @@ if [[ "$CURRENT_REF" == "main" ]]; then
         LABEL="sweep-$COMPONENT-$(date -u +%Y%m%d)"
 
         # Run benchmark (use the component's latest)
-        if run bin/bench run core --model "local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG"; then
+        if run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG"; then
             # Tests passed — update manifest
             log "$COMPONENT: tests passed, updating manifest"
 
