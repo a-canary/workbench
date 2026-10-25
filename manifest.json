@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "arc-llm-proxy": {
+      "path": "arc-llm-proxy",
+      "status": "wip",
+      "vet": "own tests (npm test 137/0, test/lane.test.ts 4/0); e2e.mjs + live routing not yet run from the fold"
     }
   },
   "bench": {

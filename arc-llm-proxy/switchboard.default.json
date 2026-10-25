@@ -1,0 +1,20 @@
+{
+  "_note": "Default switchboard for the local deploy (single endpoint: local/bonsai). Sync points when changed: arc-agents/config.json, ~/.pi/agent/models.json, arc-skills slow-lane skill, per-host deploy configs (deploy/switchboard.*.json).",
+  "endpoints": {
+    "local": { "url": "http://localhost:1234", "model": "Bonsai-27B-Q1_0.gguf" }
+  },
+  "aliases": {
+    "planning": ["local"],
+    "hard": ["local"],
+    "easy": ["local"],
+    "bench": ["local"],
+    "driver": ["local"],
+    "hygiene": ["local"]
+  },
+  "projects": {
+    "default": { "speed": 1, "mask": ["planning", "hard", "easy", "bench", "driver", "hygiene"] }
+  },
+  "maxTokens": { "ux": 16384, "non-ux": 16384 },
+  "defaultProject": "default",
+  "strict": false
+}

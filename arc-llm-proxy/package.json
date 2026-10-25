@@ -1,0 +1,14 @@
+{
+  "name": "arc-llm-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.ts",
+    "test": "node --test queue.test.ts sse-fix.test.ts test/auto-llm.test.ts test/auto-vec.test.ts",
+    "test:e2e": "node e2e.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3"
+  }
+}
