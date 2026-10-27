@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# lane-run-test — bead description parsing (the contract between decomposer and runner).
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+LANE_RUN_LIB=1 source "$here/lane-run"
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+
+d=$'Branch: lane/x-1\nTest: bun test a.test.ts\n---\nImplement a.ts.\nTest: not a header'
+check "branch"            "$(field Branch "$d")" "lane/x-1"
+check "test"              "$(field Test "$d")"   "bun test a.test.ts"
+check "body after fence"  "$(body "$d")"         $'Implement a.ts.\nTest: not a header'
+check "no fence, no body" "$(body $'Branch: b\nTest: t')" ""
+check "missing field"     "$(field Branch $'Test: t\n---\nx')" ""
+exit $fails

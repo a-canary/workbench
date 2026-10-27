@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
+#
+#   lane-run [--repo DIR] [--label lane:v100] [--once] [--idle 600]
+#
+# The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
+# model can finish: it pushes a branch whose HEAD is a failing test (the RED commit) and files
+# a bead labelled lane:v100 whose description starts with
+#   Branch: <branch>
+#   Test: <command that goes RED -> GREEN>
+#   ---
+#   <task prompt: one goal, exact files, nothing else>
+# Success: bd close with the GREEN commit (worker-task pushes it and opens the PR).
+# Failure: bd note + label qwen-failed; the decomposer re-splits it. Never retried blindly.
+# SPRINT=<cmd> (optional) is called as `$SPRINT start <repo> <id>` / `$SPRINT end <id> <outcome> <finding> seconds=<n>`.
+set -uo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+repo=$PWD label=lane:v100 once= idle=600
+while [ $# -gt 0 ]; do
+  case $1 in
+    --repo) repo=$2; shift 2 ;;
+    --label) label=$2; shift 2 ;;
+    --once) once=1; shift ;;
+    --idle) idle=$2; shift 2 ;;
+    *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+repo=$(readlink -f "$repo")
+log() { echo "lane-run: $*" >&2; }
+sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
+
+# field <name> <description> — value of the first "Name: value" header line, before the --- fence
+field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");print;exit}' <<<"$2"; }
+# body <description> — everything after the first --- fence
+body() { awk 'f{print} /^---$/{f=1}' <<<"$1"; }
+
+fail() { # fail <id> <why>
+  log "$1 FAILED: $2"
+  bd -C "$repo" note "$1" "qwen-failed: $2" >/dev/null
+  bd -C "$repo" label add "$1" qwen-failed >/dev/null
+  bd -C "$repo" update "$1" -s open -a "" >/dev/null
+}
+
+run_one() { # returns 1 when the queue is empty
+  local j id desc branch test wt task out rc t0 sha
+  j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human 2>/dev/null) || return 1
+  id=$(jq -r '.[0].id // empty' <<<"$j"); [ -n "$id" ] || return 1
+  desc=$(jq -r '.[0].description // ""' <<<"$j")
+  branch=$(field Branch "$desc") test=$(field Test "$desc")
+  bd -C "$repo" update "$id" --claim >/dev/null
+  sprint start "$repo" "$id"; t0=$(date +%s)
+  if [ -z "$branch" ] || [ -z "$test" ] || [ -z "$(body "$desc")" ]; then
+    fail "$id" "bead lacks Branch:/Test:/--- task"; sprint end "$id" blocked "malformed bead"; return 0
+  fi
+  log "▶ $id $branch"
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
+  body "$desc" >"$task"
+  if git -C "$repo" fetch -q origin "$branch" && git -C "$repo" worktree add -q -B "$branch" "$wt/wt" FETCH_HEAD; then
+    out=$("${WORKER_TASK:-$here/worker-task}" --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push 2>&1)
+    rc=$?
+  else
+    out="could not check out origin/$branch" rc=2
+  fi
+  sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
+  git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
+  if [ $rc -eq 0 ]; then
+    bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(tail -1 <<<"$out")" >/dev/null
+    log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
+  else
+    fail "$id" "$(tail -3 <<<"$out" | tr '\n' ' ')"
+    sprint end "$id" blocked "worker failed rc=$rc" seconds=$(( $(date +%s) - t0 ))
+  fi
+}
+
+[ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
+while :; do
+  run_one && continue
+  [ -n "$once" ] && exit 0
+  log "queue empty; idle ${idle}s"; sleep "$idle"
+done
