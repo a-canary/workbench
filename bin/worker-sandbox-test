@@ -78,6 +78,42 @@ net=$(cat "$wt/.ext-net" 2>/dev/null); rm -f "$wt/.ext-net"
 if [ "$net" = blocked ]; then echo "PASS  build: extension code has no internet"; else echo "FAIL  build: extension code internet='$net'"; fail=1; fi
 if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --extensions "$here/test-ext-probe.ts" --exec true >/dev/null 2>&1
 then echo "FAIL  research refuses extensions"; fail=1; else echo "PASS  research refuses extensions"; fi
+# qa profile = read-only worktree + fresh /out + one door to the app under test; chrome + img-collapse inside
+app=$(mktemp -d); echo '<h1>qa-probe</h1>' > "$app/index.html"
+aport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -m http.server "$aport" --bind 127.0.0.1 --directory "$app" >/dev/null 2>&1 & srv=$!
+for _ in $(seq 30); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$aport/" && break; sleep 0.2; done
+qchecks=$(cat <<EOF
+qa: worktree read-only	! touch /work/.sbx-probe 2>/dev/null
+qa: /out writable	touch /out/x && rm /out/x
+qa: app door reachable	curl -sf -m 5 http://127.0.0.1:\$APP_PORT/ | grep -q qa-probe
+qa: internet blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+qa: other localhost blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/
+qa: chrome screenshots app	/opt/chrome/chrome-headless-shell --no-sandbox --disable-gpu --disable-dev-shm-usage --screenshot=/out/s.png http://127.0.0.1:\$APP_PORT/ >/dev/null 2>&1; [ -s /out/s.png ]
+qa: img-collapse runs	python3 /opt/wb/img-collapse --selftest >/dev/null 2>&1
+EOF
+)
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile qa --app-port "$aport" --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$qchecks"
+kill $srv; rm -rf "$app"
+refuse() {  # name, then worker-sandbox args that must be refused
+  local n=$1; shift
+  if "$here/worker-sandbox" --worktree "$wt" --lane private "$@" --exec true >/dev/null 2>&1
+  then echo "FAIL  $n"; fail=1; else echo "PASS  $n"; fi
+}
+refuse "qa refuses bash" --profile qa --tools read,bash
+refuse "qa refuses outside extensions" --profile qa --extensions "$here/test-ext-probe.ts"
+refuse "app door only in qa" --app-port 1
+nonempty=$(mktemp -d); touch "$nonempty/f"
+refuse "qa refuses non-empty --out" --profile qa --out "$nonempty"; rm -rf "$nonempty"
+refuse "role/profile conflict refused" --role qa --profile build
+# roles: tools declared to the model come from the role file (pi JSON events, not self-report)
+got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --role qa --task "$task" --timeout 240 2>/dev/null \
+  | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+want=find,grep,img_collapse,ls,page_text,read,screenshot,write,
+if [ "$got" = "$want" ]; then echo "PASS  role qa declares exactly its tools"; else echo "FAIL  role qa declares '$got' want '$want'"; fail=1; fi
 rm -f "$task"
 if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec true >/dev/null 2>&1
 then echo "FAIL  unknown profile refused"; fail=1; else echo "PASS  unknown profile refused"; fi

@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""img-collapse: collapse dead space for VLM ingestion; crop back to raw pixels.
+
+Subcommands:
+  collapse <in> <out>                    write collapsed PNG + <out>.map.json, print stats
+  crop <orig> <sidecar> --box x0,y0,x1,y1 [--out PATH]
+                                         box in COLLAPSED coords -> crop the RAW original
+
+--selftest runs the TDD cases as asserts on generated images in /tmp.
+"""
+import argparse
+import json
+import os
+import sys
+import tempfile
+
+import numpy as np
+from PIL import Image
+
+
+def _kept(a, axis):
+    """Indices of rows/cols kept: first of each maximal run of identical neighbors."""
+    n = a.shape[axis]
+    if n <= 1:
+        return np.arange(n)
+    other = tuple(j for j in range(a.ndim) if j != axis)
+    diff = (np.take(a, list(range(1, n)), axis=axis)
+            != np.take(a, list(range(n - 1)), axis=axis)).any(axis=other)
+    return np.concatenate(([0], np.where(diff)[0] + 1))
+
+
+def collapse(in_path, out_path):
+    img = Image.open(in_path)
+    a = np.asarray(img)
+    if a.ndim < 2:
+        raise SystemExit(f"unsupported image mode {img.mode}")
+    rows = _kept(a, 0)
+    b = np.take(a, rows, axis=0)
+    cols = _kept(b, 1)
+    c = np.take(b, cols, axis=1)
+    Image.fromarray(c, img.mode).save(out_path, format="PNG")
+    sidecar = out_path + ".map.json"
+    with open(sidecar, "w") as f:
+        json.dump({"orig_w": int(a.shape[1]), "orig_h": int(a.shape[0]),
+                   "collapsed_w": int(len(cols)), "collapsed_h": int(len(rows)),
+                   "row_map": rows.tolist(), "col_map": cols.tolist()}, f)
+    stats = {"orig": (a.shape[1], a.shape[0]), "collapsed": (len(cols), len(rows)),
+             "bytes_before": os.path.getsize(in_path), "bytes_after": os.path.getsize(out_path),
+             "sidecar": sidecar}
+    print(f"orig {stats['orig'][0]}x{stats['orig'][1]} -> collapsed "
+          f"{stats['collapsed'][0]}x{stats['collapsed'][1]} "
+          f"(rows kept {len(rows)}/{a.shape[0]}, cols kept {len(cols)}/{a.shape[1]})")
+    print(f"bytes {stats['bytes_before']} -> {stats['bytes_after']}; sidecar {sidecar}")
+    return stats
+
+
+def crop(orig_path, sidecar_path, box, out_path=None):
+    x0, y0, x1, y1 = box
+    with open(sidecar_path) as f:
+        m = json.load(f)
+    rm, cm = m["row_map"], m["col_map"]
+    if not (0 <= x0 <= x1 < len(cm) and 0 <= y0 <= y1 < len(rm)):
+        raise SystemExit(f"box {box} out of collapsed bounds {len(cm)}x{len(rm)}")
+    ox0, oy0, ox1, oy1 = cm[x0], rm[y0], cm[x1] + 1, rm[y1] + 1
+    if not out_path:
+        stem = os.path.splitext(orig_path)[0]
+        out_path = f"{stem}.crop.png"
+    Image.open(orig_path).crop((ox0, oy0, ox1, oy1)).save(out_path, format="PNG")
+    print(f"original box {ox0},{oy0},{ox1},{oy1} -> {out_path}")
+    return (ox0, oy0, ox1, oy1), out_path
+
+
+def selftest():
+    d = tempfile.mkdtemp(prefix="img-collapse-selftest-")
+
+    def mk(name, arr):
+        p = os.path.join(d, name)
+        Image.fromarray(arr).save(p)
+        return p
+
+    # 1. uniform 100x100 -> 1x1, maps all-zero
+    p = mk("uniform.png", np.zeros((100, 100), dtype=np.uint8))
+    o = p + ".out.png"
+    s = collapse(p, o)
+    assert s["collapsed"] == (1, 1), s["collapsed"]
+    m = json.load(open(o + ".map.json"))
+    assert m["row_map"] == [0] and m["col_map"] == [0], m
+
+    # 2. checkerboard -> unchanged, 0 dropped
+    cb = np.indices((64, 64)).sum(axis=0) % 2 * 255
+    p = mk("checker.png", cb.astype(np.uint8))
+    o = p + ".out.png"
+    s = collapse(p, o)
+    assert s["collapsed"] == (64, 64), s["collapsed"]
+    m = json.load(open(o + ".map.json"))
+    assert m["row_map"] == list(range(64)) and m["col_map"] == list(range(64)), m
+
+    # 3. 50 content rows, 200 blank, 50 content -> collapsed height 101
+    top = (np.arange(50)[:, None] * 7 + np.arange(100)[None, :] * 2) % 255   # 50 distinct rows
+    bot = (np.arange(50)[:, None] * 11 + np.arange(100)[None, :] * 3 + 7) % 255  # 50 distinct rows
+    arr = np.vstack([top, np.zeros((200, 100), dtype=np.uint8), bot])
+    p = mk("bands.png", arr.astype(np.uint8))
+    o = p + ".out.png"
+    s = collapse(p, o)
+    assert s["collapsed"] == (100, 101), s["collapsed"]
+    m = json.load(open(o + ".map.json"))
+    rm = m["row_map"]
+    assert all(rm[i] < rm[i + 1] for i in range(len(rm) - 1)), "row_map not monotonic"
+    assert rm[49] == 49 and rm[50] == 50 and rm[51] == 250 and rm[100] == 299, (rm[49], rm[50], rm[51], rm[100])
+
+    # 4. crop round-trip: second content band in collapsed coords == original pixels
+    box = (0, 51, 99, 100)
+    (ox0, oy0, ox1, oy1), out = crop(p, o + ".map.json", box, os.path.join(d, "band.png"))
+    got = np.asarray(Image.open(out))
+    want = arr[oy0:oy1, ox0:ox1]
+    assert (got == want).all(), "crop pixels differ from original region"
+
+    # 5. edges: single pixel + full frame
+    (b0), out = crop(p, o + ".map.json", (0, 0, 0, 0), os.path.join(d, "px.png"))
+    assert np.asarray(Image.open(out)).shape == (1, 1)
+    (bf), out = crop(p, o + ".map.json", (0, 0, 99, 100), os.path.join(d, "full.png"))
+    full = np.asarray(Image.open(out))
+    assert full.shape == arr.shape and (full == arr).all(), "full-frame crop mismatch"
+
+    # PNG-only: a .jpg out_path must still produce PNG bytes
+    jpg_out = os.path.join(d, "x.jpg")
+    collapse(p, jpg_out)
+    with open(jpg_out, "rb") as f:
+        assert f.read(8) == b"\x89PNG\r\n\x1a\n", "non-PNG bytes written for .jpg out_path"
+
+    print(f"selftest: 5/5 passed ({d})")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="img-collapse", description=__doc__)
+    ap.add_argument("--selftest", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    c = sub.add_parser("collapse")
+    c.add_argument("in_path")
+    c.add_argument("out_path")
+    k = sub.add_parser("crop")
+    k.add_argument("orig")
+    k.add_argument("sidecar")
+    k.add_argument("--box", required=True, help="x0,y0,x1,y1 in collapsed coords (inclusive)")
+    k.add_argument("--out", default=None, help="crop output path (default <orig>.crop.png)")
+    a = ap.parse_args()
+    if a.selftest:
+        selftest()
+        return
+    if a.cmd == "collapse":
+        collapse(a.in_path, a.out_path)
+    elif a.cmd == "crop":
+        x0, y0, x1, y1 = (int(v) for v in a.box.split(","))
+        crop(a.orig, a.sidecar, (x0, y0, x1, y1), a.out)
+    else:
+        ap.print_help()
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
