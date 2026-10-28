@@ -71,6 +71,4 @@ This is the automation that keeps the workbench current with component improveme
 
 ## License
 
-[PolyForm Small Business 1.0.0](LICENSE.md): free for personal use and for businesses under 100 people and US$1M revenue.
-The code is public and source-available; larger companies need a separate commercial license.
-This is not an OSI open-source license.
+[Apache License 2.0](LICENSE): open source, with an explicit patent grant.
