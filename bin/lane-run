@@ -68,7 +68,8 @@ run_one() { # returns 1 when the queue is empty
     bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(tail -1 <<<"$out")" >/dev/null
     log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
   else
-    fail "$id" "$(tail -3 <<<"$out" | tr '\n' ' ')"
+    printf '%s\n' "$out" >"${TMPDIR:-/tmp}/lane-run-$id.log"  # full worker output; the note keeps only the tail
+    fail "$id" "$(tail -3 <<<"$out" | tr '\n' ' ') (log: ${TMPDIR:-/tmp}/lane-run-$id.log)"
     sprint end "$id" blocked "worker failed rc=$rc" seconds=$(( $(date +%s) - t0 ))
   fi
 }
