@@ -20,6 +20,11 @@ if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$SWEEP_LOG"; }
 
+# qualified <bench output> — a summary line with at least one pass (dry-run always qualifies).
+qualified() {
+    [[ $DRY_RUN -eq 1 ]] || { grep -q 'passed [0-9]*/' <<<"$1" && ! grep -q 'passed 0/' <<<"$1"; }
+}
+
 run() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo "[dry-run] would run: $*"
@@ -99,7 +104,9 @@ if [[ "$CURRENT_REF" == "main" ]]; then
         LABEL="sweep-$COMPONENT-$(date -u +%Y%m%d)"
 
         # Run benchmark (use the component's latest)
-        if run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG"; then
+        # bench exits 1 only on an infra fault, so a 0/N run would otherwise qualify and auto-deploy (wb-qiy).
+        # ponytail: floor at >=1 pass; compare against the last qualified run's Wilson CI if regressions slip through.
+        if out=$(run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG") && qualified "$out"; then
             # Tests passed — update manifest
             log "$COMPONENT: tests passed, updating manifest"
 
