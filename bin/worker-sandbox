@@ -2,13 +2,27 @@
 # worker-sandbox — run a pi worker agent jailed to one git worktree.
 #
 #   worker-sandbox --worktree DIR --lane private|public --task FILE \
-#                  [--tools read,edit,write,bash] [--timeout 600] [--exec CMD...]
+#                  [--role NAME|FILE] [--profile build|research|qa] [--tools ...] [--extensions a.ts,b.ts]
+#                  [--app-port N] [--out DIR] [--timeout 600] [--exec CMD...]
+#
+# --role: workbench roles/<NAME>.md (pi-roles frontmatter + profile:) sets profile, default tools, and prompt preamble.
+# Profiles, never mixed (an agent that reads the internet must not be able to act on it):
+#   build    (default) read-write-execute: any tools, incl. whitelisted --extensions (only those files enter the
+#            jail's pi home); worktree writable; no internet — so an extension that curls/searches/downloads just fails.
+#   research internet + read-only, PUBLIC repos only (a fetch URL can carry what it read out):
+#            tools ⊆ read,grep,find,ls plus a search/fetch MCP door; worktree read-only;
+#            the answer is pi's stdout — the host writes any file. Internet = only what the search MCP fetches
+#            (its SSRF guard refuses private/loopback hosts; forced on here).
+#   qa       read-only worktree, no bash, writes only a fresh /out dir (--out, else a new tmp dir; path on stderr);
+#            network = one door to the app under test (--app-port, same port inside); tools are fixed-argv
+#            screenshot + page_text (headless chrome) + img_collapse from bin/qa-tools.ts. Without --app-port: no network (reviewer).
 #
 # Jail (bwrap): own user/pid/net/ipc/uts/cgroup namespaces, no capabilities,
 # cleared env, read-only /usr, a handful of /etc files, tmpfs $HOME and /tmp.
 # The ONLY writable host path is the worktree (at /work); its .git is masked so
 # the worker cannot rewrite history or reach the main repo — the harness commits.
-# The ONLY network path is a unix-socket relay to exactly one LLM endpoint:
+# The ONLY network path is a unix-socket relay to exactly one LLM endpoint, one request per
+# connection to its chat/models API only; any API key is added host-side and never enters the jail:
 #   private lane -> local V100 laneproxy (never leaves the box)
 #   public  lane -> 9router Worker combo (cloud; refused unless repo is PUBLIC)
 # --exec runs CMD in the jail instead of pi (used by worker-sandbox-test).
@@ -17,11 +31,16 @@ set -euo pipefail
 die() { echo "worker-sandbox: $*" >&2; exit 2; }
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
-wt= lane= task= tools=read,edit,write,bash tmo=600 exec_cmd=()
+wt= lane= task= tools= profile= role= exts= app_port= out= tmo=600 exec_cmd=()
 while [ $# -gt 0 ]; do
   case $1 in
     --worktree) wt=$2; shift 2 ;;
     --lane) lane=$2; shift 2 ;;
+    --profile) profile=$2; shift 2 ;;
+    --role) role=$2; shift 2 ;;
+    --app-port) app_port=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    --extensions) exts=$2; shift 2 ;;
     --task) task=$2; shift 2 ;;
     --tools) tools=$2; shift 2 ;;
     --timeout) tmo=$2; shift 2 ;;
@@ -32,41 +51,119 @@ done
 [ -d "$wt" ] || die "--worktree DIR required"
 wt=$(readlink -f "$wt")
 [ ${#exec_cmd[@]} -gt 0 ] || [ -f "$task" ] || die "--task FILE required"
-[[ $tools =~ ^[a-z,]+$ ]] || die "bad --tools"
+preamble=
+if [ -n "$role" ]; then
+  rf=$role; [ -f "$rf" ] || rf=$here/../roles/$role.md
+  [ -f "$rf" ] || die "role not found: $role"
+  rp=$(sed -n '2,/^---$/s/^profile:[[:space:]]*//p' "$rf")
+  [ -n "$rp" ] || die "role $role has no profile:"
+  [ -z "$profile" ] || [ "$profile" = "$rp" ] || die "--profile $profile conflicts with role $role (profile: $rp)"
+  profile=$rp
+  [ -n "$tools" ] || tools=$(sed -n '2,/^---$/s/^tools:[[:space:]]*//p' "$rf" | tr -d ' ')
+  preamble=$(awk 'n>=2; /^---$/{n++}' "$rf")
+fi
+: "${profile:=build}"
+# build: the jail is the boundary (no internet), so any tool — including whitelisted extension tools — is fine.
+# research/qa have a network door: strict tool allowlist, no outside extensions (an extension tool could execute).
+case $profile in
+  build)    : "${tools:=read,edit,write,bash}"; allow= ;;
+  research) : "${tools:=read,grep,find,ls}"; allow=read,grep,find,ls ;;
+  qa)       allow=read,grep,find,ls,write,screenshot,page_text,img_collapse; : "${tools:=$allow}" ;;
+  *) die "--profile build|research|qa" ;;
+esac
+[[ $tools =~ ^[a-z_,]+$ ]] || die "bad --tools"
+if [ -n "$allow" ]; then
+  [ -z "$exts" ] || die "--extensions not allowed in profile $profile"
+  for t in ${tools//,/ }; do
+    [[ ,$allow, == *,$t,* ]] || die "tool '$t' not allowed in profile $profile (allowed: $allow)"
+  done
+fi
+[ -z "$app_port" ] || { [ "$profile" = qa ] && [[ $app_port =~ ^[0-9]+$ ]]; } || die "--app-port N only in profile qa"
+if [ "$profile" = qa ]; then
+  exts=$here/qa-tools.ts
+  if [ -n "$out" ]; then mkdir -p "$out"; [ -z "$(ls -A "$out")" ] || die "--out must be an empty dir"
+  else out=$(mktemp -d "${TMPDIR:-/tmp}/qa-out.XXXXXX"); fi
+  out=$(readlink -f "$out"); echo "worker-sandbox: out=$out" >&2
+fi
 [[ $tmo =~ ^[0-9]+$ ]] || die "bad --timeout"
 
+# fail closed: only a repo GitHub reports PUBLIC may be read by something that can reach the internet
+need_public() {
+  local vis= _
+  for _ in 1 2 3; do  # gh flakes on the network; still fails closed after 3 tries
+    vis=$(cd "$wt" && gh repo view --json visibility -q .visibility 2>/dev/null) && break; vis=; sleep 1
+  done
+  [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+}
+# research can fetch any URL, so whatever it reads can leave in a query string
+[ "$profile" != research ] || need_public "research profile"
 case $lane in
   private)
-    port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key=none ;;
+    port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key= ;;
   public)
-    # fail closed: only a repo GitHub reports PUBLIC may send code to a cloud model
-    vis=$(cd "$wt" && gh repo view --json visibility -q .visibility 2>/dev/null) || vis=
-    [ "$vis" = PUBLIC ] || die "public lane refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+    need_public "public lane"  # sends the code to a cloud model
     port=${WORKER_PUBLIC_PORT:-20128} model=${WORKER_PUBLIC_MODEL:-Worker}
-    # ponytail: key is visible inside the jail (pi needs it); it can only reach 9router
-    # through the relay, and the harness greps the diff for it before committing.
+    # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;
   *) die "--lane private|public required" ;;
 esac
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/worker-sandbox.XXXXXX")
-relay_pid=
-cleanup() { [ -n "$relay_pid" ] && kill "$relay_pid" 2>/dev/null; rm -rf "$tmp"; }
+relay_pid= search_pid= srelay_pid= arelay_pid=
+cleanup() {
+  for p in $relay_pid $srelay_pid $arelay_pid; do kill "$p" 2>/dev/null; done
+  [ -n "$search_pid" ] && kill -- -"$search_pid" 2>/dev/null  # own session: takes uv's python child too
+  rm -rf "$tmp"
+}
 trap cleanup EXIT
 
-# host side of the only door: unix socket -> 127.0.0.1:$port
-python3 "$here/relay.py" unix2tcp "$tmp/ep.sock" "127.0.0.1:$port" &
+# host side of the only door: unix socket -> 127.0.0.1:$port, one allowlisted LLM API request per connection
+RELAY_KEY=$key python3 "$here/relay.py" unix2http "$tmp/ep.sock" "127.0.0.1:$port" &
 relay_pid=$!
 for _ in $(seq 50); do [ -S "$tmp/ep.sock" ] && break; sleep 0.1; done
 [ -S "$tmp/ep.sock" ] || die "relay failed to start"
 
+# research profile: second door, to a search/fetch MCP server run on the host for this jail only
+if [ "$profile" = research ]; then
+  sport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+  # ponytail: any streamable-http MCP works; default is search-mcp on PATH
+  SEARCH_MCP_ALLOW_PRIVATE_HOSTS=false SEARCH_MCP_DOWNLOAD_ENABLED=false setsid ${WORKER_SEARCH_CMD:-search-mcp} \
+    --transport streamable-http --host 127.0.0.1 --port "$sport" >"$tmp/search.log" 2>&1 &
+  search_pid=$!
+  for _ in $(seq 100); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$sport/mcp" && break; sleep 0.2; done
+  curl -s -m 1 -o /dev/null "http://127.0.0.1:$sport/mcp" || die "search MCP failed to start (see WORKER_SEARCH_CMD)"
+  python3 "$here/relay.py" unix2tcp "$tmp/search.sock" "127.0.0.1:$sport" &
+  srelay_pid=$!
+  for _ in $(seq 50); do [ -S "$tmp/search.sock" ] && break; sleep 0.1; done
+  [ -S "$tmp/search.sock" ] || die "search relay failed to start"
+fi
+# qa profile: door to the app under test only
+if [ -n "$app_port" ]; then
+  python3 "$here/relay.py" unix2tcp "$tmp/app.sock" "127.0.0.1:$app_port" &
+  arelay_pid=$!
+  for _ in $(seq 50); do [ -S "$tmp/app.sock" ] && break; sleep 0.1; done
+  [ -S "$tmp/app.sock" ] || die "app relay failed to start"
+fi
+
 mkdir -p "$tmp/agent"
 umask 077
-jq -n --arg port "$port" --arg model "$model" --arg key "$key" '{providers:{w:{
-  baseUrl:"http://127.0.0.1:\($port)/v1", api:"openai-completions", apiKey:$key,
+jq -n --arg port "$port" --arg model "$model" '{providers:{w:{
+  baseUrl:"http://127.0.0.1:\($port)/v1", api:"openai-completions", apiKey:"none",
   compat:{supportsDeveloperRole:false, sendSessionAffinityHeaders:true},
   models:[{id:$model, name:$model, input:["text"], maxTokens:16384}]}}}' > "$tmp/agent/models.json"
-echo '{}' > "$tmp/agent/settings.json"
+# extension whitelist: only the named files exist in the jail's pi home (the host's ~/.pi is never visible).
+# ponytail: single-file extensions only; ones importing npm packages need their node_modules bound — add when needed.
+jexts=()
+for e in ${exts//,/ }; do
+  [ -f "$e" ] || die "extension not found: $e"
+  mkdir -p "$tmp/agent/extensions"; cp "$e" "$tmp/agent/extensions/"
+  jexts+=("/home/worker/.pi/agent/extensions/$(basename "$e")")
+done
+jq -n '{extensions: $ARGS.positional}' --args "${jexts[@]}" > "$tmp/agent/settings.json"
+# exposure=direct: plain tool calls. pi's default "codemode" has the model write code — that's execute, not read.
+# Same port inside the jail as on the host: search-mcp rejects a mismatched Host header (421, DNS-rebinding guard).
+[ "$profile" = research ] && jq -n --arg u "http://127.0.0.1:$sport/mcp" \
+  '{mcpServers:{search:{url:$u, exposure:"direct"}}}' > "$tmp/agent/mcp.json"
 cp "$here/relay.py" "$tmp/relay.py"
 
 args=(--unshare-all --unshare-user --die-with-parent --new-session --clearenv --disable-userns --cap-drop ALL
@@ -76,7 +173,7 @@ for l in bin lib lib64 sbin; do
   if [ -L "/$l" ]; then args+=(--symlink "$(readlink "/$l")" "/$l")
   elif [ -d "/$l" ]; then args+=(--ro-bind "/$l" "/$l"); fi
 done
-for e in ld.so.cache ssl ca-certificates alternatives passwd group nsswitch.conf hosts localtime; do
+for e in ld.so.cache ssl ca-certificates alternatives passwd group nsswitch.conf hosts localtime fonts; do
   [ -e "/etc/$e" ] && args+=(--ro-bind "/etc/$e" "/etc/$e")
 done
 # runtimes that live outside /usr (e.g. bun under $HOME) get bound read-only at /opt/<name>
@@ -87,7 +184,22 @@ for b in pi node bun; do
   p=$(readlink -f "$p"); case $p in /usr/*) continue ;; esac
   args+=(--ro-bind "$p" "/opt/$b/$b"); path=/opt/$b:$path
 done
-args+=(--bind "$wt" /work)
+case $profile in
+  research) args+=(--ro-bind "$wt" /work --bind "$tmp/search.sock" /run/search.sock --setenv SEARCH_PORT "$sport") ;;
+  qa)
+    args+=(--ro-bind "$wt" /work --bind "$out" /out --ro-bind "$here/img-collapse" /opt/wb/img-collapse)
+    [ -n "$app_port" ] && args+=(--bind "$tmp/app.sock" /run/app.sock --setenv APP_PORT "$app_port")
+    # ponytail: chrome-headless-shell from puppeteer's cache (npx @puppeteer/browsers install chrome-headless-shell)
+    chrome=${WORKER_CHROME:-$(ls -d "$HOME"/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-linux64 2>/dev/null | sort -V | tail -1)}
+    [ -x "$chrome/chrome-headless-shell" ] && args+=(--ro-bind "$chrome" /opt/chrome)
+    # img-collapse needs PIL + numpy; bind just those packages when they live outside /usr (pip --user)
+    site=$(python3 -c 'import PIL,os;print(os.path.dirname(os.path.dirname(PIL.__file__)))' 2>/dev/null) || site=
+    case $site in ""|/usr/*) ;; *)
+      for p in PIL pillow.libs numpy numpy.libs; do [ -e "$site/$p" ] && args+=(--ro-bind "$site/$p" "/opt/py/$p"); done
+      args+=(--setenv PYTHONPATH /opt/py) ;;
+    esac ;;
+  *) args+=(--bind "$wt" /work) ;;
+esac
 if [ -d "$wt/.git" ]; then args+=(--tmpfs /work/.git)
 elif [ -e "$wt/.git" ]; then args+=(--ro-bind /dev/null /work/.git); fi
 # No network in the jail, so a fresh worktree can't install deps: lend the host repo's, read-only.
@@ -100,20 +212,31 @@ args+=(--bind "$tmp/agent" /home/worker/.pi/agent
   --remount-ro /)  # root tmpfs (incl. /etc parent of the file binds) read-only; submounts keep their flags
 
 if [ ${#exec_cmd[@]} -eq 0 ]; then
-  exec_cmd=(pi -p --no-session --no-extensions --no-mcp --no-skills --no-prompt-templates
-    --no-themes --tools "$tools" --provider w --model "w/$model" "$(cat "$task")")
+  mcp=(--no-mcp) ptools=$tools  # extensions on: the jail's pi home holds only built-ins + the whitelist
+  if [ "$profile" = research ]; then
+    # web-only MCP tools. search-mcp runs on the HOST, so exclude anything touching host disk or shared state:
+    # read_doc (local files), download (writes), cache_search (other sessions' fetches), extract_structured.
+    # pi's MCP client is a built-in extension, so --no-extensions would silently drop these tools.
+    mcp=() ptools=$tools,mcp__search__search,mcp__search__fetch,mcp__search__fetch_batch,mcp__search__research
+  fi
+  prompt=$(cat "$task"); [ -z "$preamble" ] || prompt="$preamble"$'\n\n# Task\n'"$prompt"
+  exec_cmd=(pi -p --no-session "${mcp[@]}" --no-skills --no-prompt-templates
+    --no-themes ${PI_EXTRA_FLAGS:-} --tools "$ptools" --provider w --model "w/$model" "$prompt")
 fi
 
 # jail side of the door: 127.0.0.1:$port -> /run/ep.sock, then the payload
 inner='python3 /run/relay.py tcp2unix 127.0.0.1:$WORKER_PORT /run/ep.sock &
+[ -n "${SEARCH_PORT:-}" ] && python3 /run/relay.py tcp2unix 127.0.0.1:$SEARCH_PORT /run/search.sock &
+[ -n "${APP_PORT:-}" ] && python3 /run/relay.py tcp2unix 127.0.0.1:$APP_PORT /run/app.sock &
 for _ in $(seq 50); do python3 -c "import socket,os;socket.create_connection((\"127.0.0.1\",int(os.environ[\"WORKER_PORT\"])),1)" 2>/dev/null && break; sleep 0.1; done
-"$@"; rc=$?; kill %1 2>/dev/null; exit $rc'
+"$@"; rc=$?; kill $(jobs -p) 2>/dev/null; exit $rc'
 
-# ponytail: cgroup caps via systemd user scope when available; plain run otherwise
-lim=()
-if systemd-run --user --scope -q true 2>/dev/null; then
-  lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
-fi
+# cgroup caps via a systemd user scope. Fail closed: cron has no XDG_RUNTIME_DIR, so point it at the
+# lingering user manager; WORKER_NO_LIMITS=1 is the explicit opt-out for hosts without one.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
+if [ "${WORKER_NO_LIMITS:-}" = 1 ]; then lim=()
+elif ! systemd-run --user --scope -q true 2>/dev/null; then die "no systemd user scope for cgroup limits (WORKER_NO_LIMITS=1 to run without)"; fi
 set +e
 "${lim[@]}" timeout -k 10 "$tmo" bwrap "${args[@]}" /bin/sh -c "$inner" sh "${exec_cmd[@]}"
 rc=$?
