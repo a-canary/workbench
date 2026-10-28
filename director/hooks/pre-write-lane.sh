@@ -50,7 +50,7 @@ case "$tool" in
       # Regex layer: quoted decoys (echo "cp a ~/bin/x") fail closed — acceptable.
       verbs="$(printf '%s' "$cmd" \
         | grep -oE '\b(cp|mv|ln|rsync)\b[^;|&<>]*' \
-        | sed -E 's/.*[[:space:]]([^[:space:]]+)$/\1/')"
+        | sed -E 's/[[:space:]]+$//; s/.*[[:space:]]([^[:space:]]+)$/\1/')"
       # of= and -o destinations: an opening quote is stepped over here too —
       # the old classes excluded it, so a quoted destination extracted nothing.
       ofargs="$(printf '%s' "$cmd" \

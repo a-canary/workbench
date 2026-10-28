@@ -228,3 +228,12 @@ test("Bash redirect to the stderr device is still blocked", () => {
   const r = runHook({ tool_name: "Bash", tool_input: { command: `echo x > ${se}` } }, emptyDb);
   expect(r.code).toBe(2);
 });
+
+// Trailing whitespace once made the last-arg extractor return nothing (fail-open).
+test("mv with trailing whitespace still gates its destination", () => {
+  for (const tail of [" ", "\t"]) {
+    const cmd = "mv a.json " + "~" + "/bin/" + tail;
+    const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+    expect(r.code).toBe(2);
+  }
+});
