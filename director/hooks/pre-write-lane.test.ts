@@ -178,6 +178,34 @@ test("Bash cp to ~/bin is blocked (write-verb destination)", () => {
   expect(r.code).toBe(2);
 });
 
+// repos-ged1: the extractor gated only the LAST arg of cp/mv/ln/rsync.
+test("cp/mv -t and --target-directory= destinations are gated", () => {
+  const bin = `${process.env.HOME}/bin`;
+  for (const command of [
+    `cp -t ${bin} /tmp/tool`,
+    `mv -t ${bin} /tmp/a /tmp/b`,
+    `cp --target-directory=${bin} /tmp/tool`,
+    `cp --target-directory ${bin} /tmp/tool`,
+  ]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code }).toEqual({ command, code: 2 });
+  }
+});
+
+test("a quoted write-verb destination is gated", () => {
+  const command = `mv /tmp/a "${process.env.HOME}/bin/lane-hook-test-x"`;
+  expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
+});
+
+test("a trailing stderr redirect does not mask the write-verb destination", () => {
+  const command = `mv /tmp/a ${process.env.HOME}/bin/lane-hook-test-x 2>/tmp/err.log`;
+  expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
+});
+
+test("cp -t into an in-lane dir passes", () => {
+  const r = runHook({ tool_name: "Bash", tool_input: { command: "cp -t /tmp/d /tmp/a /tmp/b" } }, emptyDb);
+  expect(r.code).toBe(0);
+});
+
 test("Bash mv within /tmp passes", () => {
   const r = runHook({ tool_name: "Bash", tool_input: { command: "mv /tmp/a.txt /tmp/b.txt" } }, emptyDb);
   expect(r.code).toBe(0);
