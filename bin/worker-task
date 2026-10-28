@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# worker-task — one TDD worker run: RED -> sandboxed pi -> GREEN -> leak scan -> commit.
+#
+#   worker-task --worktree DIR --lane private|public --task FILE --test CMD \
+#               [--tools read,edit,write,bash] [--timeout 600] [--push]
+#
+# Contract: the worktree's HEAD commit is the director's failing test (RED commit).
+# The worker may not touch any file that commit touched, nor test/runner config
+# (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
+# it runs. Tests run inside the jail too: worker-written code never runs
+# on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
+set -euo pipefail
+
+die() { echo "worker-task: $*" >&2; exit 2; }
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+wt= lane= task= test= tools=read,edit,write,bash tmo=600 push=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --worktree) wt=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
+    --task) task=$2; shift 2 ;;
+    --test) test=$2; shift 2 ;;
+    --tools) tools=$2; shift 2 ;;
+    --timeout) tmo=$2; shift 2 ;;
+    --push) push=1; shift ;;
+    *) die "unknown arg $1" ;;
+  esac
+done
+[ -d "$wt" ] && [ -f "$task" ] && [ -n "$test" ] && [ -n "$lane" ] || die "--worktree --lane --task --test required"
+# host git never runs worker-controlled config (fsmonitor) and never descends into submodules
+# host-side git: core.hooksPath may point into the tree (.githooks, .husky), where the worker writes hooks;
+# quotePath off so non-ASCII names match as pathspecs and patterns instead of slipping past them quoted
+g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false "$@"; }
+g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] || die "worktree not clean"
+
+sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
+log() { echo "worker-task: $*" >&2; }
+
+mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
+[ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
+# read before the worker runs (the jail masks .git anyway)
+may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
+[ -z "$may_edit" ] || ! grep -qE -- "$may_edit" <<<$'\nzz/never-a-real-path.q' || die "Worker-May-Edit '$may_edit' matches every path"
+# files that change how the test runs or what the leak scan sees, matched anywhere in the tree:
+# manifests/locks, *config* and rc/env dotfiles, toml/ini/cfg, make, python import hooks, compiled .pyc,
+# git attributes, gitleaks config. ponytail: a denylist; the upgrade is the RED commit declaring the
+# paths the worker may touch (allowlist). Until then the RED commit can exempt paths explicitly with a
+# trailer, e.g. "Worker-May-Edit: ^tsconfig\.json$" (an ERE matched against each changed path).
+runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*config[^/]*\.(json|toml|ya?ml)|[^/]*\.(toml|ini|cfg|pth|py[co]|mk)|\.[^/]*rc(\.[a-z]+)?|\.env[^/]*|(GNU)?[Mm]akefile|justfile|conftest\.py|pytest\.py|[^/]*customize\.py|vitest\.workspace[^/]*|\.git(attributes|modules)|\.gitleaks(\.toml|ignore))$'
+
+log "RED: $test"
+if sbx --timeout 300 --exec sh -c "$test" >&2; then die "test already passes — not a RED commit"; fi
+
+log "worker: lane=$lane tools=$tools"
+t0=$(date +%s)
+sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
+log "worker took $(( $(date +%s) - t0 ))s"
+
+# a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
+[ -z "$(find "$wt" -mindepth 2 -name .git -print -quit)" ] || die "worker created a nested .git"
+g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
+g add -A
+g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
+g diff --cached --quiet && die "worker produced no changes"
+# --no-renames: a rename would list only its new name and hide the config file it removed
+cfg=$(g diff --cached --no-renames --name-only -z | grep -zE "$runner_cfg" | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ') \
+  && [ -n "$cfg" ] && die "worker modified test/runner config: $(echo $cfg) (RED commit can allow with Worker-May-Edit:)"
+
+# GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
+# the worker left in the worktree (a stub module, a forged .pyc, a patched node_modules) never shape it.
+# GREEN is evidence, not proof: the test runs worker-written code, which can simply exit 0 (os._exit
+# at import, a shadowed test runner package). The gate is review of the PR diff before merge.
+green=$(mktemp -d "${TMPDIR:-/tmp}/worker-green.XXXXXX"); trap 'rm -rf "$green"' EXIT
+g checkout-index -a --prefix="$green/"
+log "GREEN: $test"
+"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$green" --lane private --timeout 300 --exec sh -c "$test" >&2 \
+  || die "test still fails after worker"
+
+# leak scan with the host's pinned config: a worker-written .gitleaks.toml would otherwise allowlist its own leak.
+# (The lane key never enters the jail: the relay adds it host-side.)
+(cd "$wt" && gitleaks protect --staged --redact --no-banner --config "$here/gitleaks.toml" >&2) || die "gitleaks flagged the diff"
+
+subj="worker: $(head -c 60 "$task" | head -1)"
+g -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL:-pi-worker@localhost}" \
+  commit -q --no-verify -m "$subj" -m "Test: $test (RED->GREEN in sandbox, lane=$lane)"
+log "committed $(g rev-parse --short HEAD)"
+
+if [ -n "$push" ]; then
+  g push -q --no-verify -u origin HEAD
+  (cd "$wt" && gh pr create --fill --head "$(git branch --show-current)")
+fi

@@ -1,0 +1,3 @@
+# worker-task leak scan: gitleaks defaults, pinned host-side (never the worktree's own config)
+[extend]
+useDefault = true

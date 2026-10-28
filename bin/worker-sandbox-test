@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# worker-sandbox-test — prove the jail holds. Needs the private-lane endpoint up.
+#   worker-sandbox-test [WORKTREE]   (default: throwaway git worktree of this repo)
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+port=${WORKER_PRIVATE_PORT:-8099}
+
+wt=${1:-}
+if [ -z "$wt" ]; then
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/sbx-test.XXXXXX")/wt
+  git -C "$here" worktree add -q --detach "$wt" HEAD || exit 2
+  trap 'git -C "$here" worktree remove --force "$wt"' EXIT
+fi
+
+# each line: expectation<TAB>shell check run inside the jail (exit 0 = expectation met)
+checks=$(cat <<EOF
+no password store	! ls "$HOME/.password-store" 2>/dev/null
+no ssh keys	! ls "$HOME/.ssh" 2>/dev/null
+no vault	! ls "$HOME/vault" 2>/dev/null
+no claude config	! ls "$HOME/.claude" 2>/dev/null
+no gnupg	! ls "$HOME/.gnupg" 2>/dev/null
+host home invisible	[ "\$(ls /home)" = worker ]
+worktree writable	touch /work/.sbx-probe && rm /work/.sbx-probe
+/usr read-only	! touch /usr/.sbx-probe 2>/dev/null
+/etc read-only	! touch /etc/.sbx-probe 2>/dev/null
+.git masked	! git -C /work log -1 >/dev/null 2>&1
+host pids invisible	[ "\$(ls /proc | grep -c '^[0-9]')" -lt 20 ]
+env carries no secrets	! env | grep -Eiq '^[^=]*(key|token|secret|pass)'
+internet blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+dns blocked	! curl -s -m 3 -o /dev/null https://github.com
+other localhost blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/
+public lane port blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:20128/v1/models
+endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/v1/models
+EOF
+)
+
+fail=0
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$checks"
+
+# research profile = internet (search door only) + read-only files; never write or execute tools
+rchecks=$(cat <<EOF
+research: worktree read-only	! touch /work/.sbx-probe 2>/dev/null
+research: worktree readable	ls /work >/dev/null
+research: raw internet still blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+research: search door reachable	[ "\$(curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:\$SEARCH_PORT/mcp)" != 000 ]
+research: endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/v1/models
+EOF
+)
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$rchecks"
+if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]' >/dev/null 2>&1
+then echo "PASS  build: no search door"; else echo "FAIL  build: no search door"; fail=1; fi
+for t in write edit bash; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --tools "read,$t" --exec true >/dev/null 2>&1
+  then echo "FAIL  research refuses $t tool"; fail=1; else echo "PASS  research refuses $t tool"; fi
+done
+# the invariant itself: tools DECLARED to the model (from pi's JSON events, not the model's self-report)
+task=$(mktemp); echo "Reply with exactly: OK" > "$task"
+for p in research build; do
+  got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --profile $p --task "$task" --timeout 240 2>/dev/null \
+    | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+  case $p in
+    research) want=find,grep,ls,mcp__search__fetch,mcp__search__fetch_batch,mcp__search__research,mcp__search__search,read, ;;
+    build) want=bash,edit,read,write, ;;
+  esac
+  if [ "$got" = "$want" ]; then echo "PASS  $p declares exactly its tools"; else echo "FAIL  $p declares '$got' want '$want'"; fail=1; fi
+done
+# extensions: whitelisted file loads in build, its tool is declared, its code has no internet; research refuses them
+got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --task "$task" --timeout 240 \
+  --extensions "$here/test-ext-probe.ts" --tools read,probe_tool 2>/dev/null | grep -oE '"name":"probe_tool"' | head -1)
+if [ -n "$got" ]; then echo "PASS  build: whitelisted extension tool declared"; else echo "FAIL  build: whitelisted extension tool declared"; fail=1; fi
+net=$(cat "$wt/.ext-net" 2>/dev/null); rm -f "$wt/.ext-net"
+if [ "$net" = blocked ]; then echo "PASS  build: extension code has no internet"; else echo "FAIL  build: extension code internet='$net'"; fail=1; fi
+if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --extensions "$here/test-ext-probe.ts" --exec true >/dev/null 2>&1
+then echo "FAIL  research refuses extensions"; fail=1; else echo "PASS  research refuses extensions"; fi
+# qa profile = read-only worktree + fresh /out + one door to the app under test; chrome + img-collapse inside
+app=$(mktemp -d); echo '<h1>qa-probe</h1>' > "$app/index.html"
+aport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -m http.server "$aport" --bind 127.0.0.1 --directory "$app" >/dev/null 2>&1 & srv=$!
+for _ in $(seq 30); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$aport/" && break; sleep 0.2; done
+qchecks=$(cat <<EOF
+qa: worktree read-only	! touch /work/.sbx-probe 2>/dev/null
+qa: /out writable	touch /out/x && rm /out/x
+qa: app door reachable	curl -sf -m 5 http://127.0.0.1:\$APP_PORT/ | grep -q qa-probe
+qa: internet blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+qa: other localhost blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/
+qa: chrome screenshots app	/opt/chrome/chrome-headless-shell --no-sandbox --disable-gpu --disable-dev-shm-usage --screenshot=/out/s.png http://127.0.0.1:\$APP_PORT/ >/dev/null 2>&1; [ -s /out/s.png ]
+qa: img-collapse runs	python3 /opt/wb/img-collapse --selftest >/dev/null 2>&1
+EOF
+)
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile qa --app-port "$aport" --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$qchecks"
+kill $srv; rm -rf "$app"
+refuse() {  # name, then worker-sandbox args that must be refused
+  local n=$1; shift
+  if "$here/worker-sandbox" --worktree "$wt" --lane private "$@" --exec true >/dev/null 2>&1
+  then echo "FAIL  $n"; fail=1; else echo "PASS  $n"; fi
+}
+refuse "qa refuses bash" --profile qa --tools read,bash
+refuse "qa refuses outside extensions" --profile qa --extensions "$here/test-ext-probe.ts"
+refuse "app door only in qa" --app-port 1
+nonempty=$(mktemp -d); touch "$nonempty/f"
+refuse "qa refuses non-empty --out" --profile qa --out "$nonempty"; rm -rf "$nonempty"
+refuse "role/profile conflict refused" --role qa --profile build
+# roles: tools declared to the model come from the role file (pi JSON events, not self-report)
+got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --role qa --task "$task" --timeout 240 2>/dev/null \
+  | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+want=find,grep,img_collapse,ls,page_text,read,screenshot,write,
+if [ "$got" = "$want" ]; then echo "PASS  role qa declares exactly its tools"; else echo "FAIL  role qa declares '$got' want '$want'"; fail=1; fi
+rm -f "$task"
+if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec true >/dev/null 2>&1
+then echo "FAIL  unknown profile refused"; fail=1; else echo "PASS  unknown profile refused"; fi
+
+# fail-closed: public lane must refuse a non-PUBLIC (or unresolvable) repo
+nogh=$(mktemp -d); echo private > "$nogh/notes.txt"  # non-empty: research could read it
+if "$here/worker-sandbox" --worktree "$nogh" --lane public --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses non-github dir"; fail=1
+else echo "PASS  public lane refuses non-github dir"; fi
+if "$here/worker-sandbox" --worktree "$nogh" --lane private --profile research --exec true >/dev/null 2>&1
+then echo "FAIL  research refuses non-github dir"; fail=1
+else echo "PASS  research refuses non-github dir"; fi
+rm "$nogh/notes.txt"; rmdir "$nogh"
+
+# fail-closed: no systemd user scope -> refuse to run unlimited, unless explicitly opted out
+if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
+then echo "FAIL  no cgroup scope refused"; fail=1; else echo "PASS  no cgroup scope refused"; fi
+if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent WORKER_NO_LIMITS=1 "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
+then echo "PASS  WORKER_NO_LIMITS=1 opt-out runs"; else echo "FAIL  WORKER_NO_LIMITS=1 opt-out runs"; fail=1; fi
+
+# the LLM door: only allowlisted API paths, one request per connection
+code=$("$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  "curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:$port/__lanes" 2>/dev/null)
+if [ "$code" = 403 ]; then echo "PASS  door refuses non-API path"; else echo "FAIL  door refuses non-API path (got $code)"; fail=1; fi
+# keep-alive HTTP/1.1 upstream that ignores Connection: close: a raw byte relay would let it answer every request
+kport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+        self.close_connection = False  # ignore Connection: close, as lane-front does
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$kport" & kup=$!
+for _ in $(seq 30); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$kport/v1/models" && break; sleep 0.2; done
+n=$(WORKER_PRIVATE_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec python3 -c '
+import os, socket, time
+s = socket.create_connection(("127.0.0.1", int(os.environ["WORKER_PORT"])), 5)
+# same write: the relay forwards only the declared body; a later write: the relay must drop it, not forward it
+s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\nGET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+time.sleep(0.5); s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+out = b""
+try:
+    while (d := s.recv(65536)): out += d
+except TimeoutError: pass  # upstream may keep the connection open; count what arrived
+print(out.count(b"HTTP/1."), out.lower().count(b"connection: close"))' 2>/dev/null)
+if [ "${n% *}" = 1 ]; then echo "PASS  door answers one request per connection"; else echo "FAIL  door answered '$n' requests"; fail=1; fi
+# ...and tells a keep-alive client so, or the client would wait on this connection for its next answer
+if [ "${n#* }" = 1 ]; then echo "PASS  door response says Connection: close"; else echo "FAIL  door response says Connection: close ($n)"; fail=1; fi
+# public lane: the key reaches the relay, never the jail (files under the jail home or its env)
+k=sbx-key-$RANDOM$RANDOM
+if WORKER_PUBLIC_KEY=$k WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c \
+  "! grep -rqsF -- '$k' /home/worker && ! env | grep -qF -- '$k'" >/dev/null 2>&1
+then echo "PASS  public key never enters the jail"; else echo "FAIL  public key never enters the jail"; fail=1; fi
+# public lane: untracked/ignored files (a .env, notes) would leave the host with the repo
+touch "$wt/.sbx-untracked-probe"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses untracked files"; fail=1; else echo "PASS  public lane refuses untracked files"; fi
+unlink "$wt/.sbx-untracked-probe"
+# ...node_modules too (private packages, build caches with inlined env); python caches RED leaves are fine
+mkdir -p "$wt/node_modules/.cache"; touch "$wt/node_modules/.cache/x"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses node_modules"; fail=1; else echo "PASS  public lane refuses node_modules"; fi
+unlink "$wt/node_modules/.cache/x"; rmdir "$wt/node_modules/.cache" "$wt/node_modules"
+mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
+unlink "$wt/__pycache__/x.pyc"; rmdir "$wt/__pycache__"
+kill $kup
+# research with an empty worktree = web-only, allowed on any repo
+empty=$(mktemp -d)
+if "$here/worker-sandbox" --worktree "$empty" --lane private --profile research --timeout 90 --exec true >/dev/null 2>&1
+then echo "PASS  research allows an empty worktree"; else echo "FAIL  research allows an empty worktree"; fail=1; fi
+rmdir "$empty"
+
+# host relay replaces the jail's Authorization with RELAY_KEY (the key never enters the jail)
+rt=$(mktemp -d); rport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        b = (self.headers.get("Authorization") or "").encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$rport" & up=$!
+RELAY_KEY=sekret RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2http "$rt/s" "127.0.0.1:$rport" & rl=$!
+for _ in $(seq 30); do [ -S "$rt/s" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$rport/" && break; sleep 0.2; done
+got=$(curl -s -m 5 --unix-socket "$rt/s" -H 'Authorization: Bearer none' -d '{}' http://x/v1/chat/completions)
+if [ "$got" = "Bearer sekret" ]; then echo "PASS  relay injects host key"; else echo "FAIL  relay injects host key (got '$got')"; fail=1; fi
+# strict head: anything an upstream could parse differently is refused (403), never forwarded
+raw() { python3 - "$rt/s" "$1" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode().decode("unicode_escape").encode("latin-1"))
+try: print(s.recv(200).split(b"\r\n")[0].decode())
+except Exception as e: print("ERR", e)
+PY
+}
+for bad in 'duplicate content-length|Content-Length: 2\r\nContent-Length: 0\r\n' \
+           'signed content-length|Content-Length: +2\r\n' \
+           'folded header|X-A: 1\r\n Content-Length: 2\r\n' \
+           'header without colon|Content-Length 2\r\n' \
+           'bare LF in a header|X-A: 1\nContent-Length: 0\r\n'; do
+  got=$(raw "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n${bad#*|}\r\n{}")
+  case $got in *403*) echo "PASS  relay refuses ${bad%%|*}" ;; *) echo "FAIL  relay refuses ${bad%%|*} (got '$got')"; fail=1 ;; esac
+done
+# an upstream that dies mid-head must not leave the client hanging (it gets EOF, not its own timeout)
+dport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import socket, sys
+l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); l.bind(("127.0.0.1", int(sys.argv[1]))); l.listen(4)
+while True:
+    c, _ = l.accept(); c.recv(65536); c.sendall(b"HTTP/1.1 200 OK\r\nX-A: 1"); c.close()' "$dport" & dup=$!
+python3 "$here/relay.py" unix2http "$rt/d" "127.0.0.1:$dport" & drl=$!
+for _ in $(seq 30); do [ -S "$rt/d" ] && break; sleep 0.1; done
+if python3 - "$rt/d" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+try:
+    while s.recv(65536): pass
+except socket.timeout: sys.exit(1)
+PY
+then echo "PASS  relay closes client when upstream dies mid-head"; else echo "FAIL  relay closes client when upstream dies mid-head"; fail=1; fi
+kill $dup $drl
+# connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
+capped() { python3 - "$1" <<'PY'
+import socket, sys, time
+held = []
+for _ in range(3):
+    h = socket.socket(socket.AF_UNIX); h.connect(sys.argv[1]); held.append(h)
+time.sleep(0.3)
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+sys.exit(0 if s.recv(10) == b"" else 1)
+PY
+}
+capped "$rt/s" && echo "PASS  relay caps idle connections" || { echo "FAIL  relay caps idle connections"; fail=1; }
+RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2tcp "$rt/t" "127.0.0.1:$rport" & rt2=$!
+for _ in $(seq 30); do [ -S "$rt/t" ] && break; sleep 0.1; done
+capped "$rt/t" && echo "PASS  byte door caps idle connections" || { echo "FAIL  byte door caps idle connections"; fail=1; }
+kill $up $rl $rt2; rm -rf "$rt"
+
+exit $fail
