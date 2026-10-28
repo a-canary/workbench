@@ -74,7 +74,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
   branch=$(field Branch "$desc") test=$(field Test "$desc")
   # optional per-bead worker budget (a big GREEN outgrows worker-task's 600s); digits only, 1h lane ceiling
-  tmo=$(field Timeout "$desc"); [[ $tmo =~ ^[1-9][0-9]{0,5}$ ]] || tmo=600; [ "$tmo" -le 3600 ] || tmo=3600
+  tmo=$(field Timeout "$desc"); [[ $tmo =~ ^[123456789][0123456789]{0,5}$ ]] || tmo=600; [ "$tmo" -le 3600 ] || tmo=3600
   # a lost claim is no progress (returning 0 spun --once in a tight loop).
   # ponytail: a bead whose claim always fails starves its repo's queue; bd ready -n 1 keeps offering it.
   bd -C "$repo" update "$id" --claim >/dev/null 2>&1 || { log "$id: claim lost, skipping"; return 1; }
