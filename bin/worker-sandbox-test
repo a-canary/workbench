@@ -128,6 +128,14 @@ then echo "FAIL  research refuses non-github dir"; fail=1
 else echo "PASS  research refuses non-github dir"; fi
 rm "$nogh/notes.txt"; rmdir "$nogh"
 
+# WORKER_DEPS: host deps visible at /work/node_modules, read-only (trading-lare: npx had no network)
+deps=$(mktemp -d); touch "$deps/marker"
+# twice: the first run leaves an empty mountpoint dir in the worktree (worker-task's RED then GREEN calls)
+ok=1; for _ in 1 2; do WORKER_DEPS=$deps "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  '[ -e /work/node_modules/marker ] && ! touch /work/node_modules/probe 2>/dev/null' >/dev/null 2>&1 || ok=; done
+if [ -n "$ok" ]; then echo "PASS  deps bound read-only, every run"; else echo "FAIL  deps bound read-only, every run"; fail=1; fi
+rm -r "$deps"; rmdir "$wt/node_modules" 2>/dev/null
+
 # fail-closed: no systemd user scope -> refuse to run unlimited, unless explicitly opted out
 if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
 then echo "FAIL  no cgroup scope refused"; fail=1; else echo "PASS  no cgroup scope refused"; fi
@@ -183,6 +191,11 @@ mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
 unlink "$wt/__pycache__/x.pyc"; rmdir "$wt/__pycache__"
+# WORKER_DEPS is lent to the private lane only: a public jail never sees host deps
+deps=$(mktemp -d); touch "$deps/marker"
+if WORKER_DEPS=$deps WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c '[ ! -e /work/node_modules/marker ]' >/dev/null 2>&1
+then echo "PASS  public lane gets no host deps"; else echo "FAIL  public lane gets no host deps"; fail=1; fi
+unlink "$deps/marker"; rmdir "$deps"; rmdir "$wt/node_modules" 2>/dev/null
 kill $kup
 # research with an empty worktree = web-only, allowed on any repo
 empty=$(mktemp -d)

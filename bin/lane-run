@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
+#
+#   lane-run [--repo DIR]... [--label lane:v100] [--once] [--idle 600]
+#   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
+#
+# The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
+# model can finish: it pushes a branch whose HEAD is a failing test (the RED commit) and files
+# a bead labelled lane:v100 whose description starts with
+#   Branch: <branch>
+#   Test: <command that goes RED -> GREEN>
+#   ---
+#   <task prompt: one goal, exact files, nothing else>
+# Success: bd close with the GREEN commit (worker-task pushes it and opens the PR).
+# Failure: bd note + label qwen-failed; the decomposer re-splits it. Never retried blindly.
+# SPRINT=<cmd> (optional) is called as `$SPRINT start <repo> <id>` / `$SPRINT end <id> <outcome> <finding> seconds=<n>`.
+set -uo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+repos=() label=lane:v100 once= idle=600
+while [ $# -gt 0 ]; do
+  case $1 in
+    --repo) repos+=("$(readlink -f "$2")"); shift 2 ;;
+    --label) label=$2; shift 2 ;;
+    --once) once=1; shift ;;
+    --idle) idle=$2; shift 2 ;;
+    *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+[ ${#repos[@]} -gt 0 ] || repos=("$PWD")
+[[ $idle =~ ^[0-9]+$ ]] || { echo "lane-run: --idle wants seconds, got '$idle'" >&2; exit 2; }
+log() { echo "lane-run: $*" >&2; }
+sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
+
+# field <name> <description> — value of the first "Name: value" header line, before the --- fence
+field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");sub(/[ \t]+$/,"");print;exit}' <<<"$2"; }
+# safe_branch <name> — only lane/* or v100/* branch names; blocks refspecs (+a:b), options and existing release branches
+safe_branch() { [[ $1 =~ ^(lane|v100)/[A-Za-z0-9._/-]+$ ]] && git check-ref-format --branch "$1" >/dev/null 2>&1; }
+# body <description> — everything after the first --- fence
+body() { awk 'f{print} /^---$/{f=1}' <<<"$1"; }
+
+# the last N lines worker-task itself logged (WORKER_TASK_LOG); pi and test output are worker-controlled
+# text that the decomposer would read, so they never reach a bead
+summary() { tail -"${2:-3}" "$1" 2>/dev/null | tr '\n' ' '; }
+
+fail() { # fail <id> <why> [label] -- note, label (default qwen-failed: the decomposer re-splits it), reopen
+  log "$1 FAILED: $2"
+  bd -C "$repo" note "$1" "${3:-qwen-failed}: $2" >/dev/null
+  bd -C "$repo" label add "$1" "${3:-qwen-failed}" >/dev/null
+  bd -C "$repo" update "$1" -s open -a "" >/dev/null
+}
+
+# signal mid-run: stop the worker, hand the bead back, drop what this run made
+interrupted() {
+  if [ -n "$wpid" ]; then  # the worker may have pushed already, so a human looks (a rerun would read "already GREEN")
+    kill -TERM -- -"$wpid" 2>/dev/null; wait "$wpid"
+    fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+  else
+    log "$id: interrupted before the worker started"; bd -C "$repo" update "$id" -s open -a "" >/dev/null
+  fi
+  [ -z "$made" ] || { git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; git -C "$repo" branch -q -D -- "$branch" 2>/dev/null; }
+  rm -rf "$wt" "$task" "$wlog"; exit 130
+}
+
+down=
+run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
+  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig=
+  # bd's stderr (warnings even on success) goes to our log, never into the JSON
+  j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
+    && id=$(jq -er '.[0].id // ""' <<<"$j") \
+    || { log "$repo: bd ready failed or returned non-JSON"; down=1; return 1; }  # an outage, not an empty queue
+  [ -n "$id" ] || return 1
+  desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
+  branch=$(field Branch "$desc") test=$(field Test "$desc")
+  # a lost claim is no progress (returning 0 spun --once in a tight loop).
+  # ponytail: a bead whose claim always fails starves its repo's queue; bd ready -n 1 keeps offering it.
+  bd -C "$repo" update "$id" --claim >/dev/null 2>&1 || { log "$id: claim lost, skipping"; return 1; }
+  # ponytail: SIGKILL still leaves the bead claimed; add a stale-claim sweep if lane-run ever gets killed that way
+  trap interrupted INT TERM HUP
+  sprint start "$repo" "$id"; t0=$(date +%s)
+  if [ -z "$branch" ] || [ -z "$test" ] || [ -z "$(body "$desc")" ]; then
+    fail "$id" "bead lacks Branch:/Test:/--- task"; sprint end "$id" blocked "malformed bead"; trap - INT TERM HUP; return 0
+  fi
+  if ! safe_branch "$branch"; then
+    fail "$id" "Branch: must be lane/* or v100/* (got '$branch')"; sprint end "$id" blocked "unsafe branch"; trap - INT TERM HUP; return 0
+  fi
+  # a local branch of that name may hold someone's unpushed work: never reset or delete it
+  if git -C "$repo" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+    fail "$id" "local branch $branch already exists in $repo; lane-run will not reset it" human
+    sprint end "$id" blocked "local branch exists"; trap - INT TERM HUP; return 0
+  fi
+  log "▶ $id $branch"
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
+  wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX") lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
+  body "$desc" >"$task"
+  timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+  if [ $rc -eq 0 ] && git -C "$repo" worktree add -q -b "$branch" "$wt/wt" FETCH_HEAD; then
+    made=1  # only a branch this run created is ever deleted (another process may make one meanwhile)
+    # own session, in the background: a signal to lane-run alone runs the trap now (bash defers traps
+    # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
+    # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
+    WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid -w "${WORKER_TASK:-$here/worker-task}" \
+      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push >"$lf" 2>&1 & wpid=$!
+    wait $wpid; rc=$?
+    trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
+  elif [ $rc -eq 124 ]; then
+    echo "fetch of origin/$branch timed out" >"$wlog"; rc=4
+  else
+    echo "could not check out origin/$branch" >"$wlog"; rc=5
+  fi
+  sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
+  git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
+  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran)
+  case $rc in
+    0) bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(summary "$wlog" 1)" >/dev/null \
+         || { log "$id: GREEN $sha pushed but bd close failed; bead left in_progress"; down=1; }
+       log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
+       rm -f "$lf" ;;
+    2) fail "$id" "$(summary "$wlog") (log: $lf)"  # full worker output for a human; the bead keeps worker-task's own lines
+       sprint end "$id" blocked "worker failed" seconds=$(( $(date +%s) - t0 )) ;;
+    4) # unblamed (not qwen-failed: nothing to re-split) and stop this pass, so one outage costs one bead,
+       # not the queue; lane-infra is excluded from ready, so neither a dead endpoint nor a worker that
+       # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
+       fail "$id" "$(summary "$wlog") (log: $lf)" lane-infra; down=1
+       sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+    *) # 3 (GREEN commit on the local branch), 5 (branch missing on origin), anything unexpected
+       fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
+       sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;
+  esac
+  # pushed or failed, the local branch is ours to drop; after rc=3 it holds the only copy of GREEN
+  [ -z "$made" ] || [ $rc -eq 3 ] || git -C "$repo" branch -q -D -- "$branch" 2>/dev/null
+  rm -f "$wlog"; trap - INT TERM HUP; [ -z "$sig" ] || exit 130
+  [ -z "$down" ]
+}
+
+[ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
+while :; do
+  did= down=
+  for repo in "${repos[@]}"; do run_one && did=1; [ -z "$down" ] || break; done
+  [ -n "$once" ] && [ -n "$down" ] && exit 3
+  [ -n "$did" ] && [ -z "$down" ] && continue
+  [ -n "$once" ] && exit 0
+  log "${down:+outage}${down:-queue empty}; idle ${idle}s"; sleep "$idle"
+done
