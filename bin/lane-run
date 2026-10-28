@@ -33,6 +33,8 @@ sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
 
 # field <name> <description> — value of the first "Name: value" header line, before the --- fence
 field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");print;exit}' <<<"$2"; }
+# safe_branch <name> — only lane/* or v100/* branch names; blocks refspecs (+a:b), options and existing release branches
+safe_branch() { [[ $1 =~ ^(lane|v100)/[A-Za-z0-9._/-]+$ ]] && git check-ref-format --branch "$1" >/dev/null 2>&1; }
 # body <description> — everything after the first --- fence
 body() { awk 'f{print} /^---$/{f=1}' <<<"$1"; }
 
@@ -49,15 +51,18 @@ run_one() { # returns 1 when the queue is empty
   id=$(jq -r '.[0].id // empty' <<<"$j"); [ -n "$id" ] || return 1
   desc=$(jq -r '.[0].description // ""' <<<"$j")
   branch=$(field Branch "$desc") test=$(field Test "$desc")
-  bd -C "$repo" update "$id" --claim >/dev/null
+  bd -C "$repo" update "$id" --claim >/dev/null 2>&1 || { log "$id: claim lost, skipping"; return 0; }
   sprint start "$repo" "$id"; t0=$(date +%s)
   if [ -z "$branch" ] || [ -z "$test" ] || [ -z "$(body "$desc")" ]; then
     fail "$id" "bead lacks Branch:/Test:/--- task"; sprint end "$id" blocked "malformed bead"; return 0
   fi
+  if ! safe_branch "$branch"; then
+    fail "$id" "Branch: must be lane/* or v100/* (got '$branch')"; sprint end "$id" blocked "unsafe branch"; return 0
+  fi
   log "▶ $id $branch"
   wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
   body "$desc" >"$task"
-  if git -C "$repo" fetch -q origin "$branch" && git -C "$repo" worktree add -q -B "$branch" "$wt/wt" FETCH_HEAD; then
+  if git -C "$repo" fetch -q origin -- "$branch" && git -C "$repo" worktree add -q -B "$branch" "$wt/wt" FETCH_HEAD; then
     out=$(WORKER_DEPS="$repo/node_modules" "${WORKER_TASK:-$here/worker-task}" --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push 2>&1)
     rc=$?
   else

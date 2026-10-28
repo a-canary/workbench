@@ -12,4 +12,11 @@ check "test"              "$(field Test "$d")"   "bun test a.test.ts"
 check "body after fence"  "$(body "$d")"         $'Implement a.ts.\nTest: not a header'
 check "no fence, no body" "$(body $'Branch: b\nTest: t')" ""
 check "missing field"     "$(field Branch $'Test: t\n---\nx')" ""
+ok() { if "$@"; then echo y; else echo n; fi; }
+check "branch lane/x ok"      "$(ok safe_branch lane/x-1)"   y
+check "branch v100/a/b ok"    "$(ok safe_branch v100/a/b)"   y
+check "refspec refused"       "$(ok safe_branch '+refs/heads/e:refs/heads/main')" n
+check "release refused"       "$(ok safe_branch main)"       n
+check "option refused"        "$(ok safe_branch --upload-pack=x)" n
+check "dotdot refused"        "$(ok safe_branch lane/a..b)"  n
 exit $fails
