@@ -9,6 +9,7 @@
 # a bead labelled lane:v100 whose description starts with
 #   Branch: <branch>
 #   Test: <command that goes RED -> GREEN>
+#   Timeout: <worker seconds, optional; default 600, max 3600>
 #   ---
 #   <task prompt: one goal, exact files, nothing else>
 # Success: bd close with the GREEN commit (worker-task pushes it and opens the PR).
@@ -72,6 +73,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   [ -n "$id" ] || return 1
   desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
   branch=$(field Branch "$desc") test=$(field Test "$desc")
+  # optional per-bead worker budget (a big GREEN outgrows worker-task's 600s); digits only, 1h lane ceiling
+  tmo=$(field Timeout "$desc"); [[ $tmo =~ ^[1-9][0-9]{0,5}$ ]] || tmo=600; [ "$tmo" -le 3600 ] || tmo=3600
   # a lost claim is no progress (returning 0 spun --once in a tight loop).
   # ponytail: a bead whose claim always fails starves its repo's queue; bd ready -n 1 keeps offering it.
   bd -C "$repo" update "$id" --claim >/dev/null 2>&1 || { log "$id: claim lost, skipping"; return 1; }
@@ -100,7 +103,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
     # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
     # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
     WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid -w "${WORKER_TASK:-$here/worker-task}" \
-      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push >"$lf" 2>&1 & wpid=$!
+      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --timeout "$tmo" --push >"$lf" 2>&1 & wpid=$!
     wait $wpid; rc=$?
     trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
   elif [ $rc -eq 124 ]; then
