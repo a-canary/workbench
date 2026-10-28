@@ -61,6 +61,7 @@ else echo "PASS  worker-chosen path kept out of WORKER_TASK_LOG"; fi
 unset WORKER_TASK_LOG
 run "worker that never ran is infra (rc 4)" 'rm ok; exit 1' rc4
 run "worker that ran and did nothing is the model (rc 2)" 'rm ok' rc2
+run "worker timeout is the model (rc 2)" 'rm ok; exit 124' rc2
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok
 run "vite.config.ts refused" 'echo x > vite.config.ts' refused
 run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused

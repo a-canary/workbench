@@ -62,7 +62,7 @@ log "worker took $(( $(date +%s) - t0 ))s"
 g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
-g diff --cached --quiet && { [ "$wrc" -eq 0 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
+g diff --cached --quiet && { [ "$wrc" -eq 0 ] || [ "$wrc" -eq 124 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
 # --no-renames: a rename would list only its new name and hide the config file it removed
 cfg=$(g diff --cached --no-renames --name-only -z | grep -zE "$runner_cfg" | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ') \
   && [ -n "$cfg" ] && { echo "worker-task: config files: $cfg" >&2

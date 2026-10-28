@@ -33,6 +33,7 @@ bd() { echo "$*" >>"$calls"
     *" ready "*) echo "warning: beads.role not configured" >&2
       [ -z "${READY_FAIL:-}" ] || { echo "database locked" >&2; return 1; }; printf '%s\n' "$READY_JSON" ;;
     *" --claim "*) [ -z "${CLAIM_FAIL:-}" ] || return 1 ;;
+    *" close "*) [ -z "${CLOSE_FAIL:-}" ] || return 1 ;;
   esac; return 0; }
 cat >"$tmp/wt-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -62,12 +63,17 @@ check "bd outage is not an empty queue" "$(READY_FAIL=1 go)" "rc=1 down=1"
 check "non-JSON from bd is an outage"  "$(READY_JSON='oops' go)" "rc=1 down=1"
 check "empty queue is not an outage"   "$(READY_JSON='[]' go)" "rc=1 down=0"
 check "infra failure stops the pass"   "$(STUB_RC=4 go)" "rc=1 down=1"
-check "infra failure blames no one"    "$(grep -c 'label add' "$calls")" 0
-check "infra failure reopens the bead" "$(grep -c 'update X-1 -s open' "$calls")" 1
+check "infra failure is not qwen-failed" "$(grep -c 'label add X-1 qwen-failed' "$calls")" 0
+check "infra bead leaves the queue"    "$(grep -c 'label add X-1 lane-infra' "$calls")" 1
+check "ready excludes lane-infra"      "$(grep -c 'exclude-label .*lane-infra' "$calls")" 1
+check "failed close is an outage"      "$(CLOSE_FAIL=1 go)" "rc=1 down=1"
 check "unexpected rc goes to a human"  "$(STUB_RC=1 go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
 G branch -q lane/x-1 origin/main
 check "existing local branch untouched" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls"; G rev-parse lane/x-1)" "1
 $(G rev-parse origin/main)"
+G branch -q -D lane/x-1
+# someone creates the branch while we fetch: worktree add -b fails and their branch survives
+check "racing branch survives"         "$(timeout() { G branch -q lane/x-1 origin/main; command timeout "$@"; }; go >/dev/null; G branch --list lane/x-1 | wc -l)" 1
 G branch -q -D lane/x-1
 bead $'Branch: lane/nope\nTest: true\n---\nx'
 check "branch missing on origin: human" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
@@ -86,6 +92,12 @@ check "interrupt is prompt"            "$(( $(date +%s) - t0 < 5 ))" 1
 check "interrupt kills the worker"     "$(kill -0 "$(cat "$tmp/spid")" 2>/dev/null && echo alive || echo dead)" dead
 check "interrupt goes to a human"      "$(grep -c 'label add X-1 human' "$calls")" 1
 check "interrupt drops the branch"     "$(G branch --list lane/x-1 | wc -l)" 0
+# TERM during the fetch (before any worker): reopened, unlabelled, nothing left behind
+: >"$calls"
+( timeout() { sleep 1; return 124; }; go >/dev/null ) & gpid=$!
+for _ in $(seq 50); do grep -q -- '--claim' "$calls" && break; sleep 0.1; done; sleep 0.3
+kill -TERM $gpid; wait $gpid
+check "early interrupt reopens"        "$(grep -c 'update X-1 -s open' "$calls"; grep -c 'label add' "$calls")" $'1\n0'
 bead $'Branch: lane/x-1 \nTest: true\n---\nx'
 check "trailing space in Branch: ok"   "$(field Branch "$(jq -r '.[0].description' <<<"$READY_JSON")")" lane/x-1
 bead $'Test: true\n---\nx'
