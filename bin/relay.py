@@ -11,7 +11,7 @@
 The sandbox has no network namespace route out; this pair is the only door,
 and it opens onto exactly one upstream endpoint.
 """
-import json, os, re, socket, sys, threading
+import json, os, re, socket, sys, threading, time
 
 def pipe(a, b):
     try:
@@ -41,7 +41,7 @@ def serve(listener, dial):
         threading.Thread(target=both, daemon=True).start()
 
 PATHS = tuple(os.environ.get("RELAY_PATHS", "/v1/chat/completions,/v1/models").split(","))
-DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te")
+DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te", b"x-lane")  # x-lane: laneproxy lane pick
 
 def refuse(c, why):
     c.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" % (len(why), why))
@@ -51,10 +51,17 @@ TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 def http_one(c, dial):
     """Forward exactly one request whose head passed the allowlist, then only the response."""
-    c.settimeout(30)  # a slow or idle client can't hold a slot; reset before the (long) response
+    # one deadline for the whole request, not per recv: a client trickling a byte at a time can't hold
+    # a slot either; the timeout is lifted before the (long) response
+    deadline = time.monotonic() + float(os.environ.get("RELAY_TIMEOUT", "30"))
+    def rx(n):
+        left = deadline - time.monotonic()
+        if left <= 0: raise socket.timeout("request deadline")  # no grace: a fast sender would never time out
+        c.settimeout(left)
+        return c.recv(n)
     buf = b""
     while b"\r\n\r\n" not in buf:
-        d = c.recv(65536)
+        d = rx(65536)
         if not d or len(buf) > 65536: return refuse(c, b"bad request head")
         buf += d
     head, body = buf.split(b"\r\n\r\n", 1)
@@ -66,6 +73,7 @@ def http_one(c, dial):
         return refuse(c, b"method")
     path = parts[1].split(b"?", 1)[0].decode("latin-1")
     if path not in PATHS: return refuse(c, b"path")
+    line = b" ".join([parts[0], path.encode("latin-1"), parts[2]])  # query dropped: it can skip upstream routing
     # strict head: no folding, no bare lines, one plain-digit Content-Length (no parse differential upstream)
     keep, length = [], None
     for h in hdrs:
@@ -78,13 +86,15 @@ def http_one(c, dial):
             length = int(v)
         if k not in DROP and not k.startswith(b"proxy-"): keep.append(h)
     length = length or 0
+    if parts[0] == b"GET" and length: return refuse(c, b"GET with a body")
     pin = os.environ.get("RELAY_MODEL")
     if pin and parts[0] == b"POST":  # re-serialize, so duplicate "model" keys can't parse differently upstream
         if length > 16 << 20: return refuse(c, b"body too large")
-        while len(body) < length and (d := c.recv(65536)): body += d
+        while len(body) < length and (d := rx(65536)): body += d
         try: req = json.loads(body[:length])
-        except ValueError: return refuse(c, b"bad json")
+        except (ValueError, RecursionError): return refuse(c, b"bad json")
         if not isinstance(req, dict): return refuse(c, b"bad json")
+        for k in [k for k in req if k.lower() == "model"]: del req[k]  # case-insensitive upstream parsers
         req["model"] = pin
         body = json.dumps(req).encode(); length = len(body)
         keep = [h for h in keep if h.partition(b":")[0].lower() != b"content-length"] + [b"Content-Length: %d" % length]
@@ -93,7 +103,7 @@ def http_one(c, dial):
     with dial() as u:  # dial only once the head passed
         u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
         left = length - len(body)
-        while left > 0 and (d := c.recv(min(left, 65536))):
+        while left > 0 and (d := rx(min(left, 65536))):
             u.sendall(d); left -= len(d)
         c.settimeout(None)
         # anything the client sends after the body (a pipelined 2nd request) is read and dropped, never
