@@ -47,4 +47,11 @@ then echo "FAIL  public lane refuses non-github dir"; fail=1
 else echo "PASS  public lane refuses non-github dir"; fi
 rmdir "$nogh"
 
+# WORKER_DEPS: host deps visible at /work/node_modules, read-only (trading-lare: npx had no network)
+deps=$(mktemp -d); touch "$deps/marker"
+if WORKER_DEPS=$deps "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  '[ -e /work/node_modules/marker ] && ! touch /work/node_modules/probe 2>/dev/null' >/dev/null 2>&1
+then echo "PASS  deps bound read-only"; else echo "FAIL  deps bound read-only"; fail=1; fi
+rm -r "$deps"; rmdir "$wt/node_modules" 2>/dev/null
+
 exit $fail

@@ -57,7 +57,7 @@ run_one() { # returns 1 when the queue is empty
   wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
   body "$desc" >"$task"
   if git -C "$repo" fetch -q origin "$branch" && git -C "$repo" worktree add -q -B "$branch" "$wt/wt" FETCH_HEAD; then
-    out=$("${WORKER_TASK:-$here/worker-task}" --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push 2>&1)
+    out=$(WORKER_DEPS="$repo/node_modules" "${WORKER_TASK:-$here/worker-task}" --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push 2>&1)
     rc=$?
   else
     out="could not check out origin/$branch" rc=2
