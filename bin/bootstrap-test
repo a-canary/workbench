@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# bootstrap-test — QA role dependencies (wb-an0.11.3): bootstrap installs them idempotently,
+# README documents them. Runs bootstrap --dry-run only, against a throwaway HOME and stub python3.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+has() { grep -qF -- "$2" <<<"$1" && echo y || echo n; }
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/home" "$tmp/nopy" "$tmp/py"
+printf '#!/bin/sh\nexit 1\n' >"$tmp/nopy/python3"; printf '#!/bin/sh\nexit 0\n' >"$tmp/py/python3"
+chmod +x "$tmp/nopy/python3" "$tmp/py/python3"
+dry() { (cd "$here" && env HOME="$tmp/home" PATH="$1:$PATH" "${@:2}" ./bootstrap.sh --dry-run 2>&1); }
+
+check "bootstrap parses"                 "$(bash -n "$here/bootstrap.sh" && echo ok)" ok
+
+# fresh user: no chrome, python lacks pillow/numpy -> both installs listed
+out=$(dry "$tmp/nopy" WORKER_CHROME=)
+check "fresh: chrome install listed"     "$(has "$out" "npx @puppeteer/browsers install chrome-headless-shell")" y
+check "fresh: pillow+numpy listed"       "$(has "$out" "pip install --user pillow numpy")" y
+
+# already present: WORKER_CHROME dir holds the binary, python imports succeed -> both skipped
+mkdir -p "$tmp/chrome"; printf '#!/bin/sh\n' >"$tmp/chrome/chrome-headless-shell"; chmod +x "$tmp/chrome/chrome-headless-shell"
+out=$(dry "$tmp/py" WORKER_CHROME="$tmp/chrome")
+check "present: chrome install skipped"  "$(has "$out" "npx @puppeteer/browsers install")" n
+check "present: pip install skipped"     "$(has "$out" "pip install")" n
+
+# chrome found in puppeteer's cache (worker-sandbox's default lookup) also counts as present
+mkdir -p "$tmp/home/.cache/puppeteer/chrome-headless-shell/linux-1/chrome-headless-shell-linux64"
+cp "$tmp/chrome/chrome-headless-shell" "$tmp/home/.cache/puppeteer/chrome-headless-shell/linux-1/chrome-headless-shell-linux64/"
+out=$(dry "$tmp/py" WORKER_CHROME=)
+check "cache: chrome install skipped"    "$(has "$out" "npx @puppeteer/browsers install")" n
+
+readme=$(cat "$here/README.md")
+check "README: QA dependencies section"  "$(grep -c '^## QA role dependencies' "$here/README.md")" 1
+check "README: names chrome-headless-shell" "$(has "$readme" "chrome-headless-shell")" y
+check "README: names pillow numpy"       "$(has "$readme" "pillow numpy")" y
+check "README: names WORKER_CHROME"      "$(has "$readme" "WORKER_CHROME")" y
+exit $fails
