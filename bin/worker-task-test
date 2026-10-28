@@ -16,6 +16,11 @@ touch ok && eval "$ATTACK"
 EOF
 chmod +x "$tmp/stub"
 
+# a git whose staged-names listing errors: the runner-config check must fail closed, not skip
+mkdir "$tmp/gitfail"
+printf '#!/usr/bin/env bash\ncase " $* " in *" --cached --no-renames "*) exit 128 ;; esac\nexec %q "$@"\n' "$(command -v git)" > "$tmp/gitfail/git"
+chmod +x "$tmp/gitfail/git"
+
 # $1 name, $2 attack (run as the worker, in the worktree), $3 expected rc class: ok|refused
 run() {
   local wt="$tmp/wt-$RANDOM"
@@ -85,4 +90,5 @@ RED_MSG=$'red\n\nWorker-May-Edit: -e.' run "Worker-May-Edit '-e.' is a pattern, 
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$\nWorker-May-Edit: ' run "empty Worker-May-Edit adds nothing" 'echo x > conftest.py' refused
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
+PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 exit $fail
