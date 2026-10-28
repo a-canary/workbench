@@ -4,13 +4,14 @@
   relay.py unix2tcp SOCK HOST:PORT   # host side: listen on SOCK, dial HOST:PORT
   relay.py unix2http SOCK HOST:PORT  # same, but one checked HTTP request per connection:
                                      # path must be in RELAY_PATHS, Authorization is replaced
-                                     # with RELAY_KEY (so the key never enters the sandbox)
+                                     # with RELAY_KEY (so the key never enters the sandbox),
+                                     # and a POST body's "model" is forced to RELAY_MODEL if set
   relay.py tcp2unix HOST:PORT SOCK   # sandbox side: listen on HOST:PORT, dial SOCK
 
 The sandbox has no network namespace route out; this pair is the only door,
 and it opens onto exactly one upstream endpoint.
 """
-import os, re, socket, sys, threading
+import json, os, re, socket, sys, threading
 
 def pipe(a, b):
     try:
@@ -77,6 +78,16 @@ def http_one(c, dial):
             length = int(v)
         if k not in DROP and not k.startswith(b"proxy-"): keep.append(h)
     length = length or 0
+    pin = os.environ.get("RELAY_MODEL")
+    if pin and parts[0] == b"POST":  # re-serialize, so duplicate "model" keys can't parse differently upstream
+        if length > 16 << 20: return refuse(c, b"body too large")
+        while len(body) < length and (d := c.recv(65536)): body += d
+        try: req = json.loads(body[:length])
+        except ValueError: return refuse(c, b"bad json")
+        if not isinstance(req, dict): return refuse(c, b"bad json")
+        req["model"] = pin
+        body = json.dumps(req).encode(); length = len(body)
+        keep = [h for h in keep if h.partition(b":")[0].lower() != b"content-length"] + [b"Content-Length: %d" % length]
     keep.append(b"Connection: close")
     if os.environ.get("RELAY_KEY"): keep.append(b"Authorization: Bearer " + os.environ["RELAY_KEY"].encode())
     with dial() as u:  # dial only once the head passed
