@@ -30,13 +30,16 @@ case "$tool" in
   Bash)
     cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty')"
     if [ -n "$cmd" ]; then
-      # Heredoc bodies are prose, not commands: a body mentioning cp/mv and a
-      # path must not yield a write target. Strip bodies once, before every
-      # extractor below; the opening line stays, so the redirect that starts
-      # the heredoc is still scanned normally.
+      # Heredoc bodies fed to cat/tee are prose, not commands: a body mentioning
+      # cp/mv and a path must not yield a write target. Strip only those bodies,
+      # before every extractor below; the opening line stays, so its redirect is
+      # still scanned. Anything else (sh/bash <<EOF, <<<, a quote or # before
+      # <<) is not stripped and fails closed. Tag and body lines are normalised
+      # alike (trailing space/CR) so a padded tag can't hide the rest.
       scan="$(printf '%s' "$cmd" | awk '
-        !inbody && /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?[[:space:]]*$/ {
-          tag = $0; sub(/.*<<-?[[:space:]]*/, "", tag); gsub(/["'"'"']/, "", tag)
+        { sub(/\r$/, "") }
+        !inbody && /^[[:space:]]*(cat|tee)[[:space:]][^"'"'"'#<]*<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?[[:space:]]*$/ {
+          tag = $0; sub(/.*<<-?[[:space:]]*/, "", tag); gsub(/["'"'"'[:space:]]/, "", tag)
           inbody = 1; print; next }
         inbody { line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
           if (line == tag) inbody = 0; next }

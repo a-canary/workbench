@@ -260,6 +260,23 @@ test("a write after the heredoc terminator is still gated", () => {
   expect(r.code).toBe(2);
 });
 
+// Only cat/tee bodies are prose. A shell runs its heredoc body; a here-string,
+// a padded/CRLF tag, or a tag inside a quote/comment must not hide later lines.
+for (const [name, mk] of [
+  ["heredoc fed to sh", (o: string) => ["sh <<EOF", "cp a " + o, "EOF"]],
+  ["padded tag", (o: string) => ["cat > /tmp/a <<EOF  ", "x", "EOF", "cp a " + o]],
+  ["CRLF tag", (o: string) => ["cat > /tmp/a <<EOF\r", "x", "EOF\r", "cp a " + o]],
+  ["here-string", (o: string) => ["cat <<<EOF", "cp a " + o, "EOF"]],
+  ["tag in a quote", (o: string) => ['echo "see <<EOF"', "cp a " + o, "EOF"]],
+  ["tag in a comment", (o: string) => ["true # <<EOF", "cp a " + o]],
+] as const) {
+  test(`heredoc stripping fails closed: ${name}`, () => {
+    const cmd = mk("~" + "/bin/x").join("\n");
+    const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+    expect(r.code).toBe(2);
+  });
+}
+
 // Trailing whitespace once made the last-arg extractor return nothing (fail-open).
 test("mv with trailing whitespace still gates its destination", () => {
   const cmd = "mv a.json " + "~" + "/bin/ ";
