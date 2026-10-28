@@ -40,6 +40,40 @@ while IFS=$'\t' read -r name cmd; do
   then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
 done <<< "$checks"
 
+# research profile = internet (search door only) + read-only files; never write or execute tools
+rchecks=$(cat <<EOF
+research: worktree read-only	! touch /work/.sbx-probe 2>/dev/null
+research: worktree readable	ls /work >/dev/null
+research: raw internet still blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
+research: search door reachable	[ "\$(curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:\$SEARCH_PORT/mcp)" != 000 ]
+research: endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/v1/models
+EOF
+)
+while IFS=$'\t' read -r name cmd; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
+  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+done <<< "$rchecks"
+if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]' >/dev/null 2>&1
+then echo "PASS  build: no search door"; else echo "FAIL  build: no search door"; fail=1; fi
+for t in write edit bash; do
+  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --tools "read,$t" --exec true >/dev/null 2>&1
+  then echo "FAIL  research refuses $t tool"; fail=1; else echo "PASS  research refuses $t tool"; fi
+done
+# the invariant itself: tools DECLARED to the model (from pi's JSON events, not the model's self-report)
+task=$(mktemp); echo "Reply with exactly: OK" > "$task"
+for p in research build; do
+  got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --profile $p --task "$task" --timeout 240 2>/dev/null \
+    | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+  case $p in
+    research) want=find,grep,ls,mcp__search__fetch,mcp__search__fetch_batch,mcp__search__research,mcp__search__search,read, ;;
+    build) want=bash,edit,read,write, ;;
+  esac
+  if [ "$got" = "$want" ]; then echo "PASS  $p declares exactly its tools"; else echo "FAIL  $p declares '$got' want '$want'"; fail=1; fi
+done
+rm -f "$task"
+if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec true >/dev/null 2>&1
+then echo "FAIL  unknown profile refused"; fail=1; else echo "PASS  unknown profile refused"; fi
+
 # fail-closed: public lane must refuse a non-PUBLIC (or unresolvable) repo
 nogh=$(mktemp -d)
 if "$here/worker-sandbox" --worktree "$nogh" --lane public --exec true >/dev/null 2>&1
