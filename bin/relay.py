@@ -23,15 +23,21 @@ def pipe(a, b):
             try: s.shutdown(socket.SHUT_RDWR)
             except OSError: pass
 
+SLOTS = threading.BoundedSemaphore(int(os.environ.get("RELAY_MAX_CONN", "16")))
+
 def serve(listener, dial):
     while True:
         c, _ = listener.accept()
-        try:
-            u = dial()
-        except OSError:
+        if not SLOTS.acquire(blocking=False):  # cap host threads + upstream connections
             c.close(); continue
-        threading.Thread(target=pipe, args=(c, u), daemon=True).start()
-        threading.Thread(target=pipe, args=(u, c), daemon=True).start()
+        def both(c=c):
+            try:
+                u = dial()
+            except OSError:
+                c.close(); SLOTS.release(); return
+            t = threading.Thread(target=pipe, args=(u, c), daemon=True); t.start()
+            pipe(c, u); t.join(); SLOTS.release()
+        threading.Thread(target=both, daemon=True).start()
 
 PATHS = tuple(os.environ.get("RELAY_PATHS", "/v1/chat/completions,/v1/models").split(","))
 DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te")
@@ -41,7 +47,6 @@ def refuse(c, why):
     c.close()
 
 TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-SLOTS = threading.BoundedSemaphore(int(os.environ.get("RELAY_MAX_CONN", "16")))
 
 def http_one(c, dial):
     """Forward exactly one request whose head passed the allowlist, then only the response."""
@@ -53,6 +58,8 @@ def http_one(c, dial):
         buf += d
     head, body = buf.split(b"\r\n\r\n", 1)
     line, *hdrs = head.split(b"\r\n")
+    if b"\r" in head.replace(b"\r\n", b"") or b"\n" in head.replace(b"\r\n", b""):
+        return refuse(c, b"bare CR/LF")
     parts = line.split(b" ")
     if len(parts) != 3 or parts[0] not in (b"GET", b"POST") or not parts[2].startswith(b"HTTP/1."):
         return refuse(c, b"method")
@@ -81,7 +88,21 @@ def http_one(c, dial):
         # anything the client sends after the body (a pipelined 2nd request) is read and dropped, never
         # forwarded; the client hanging up closes the upstream too, even if the upstream keeps it alive
         threading.Thread(target=drain, args=(c, u), daemon=True).start()
-        pipe(u, c)
+        respond(u, c)
+
+def respond(u, c):
+    """Pass the response through with Connection: close in its head, so a keep-alive client opens a
+    new connection for its next request instead of waiting on this one (whose 2nd request is dropped)."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        d = u.recv(65536)
+        if not d or len(buf) > 65536: c.sendall(buf); return  # no head: pass through, then close
+        buf += d
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    line, *hdrs = head.split(b"\r\n")
+    hdrs = [h for h in hdrs if h.partition(b":")[0].strip().lower() not in (b"connection", b"keep-alive")]
+    c.sendall(b"\r\n".join([line, *hdrs, b"Connection: close"]) + b"\r\n\r\n" + rest)
+    pipe(u, c)
 
 def drain(c, u):
     try:

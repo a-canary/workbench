@@ -94,9 +94,12 @@ need_public() {
     vis=$(cd "$wt" && gh repo view --json visibility -q .visibility 2>/dev/null) && break; vis=; sleep 1
   done
   [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+  local other; other=$(git -C "$wt" ls-files -o --directory | head -3)
+  [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"
 }
 # research can fetch any URL, so whatever it reads can leave in a query string: it may read a PUBLIC
-# repo, or nothing at all (an empty --worktree = web-only research)
+# repo, or nothing at all (an empty --worktree = web-only research; the caller must not write into it
+# during the run: it is checked once, at start)
 [ "$profile" != research ] || [ -z "$(ls -A "$wt")" ] || need_public "research profile"
 case $lane in
   private)
@@ -199,6 +202,8 @@ case $profile in
       for p in PIL pillow.libs numpy numpy.libs; do [ -e "$site/$p" ] && args+=(--ro-bind "$site/$p" "/opt/py/$p"); done
       args+=(--setenv PYTHONPATH /opt/py) ;;
     esac ;;
+  # ponytail: no disk quota, a worker can fill the worktree filesystem; add a size-capped loop/XFS
+  # project quota if workers run unattended on a shared disk
   *) args+=(--bind "$wt" /work) ;;
 esac
 if [ -d "$wt/.git" ]; then args+=(--tmpfs /work/.git)
