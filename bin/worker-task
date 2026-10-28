@@ -29,17 +29,19 @@ while [ $# -gt 0 ]; do
 done
 [ -d "$wt" ] && [ -f "$task" ] && [ -n "$test" ] && [ -n "$lane" ] || die "--worktree --lane --task --test required"
 # host git never runs worker-controlled config (fsmonitor) and never descends into submodules
-g() { git -C "$wt" -c core.fsmonitor= "$@"; }
+# host-side git: core.hooksPath may point into the tree (.githooks, .husky), where the worker writes hooks;
+# quotePath off so non-ASCII names match as pathspecs and patterns instead of slipping past them quoted
+g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false "$@"; }
 g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] || die "worktree not clean"
 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 log() { echo "worker-task: $*" >&2; }
 
-mapfile -t protected < <(git -C "$wt" show --name-only --format= HEAD)
+mapfile -t protected < <(g show --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
 # read before the worker runs (the jail masks .git anyway)
-may_edit=$(git -C "$wt" log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
-[ -z "$may_edit" ] || ! grep -qE -- "$may_edit" <<<'' || die "Worker-May-Edit '$may_edit' matches every path"
+may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
+[ -z "$may_edit" ] || ! grep -qE -- "$may_edit" <<<$'\nzz/never-a-real-path.q' || die "Worker-May-Edit '$may_edit' matches every path"
 # files that change how the test runs or what the leak scan sees, matched anywhere in the tree:
 # manifests/locks, *config* and rc/env dotfiles, toml/ini/cfg, make, python import hooks, compiled .pyc,
 # git attributes, gitleaks config. ponytail: a denylist; the upgrade is the RED commit declaring the
@@ -62,7 +64,7 @@ g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && die "worker produced no changes"
 # --no-renames: a rename would list only its new name and hide the config file it removed
-cfg=$(g diff --cached --no-renames --name-only | grep -E "$runner_cfg" | { [ -n "$may_edit" ] && grep -vE "$may_edit" || cat; }) \
+cfg=$(g diff --cached --no-renames --name-only | grep -E "$runner_cfg" | { [ -n "$may_edit" ] && grep -vE -- "$may_edit" || cat; }) \
   && [ -n "$cfg" ] && die "worker modified test/runner config: $(echo $cfg) (RED commit can allow with Worker-May-Edit:)"
 
 # GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
@@ -80,13 +82,13 @@ log "GREEN: $test"
 (cd "$wt" && gitleaks protect --staged --redact --no-banner --config "$here/gitleaks.toml" >&2) || die "gitleaks flagged the diff"
 
 subj="worker: $(head -c 60 "$task" | head -1)"
-git -C "$wt" -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL:-pi-worker@localhost}" \
-  commit -q -m "$subj" -m "Test: $test (RED->GREEN in sandbox, lane=$lane)"
-log "committed $(git -C "$wt" rev-parse --short HEAD)"
+g -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL:-pi-worker@localhost}" \
+  commit -q --no-verify -m "$subj" -m "Test: $test (RED->GREEN in sandbox, lane=$lane)"
+log "committed $(g rev-parse --short HEAD)"
 
 if [ -n "$push" ]; then
-  git -C "$wt" push -q -u origin HEAD
+  g push -q --no-verify -u origin HEAD
   # --base: never trust the GitHub default branch; arc-webui's was a 3-month-stale master (wb-7xq).
-  base=${WORKER_BASE:-$(git -C "$wt" rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
+  base=${WORKER_BASE:-$(g rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
   (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)")
 fi

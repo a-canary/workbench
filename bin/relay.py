@@ -92,7 +92,9 @@ def http_one(c, dial):
 
 def respond(u, c):
     """Pass the response through with Connection: close in its head, so a keep-alive client opens a
-    new connection for its next request instead of waiting on this one (whose 2nd request is dropped)."""
+    new connection for its next request instead of waiting on this one (whose 2nd request is dropped).
+    ponytail: only the first head is rewritten; after a 1xx (Expect: 100-continue) the final head passes
+    as-is. Loop over 1xx heads if a client in the jail ever sends Expect."""
     buf = b""
     while b"\r\n\r\n" not in buf:
         d = u.recv(65536)
@@ -129,7 +131,10 @@ if __name__ == "__main__":
             def one(c=c):
                 try: http_one(c, dial)
                 except (OSError, ValueError): pass
-                finally: c.close(); SLOTS.release()
+                finally:  # shutdown, not just close: drain() holds c in recv, so close() alone sends no EOF
+                    try: c.shutdown(socket.SHUT_RDWR)
+                    except OSError: pass
+                    c.close(); SLOTS.release()
             threading.Thread(target=one, daemon=True).start()
     elif mode == "tcp2unix":
         l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
