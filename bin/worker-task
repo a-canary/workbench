@@ -69,5 +69,7 @@ log "committed $(git -C "$wt" rev-parse --short HEAD)"
 
 if [ -n "$push" ]; then
   git -C "$wt" push -q -u origin HEAD
-  (cd "$wt" && gh pr create --fill --head "$(git branch --show-current)")
+  # --base: never trust the GitHub default branch; arc-webui's was a 3-month-stale master (wb-7xq).
+  base=${WORKER_BASE:-$(git -C "$wt" rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
+  (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)")
 fi
