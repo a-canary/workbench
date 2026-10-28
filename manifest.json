@@ -29,8 +29,8 @@
     },
     "director": {
       "path": "director",
-      "status": "wip",
-      "vet": "own tests (bun test 129/0) + write-lane hook verdict probe; not pass-rate benchable"
+      "vet": "own tests (bun test 135/0 at last_tested) + write-lane hook live and identical to master; not pass-rate benchable",
+      "last_tested": "16d3e98b3e0df3f9955f1c0bdca4dc1b546da780"
     }
   },
   "bench": {
