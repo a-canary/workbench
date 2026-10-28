@@ -19,7 +19,7 @@ on-task-verified: merge       # merge | draft-pr | <skill-name>
 todo-list: native             # native | arc-agents | <skill-name>
 feedback-sink: jsonl          # jsonl (.arc/feedback.jsonl) | <api-url> | <skill-name>
 planning-target: prd-file     # prd-file | arc-agents-ledger | kanban | <skill-name>
-memory: .arc/director         # .arc/director (in-repo, default) | ~/vault/agents/director | <path>
+memory: .arc/director         # .arc/director (in-repo, default) | <shared-state-dir> | <path>
 capacity: none                # none | capacity — shared cross-director provider headroom (advisory, fail-open)
 
 model:

@@ -8,9 +8,10 @@ Triggers when the parent repo has no `AGENTS.md`, or has one with no `## Directo
 bindings` section. Runs once, before the normal boot sequence, then falls through
 into it.
 
-1. Run the discovery script — deterministic, no guessing:
+1. Run the discovery script from the target repo — deterministic, no guessing
+   (`<director-root>` = this director checkout, e.g. `workbench/director`):
    ```
-   bash src/driver/scripts/discover-setup.sh
+   bash <director-root>/src/driver/scripts/discover-setup.sh
    ```
    Prints `repo-root`, `agents-md-exists`, `director-bindings-exist`,
    `git-remote`, `arc-agents-available`, `arc-agents-config`, `vault-path`,
@@ -41,7 +42,7 @@ into it.
      the user opts in.
 
 3. Write `AGENTS.md` at the target repo root from
-   `src/driver/AGENTS.md.template`, filling in the answers. If
+   `<director-root>/src/driver/AGENTS.md.template`, filling in the answers. If
    `AGENTS.md` already exists (just missing the bindings section), append the
    `## Director bindings` block rather than overwriting the file.
 
