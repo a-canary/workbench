@@ -10,7 +10,7 @@ into it.
 
 1. Run the discovery script — deterministic, no guessing:
    ```
-   bash skills/director/scripts/discover-setup.sh
+   bash src/driver/scripts/discover-setup.sh
    ```
    Prints `repo-root`, `agents-md-exists`, `director-bindings-exist`,
    `git-remote`, `arc-agents-available`, `arc-agents-config`, `vault-path`,
@@ -41,7 +41,7 @@ into it.
      the user opts in.
 
 3. Write `AGENTS.md` at the target repo root from
-   `skills/director/AGENTS.md.template`, filling in the answers. If
+   `src/driver/AGENTS.md.template`, filling in the answers. If
    `AGENTS.md` already exists (just missing the bindings section), append the
    `## Director bindings` block rather than overwriting the file.
 
