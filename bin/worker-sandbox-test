@@ -70,6 +70,14 @@ for p in research build; do
   esac
   if [ "$got" = "$want" ]; then echo "PASS  $p declares exactly its tools"; else echo "FAIL  $p declares '$got' want '$want'"; fail=1; fi
 done
+# extensions: whitelisted file loads in build, its tool is declared, its code has no internet; research refuses them
+got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --task "$task" --timeout 240 \
+  --extensions "$here/test-ext-probe.ts" --tools read,probe_tool 2>/dev/null | grep -oE '"name":"probe_tool"' | head -1)
+if [ -n "$got" ]; then echo "PASS  build: whitelisted extension tool declared"; else echo "FAIL  build: whitelisted extension tool declared"; fail=1; fi
+net=$(cat "$wt/.ext-net" 2>/dev/null); rm -f "$wt/.ext-net"
+if [ "$net" = blocked ]; then echo "PASS  build: extension code has no internet"; else echo "FAIL  build: extension code internet='$net'"; fail=1; fi
+if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --extensions "$here/test-ext-probe.ts" --exec true >/dev/null 2>&1
+then echo "FAIL  research refuses extensions"; fail=1; else echo "PASS  research refuses extensions"; fi
 rm -f "$task"
 if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec true >/dev/null 2>&1
 then echo "FAIL  unknown profile refused"; fail=1; else echo "PASS  unknown profile refused"; fi

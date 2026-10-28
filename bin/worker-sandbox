@@ -2,10 +2,11 @@
 # worker-sandbox — run a pi worker agent jailed to one git worktree.
 #
 #   worker-sandbox --worktree DIR --lane private|public --task FILE \
-#                  [--profile build|research] [--tools ...] [--timeout 600] [--exec CMD...]
+#                  [--profile build|research] [--tools ...] [--extensions a.ts,b.ts] [--timeout 600] [--exec CMD...]
 #
 # Two profiles, never mixed (an agent that reads the internet must not be able to act on it):
-#   build    (default) read-write-execute: tools ⊆ read,edit,write,bash,grep,find,ls; worktree writable; no internet.
+#   build    (default) read-write-execute: any tools, incl. whitelisted --extensions (only those files enter the
+#            jail's pi home); worktree writable; no internet — so an extension that curls/searches/downloads just fails.
 #   research internet + read-only: tools ⊆ read,grep,find,ls plus a search/fetch MCP door; worktree read-only;
 #            the answer is pi's stdout — the host writes any file. Internet = only what the search MCP fetches
 #            (its SSRF guard refuses private/loopback hosts; forced on here).
@@ -23,12 +24,13 @@ set -euo pipefail
 die() { echo "worker-sandbox: $*" >&2; exit 2; }
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
-wt= lane= task= tools= profile=build tmo=600 exec_cmd=()
+wt= lane= task= tools= profile=build exts= tmo=600 exec_cmd=()
 while [ $# -gt 0 ]; do
   case $1 in
     --worktree) wt=$2; shift 2 ;;
     --lane) lane=$2; shift 2 ;;
     --profile) profile=$2; shift 2 ;;
+    --extensions) exts=$2; shift 2 ;;
     --task) task=$2; shift 2 ;;
     --tools) tools=$2; shift 2 ;;
     --timeout) tmo=$2; shift 2 ;;
@@ -39,15 +41,18 @@ done
 [ -d "$wt" ] || die "--worktree DIR required"
 wt=$(readlink -f "$wt")
 [ ${#exec_cmd[@]} -gt 0 ] || [ -f "$task" ] || die "--task FILE required"
+# build: the jail is the boundary (no internet), so any tool — including whitelisted extension tools — is fine.
+# research: strict allowlist and no extensions: an extension tool could execute, and research has an internet door.
 case $profile in
-  build)    allow=read,edit,write,bash,grep,find,ls; : "${tools:=read,edit,write,bash}" ;;
-  research) allow=read,grep,find,ls; : "${tools:=read,grep,find,ls}" ;;
+  build)    : "${tools:=read,edit,write,bash}" ;;
+  research) : "${tools:=read,grep,find,ls}"
+            [ -z "$exts" ] || die "--extensions not allowed in profile research (internet + read-only)"
+            for t in ${tools//,/ }; do
+              [[ ,read,grep,find,ls, == *,$t,* ]] || die "tool '$t' not allowed in profile research (internet + read-only)"
+            done ;;
   *) die "--profile build|research" ;;
 esac
-[[ $tools =~ ^[a-z,]+$ ]] || die "bad --tools"
-for t in ${tools//,/ }; do
-  [[ ,$allow, == *,$t,* ]] || die "tool '$t' not allowed in profile $profile (research = internet + read-only; build = read-write-execute, no internet)"
-done
+[[ $tools =~ ^[a-z_,]+$ ]] || die "bad --tools"
 [[ $tmo =~ ^[0-9]+$ ]] || die "bad --timeout"
 
 case $lane in
@@ -101,7 +106,15 @@ jq -n --arg port "$port" --arg model "$model" --arg key "$key" '{providers:{w:{
   baseUrl:"http://127.0.0.1:\($port)/v1", api:"openai-completions", apiKey:$key,
   compat:{supportsDeveloperRole:false, sendSessionAffinityHeaders:true},
   models:[{id:$model, name:$model, input:["text"], maxTokens:16384}]}}}' > "$tmp/agent/models.json"
-echo '{}' > "$tmp/agent/settings.json"
+# extension whitelist: only the named files exist in the jail's pi home (the host's ~/.pi is never visible).
+# ponytail: single-file extensions only; ones importing npm packages need their node_modules bound — add when needed.
+jexts=()
+for e in ${exts//,/ }; do
+  [ -f "$e" ] || die "extension not found: $e"
+  mkdir -p "$tmp/agent/extensions"; cp "$e" "$tmp/agent/extensions/"
+  jexts+=("/home/worker/.pi/agent/extensions/$(basename "$e")")
+done
+jq -n '{extensions: $ARGS.positional}' --args "${jexts[@]}" > "$tmp/agent/settings.json"
 # exposure=direct: plain tool calls. pi's default "codemode" has the model write code — that's execute, not read.
 # Same port inside the jail as on the host: search-mcp rejects a mismatched Host header (421, DNS-rebinding guard).
 [ "$profile" = research ] && jq -n --arg u "http://127.0.0.1:$sport/mcp" \
@@ -140,11 +153,11 @@ args+=(--bind "$tmp/agent" /home/worker/.pi/agent
   --remount-ro /)  # root tmpfs (incl. /etc parent of the file binds) read-only; submounts keep their flags
 
 if [ ${#exec_cmd[@]} -eq 0 ]; then
-  mcp=(--no-mcp --no-extensions) ptools=$tools
+  mcp=(--no-mcp) ptools=$tools  # extensions on: the jail's pi home holds only built-ins + the whitelist
   if [ "$profile" = research ]; then
     # web-only MCP tools. search-mcp runs on the HOST, so exclude anything touching host disk or shared state:
     # read_doc (local files), download (writes), cache_search (other sessions' fetches), extract_structured.
-    # No --no-extensions: pi's MCP client IS a built-in extension. Safe: the jail HOME has no user extensions.
+    # pi's MCP client is a built-in extension, so --no-extensions would silently drop these tools.
     mcp=() ptools=$tools,mcp__search__search,mcp__search__fetch,mcp__search__fetch_batch,mcp__search__research
   fi
   exec_cmd=(pi -p --no-session "${mcp[@]}" --no-skills --no-prompt-templates
