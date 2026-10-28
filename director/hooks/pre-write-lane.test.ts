@@ -229,57 +229,11 @@ test("Bash redirect to the stderr device is still blocked", () => {
   expect(r.code).toBe(2);
 });
 
-// A heredoc body is prose, not commands: `cat > f <<TAG ... EOF` mentioning a
-// write verb and a path must not extract a target from the body. This bug
-// blocked the very report of itself, so the body case is pinned here.
-test("heredoc body mentioning a write verb is not a write target", () => {
-  const out = "~" + "/bin/x";
-  const cmd = [
-    "cat > /tmp/report.md <<EOF",
-    `we must never cp secrets ${out}`,
-    "EOF",
-  ].join("\n");
-  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
-  expect(r.code).toBe(0);
-});
-
-// The heredoc-opening line is NOT part of the body: its redirect still gates.
-test("the redirect that opens a heredoc is still gated", () => {
-  const out = "~" + "/bin/evil.txt";
-  const cmd = ["cat > " + out + " <<EOF", "payload", "EOF"].join("\n");
-  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
-  expect(r.code).toBe(2);
-});
-
-// Body-stripping must not swallow the rest of the command when the terminator
-// is present: writes after the heredoc closes are still gated.
-test("a write after the heredoc terminator is still gated", () => {
-  const out = "~" + "/bin/after.txt";
-  const cmd = ["cat > /tmp/a.md <<EOF", "body", "EOF", "echo x > " + out].join("\n");
-  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
-  expect(r.code).toBe(2);
-});
-
-// Only cat/tee bodies are prose. A shell runs its heredoc body; a here-string,
-// a padded/CRLF tag, or a tag inside a quote/comment must not hide later lines.
-for (const [name, mk] of [
-  ["heredoc fed to sh", (o: string) => ["sh <<EOF", "cp a " + o, "EOF"]],
-  ["padded tag", (o: string) => ["cat > /tmp/a <<EOF  ", "x", "EOF", "cp a " + o]],
-  ["CRLF tag", (o: string) => ["cat > /tmp/a <<EOF\r", "x", "EOF\r", "cp a " + o]],
-  ["here-string", (o: string) => ["cat <<<EOF", "cp a " + o, "EOF"]],
-  ["tag in a quote", (o: string) => ['echo "see <<EOF"', "cp a " + o, "EOF"]],
-  ["tag in a comment", (o: string) => ["true # <<EOF", "cp a " + o]],
-] as const) {
-  test(`heredoc stripping fails closed: ${name}`, () => {
-    const cmd = mk("~" + "/bin/x").join("\n");
-    const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
-    expect(r.code).toBe(2);
-  });
-}
-
 // Trailing whitespace once made the last-arg extractor return nothing (fail-open).
 test("mv with trailing whitespace still gates its destination", () => {
-  const cmd = "mv a.json " + "~" + "/bin/ ";
-  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
-  expect(r.code).toBe(2);
+  for (const tail of [" ", "\t"]) {
+    const cmd = "mv a.json " + "~" + "/bin/" + tail;
+    const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+    expect(r.code).toBe(2);
+  }
 });
