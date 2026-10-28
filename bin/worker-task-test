@@ -22,13 +22,14 @@ run() {
   git init -q "$wt"
   echo '{}' > "$wt/package.json"
   git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
-  echo 'test -f ok' > "$wt/t.sh"
-  git -C "$wt" add t.sh && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
+  local redf=${REDF:-t.sh}
+  echo 'test -f ok' > "$wt/$redf"
+  git -C "$wt" add "$redf" && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
   [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
-    --task "$tmp/task" --test 'sh t.sh' >/dev/null 2>&1
+    --task "$tmp/task" --test "sh '$redf'" >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
   if [ -e "$tmp/pwned" ]; then echo "FAIL  $1 (host code ran)"; fail=1
@@ -44,6 +45,8 @@ run "nested .git file refused" "mkdir d && echo 'gitdir: /tmp' > d/.git" refused
 run "runner config edit refused" 'echo "{\"scripts\":{}}" > package.json' refused
 run "nested conftest refused" 'mkdir -p a && echo x > a/conftest.py' refused
 run "non-ASCII path conftest refused" 'mkdir -p té && echo x > té/conftest.py' refused
+REDF='q"t.sh' run "quoted-name RED test file stays protected" "echo true > 'q\"t.sh'" refused
+run "quoted-name path conftest refused" "mkdir -p 'a\"b' && echo x > 'a\"b/conftest.py'" refused
 # a repo whose hooksPath lives in the tree: the worker's hooks must not run on the host commit/push
 HOOKS=.githooks run "worker-written commit hook never runs" "mkdir -p .githooks && printf '#!/bin/sh\ntouch $tmp/pwned\n' > .githooks/pre-commit && chmod +x .githooks/pre-commit" ok
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok

@@ -94,7 +94,7 @@ need_public() {
     vis=$(cd "$wt" && gh repo view "$(git remote get-url origin)" --json visibility -q .visibility 2>/dev/null) && break; vis=; sleep 1
   done
   [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
-  local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache -x node_modules | head -3)
+  local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache | head -3)
   [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"
 }
 # research can fetch any URL, so whatever it reads can leave in a query string: it may read a PUBLIC
