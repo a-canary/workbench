@@ -9,7 +9,8 @@
 # Profiles, never mixed (an agent that reads the internet must not be able to act on it):
 #   build    (default) read-write-execute: any tools, incl. whitelisted --extensions (only those files enter the
 #            jail's pi home); worktree writable; no internet — so an extension that curls/searches/downloads just fails.
-#   research internet + read-only: tools ⊆ read,grep,find,ls plus a search/fetch MCP door; worktree read-only;
+#   research internet + read-only, PUBLIC repos only (a fetch URL can carry what it read out):
+#            tools ⊆ read,grep,find,ls plus a search/fetch MCP door; worktree read-only;
 #            the answer is pi's stdout — the host writes any file. Internet = only what the search MCP fetches
 #            (its SSRF guard refuses private/loopback hosts; forced on here).
 #   qa       read-only worktree, no bash, writes only a fresh /out dir (--out, else a new tmp dir; path on stderr);
@@ -20,7 +21,8 @@
 # cleared env, read-only /usr, a handful of /etc files, tmpfs $HOME and /tmp.
 # The ONLY writable host path is the worktree (at /work); its .git is masked so
 # the worker cannot rewrite history or reach the main repo — the harness commits.
-# The ONLY network path is a unix-socket relay to exactly one LLM endpoint:
+# The ONLY network path is a unix-socket relay to exactly one LLM endpoint, one request per
+# connection to its chat/models API only; any API key is added host-side and never enters the jail:
 #   private lane -> local V100 laneproxy (never leaves the box)
 #   public  lane -> 9router Worker combo (cloud; refused unless repo is PUBLIC)
 # --exec runs CMD in the jail instead of pi (used by worker-sandbox-test).
@@ -85,16 +87,23 @@ if [ "$profile" = qa ]; then
 fi
 [[ $tmo =~ ^[0-9]+$ ]] || die "bad --timeout"
 
+# fail closed: only a repo GitHub reports PUBLIC may be read by something that can reach the internet
+need_public() {
+  local vis= _
+  for _ in 1 2 3; do  # gh flakes on the network; still fails closed after 3 tries
+    vis=$(cd "$wt" && gh repo view --json visibility -q .visibility 2>/dev/null) && break; vis=; sleep 1
+  done
+  [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+}
+# research can fetch any URL, so whatever it reads can leave in a query string
+[ "$profile" != research ] || need_public "research profile"
 case $lane in
   private)
-    port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key=none ;;
+    port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key= ;;
   public)
-    # fail closed: only a repo GitHub reports PUBLIC may send code to a cloud model
-    vis=$(cd "$wt" && gh repo view --json visibility -q .visibility 2>/dev/null) || vis=
-    [ "$vis" = PUBLIC ] || die "public lane refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+    need_public "public lane"  # sends the code to a cloud model
     port=${WORKER_PUBLIC_PORT:-20128} model=${WORKER_PUBLIC_MODEL:-Worker}
-    # ponytail: key is visible inside the jail (pi needs it); it can only reach 9router
-    # through the relay, and the harness greps the diff for it before committing.
+    # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;
   *) die "--lane private|public required" ;;
 esac
@@ -108,8 +117,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# host side of the only door: unix socket -> 127.0.0.1:$port
-python3 "$here/relay.py" unix2tcp "$tmp/ep.sock" "127.0.0.1:$port" &
+# host side of the only door: unix socket -> 127.0.0.1:$port, one allowlisted LLM API request per connection
+RELAY_KEY=$key python3 "$here/relay.py" unix2http "$tmp/ep.sock" "127.0.0.1:$port" &
 relay_pid=$!
 for _ in $(seq 50); do [ -S "$tmp/ep.sock" ] && break; sleep 0.1; done
 [ -S "$tmp/ep.sock" ] || die "relay failed to start"
@@ -138,8 +147,8 @@ fi
 
 mkdir -p "$tmp/agent"
 umask 077
-jq -n --arg port "$port" --arg model "$model" --arg key "$key" '{providers:{w:{
-  baseUrl:"http://127.0.0.1:\($port)/v1", api:"openai-completions", apiKey:$key,
+jq -n --arg port "$port" --arg model "$model" '{providers:{w:{
+  baseUrl:"http://127.0.0.1:\($port)/v1", api:"openai-completions", apiKey:"none",
   compat:{supportsDeveloperRole:false, sendSessionAffinityHeaders:true},
   models:[{id:$model, name:$model, input:["text"], maxTokens:16384}]}}}' > "$tmp/agent/models.json"
 # extension whitelist: only the named files exist in the jail's pi home (the host's ~/.pi is never visible).
@@ -219,11 +228,12 @@ inner='python3 /run/relay.py tcp2unix 127.0.0.1:$WORKER_PORT /run/ep.sock &
 for _ in $(seq 50); do python3 -c "import socket,os;socket.create_connection((\"127.0.0.1\",int(os.environ[\"WORKER_PORT\"])),1)" 2>/dev/null && break; sleep 0.1; done
 "$@"; rc=$?; kill $(jobs -p) 2>/dev/null; exit $rc'
 
-# ponytail: cgroup caps via systemd user scope when available; plain run otherwise
-lim=()
-if systemd-run --user --scope -q true 2>/dev/null; then
-  lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
-fi
+# cgroup caps via a systemd user scope. Fail closed: cron has no XDG_RUNTIME_DIR, so point it at the
+# lingering user manager; WORKER_NO_LIMITS=1 is the explicit opt-out for hosts without one.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
+if [ "${WORKER_NO_LIMITS:-}" = 1 ]; then lim=()
+elif ! systemd-run --user --scope -q true 2>/dev/null; then die "no systemd user scope for cgroup limits (WORKER_NO_LIMITS=1 to run without)"; fi
 set +e
 "${lim[@]}" timeout -k 10 "$tmo" bwrap "${args[@]}" /bin/sh -c "$inner" sh "${exec_cmd[@]}"
 rc=$?

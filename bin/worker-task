@@ -5,8 +5,9 @@
 #               [--tools read,edit,write,bash] [--timeout 600] [--push]
 #
 # Contract: the worktree's HEAD commit is the director's failing test (RED commit).
-# The worker may not touch any file that commit touched, so it can't "pass" by
-# editing the test. Tests run inside the jail too: worker-written code never runs
+# The worker may not touch any file that commit touched, nor test/runner config
+# (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
+# it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
 set -euo pipefail
 
@@ -36,11 +37,15 @@ log() { echo "worker-task: $*" >&2; }
 
 mapfile -t protected < <(git -C "$wt" show --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
+# files that change how the test runs or what the leak scan sees; matched anywhere in the tree
+runner_cfg='(^|/)(package\.json|bunfig\.toml|(vite|vitest|jest)\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|conftest\.py|pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini|sitecustomize\.py|[^/]*\.pth|Makefile|\.gitleaks\.toml|\.gitleaksignore)$'
+ignored() { g ls-files -oi --exclude-standard --directory | sort; }
 
 log "RED: $test"
 if sbx --timeout 300 --exec sh -c "$test" >&2; then die "test already passes — not a RED commit"; fi
 
 log "worker: lane=$lane tools=$tools"
+pre_ignored=$(ignored)
 t0=$(date +%s)
 sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
 log "worker took $(( $(date +%s) - t0 ))s"
@@ -51,16 +56,19 @@ g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test 
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && die "worker produced no changes"
+cfg=$(g diff --cached --name-only | grep -E "$runner_cfg") && die "worker modified test/runner config: $(echo $cfg)"
+# git-ignored files never reach the commit but would shape GREEN (a stub module, a fake runner): drop new ones.
+# ponytail: ignored files that existed before the run (a worktree's own node_modules) are trusted;
+# lane-run lends deps read-only instead, which is the safe setup.
+mapfile -t new_ignored < <(comm -13 <(echo "$pre_ignored") <(ignored))
+[ ${#new_ignored[@]} -eq 0 ] || { log "dropping worker-written ignored files: ${new_ignored[*]}"; g clean -qfdX -- "${new_ignored[@]}"; }
 
 log "GREEN: $test"
 sbx --timeout 300 --exec sh -c "$test" >&2 || die "test still fails after worker"
 
-# leak scan: generic secrets, plus the lane key itself when one entered the jail
-(cd "$wt" && gitleaks protect --staged --redact --no-banner >&2) || die "gitleaks flagged the diff"
-if [ "$lane" = public ]; then
-  key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)}
-  git -C "$wt" diff --cached | grep -qF -- "$key" && die "lane key found in diff"
-fi
+# leak scan with the host's pinned config: a worker-written .gitleaks.toml would otherwise allowlist its own leak.
+# (The lane key never enters the jail: the relay adds it host-side.)
+(cd "$wt" && gitleaks protect --staged --redact --no-banner --config "$here/gitleaks.toml" >&2) || die "gitleaks flagged the diff"
 
 subj="worker: $(head -c 60 "$task" | head -1)"
 git -C "$wt" -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL:-pi-worker@localhost}" \

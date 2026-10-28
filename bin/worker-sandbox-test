@@ -123,6 +123,47 @@ nogh=$(mktemp -d)
 if "$here/worker-sandbox" --worktree "$nogh" --lane public --exec true >/dev/null 2>&1
 then echo "FAIL  public lane refuses non-github dir"; fail=1
 else echo "PASS  public lane refuses non-github dir"; fi
+if "$here/worker-sandbox" --worktree "$nogh" --lane private --profile research --exec true >/dev/null 2>&1
+then echo "FAIL  research refuses non-github dir"; fail=1
+else echo "PASS  research refuses non-github dir"; fi
 rmdir "$nogh"
+
+# fail-closed: no systemd user scope -> refuse to run unlimited, unless explicitly opted out
+if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
+then echo "FAIL  no cgroup scope refused"; fail=1; else echo "PASS  no cgroup scope refused"; fi
+if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent WORKER_NO_LIMITS=1 "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
+then echo "PASS  WORKER_NO_LIMITS=1 opt-out runs"; else echo "FAIL  WORKER_NO_LIMITS=1 opt-out runs"; fail=1; fi
+
+# the LLM door: only allowlisted API paths, one request per connection
+code=$("$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  "curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:$port/__lanes" 2>/dev/null)
+if [ "$code" = 403 ]; then echo "PASS  door refuses non-API path"; else echo "FAIL  door refuses non-API path (got $code)"; fail=1; fi
+n=$("$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec python3 -c '
+import os, socket
+s = socket.create_connection(("127.0.0.1", int(os.environ["WORKER_PORT"])), 5)
+s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\nGET /__lanes HTTP/1.1\r\nHost: x\r\n\r\n")
+out = b""
+try:
+    while (d := s.recv(65536)): out += d
+except TimeoutError: pass  # upstream may keep the connection open; count what arrived
+print(out.count(b"HTTP/1."))' 2>/dev/null)
+if [ "$n" = 1 ]; then echo "PASS  door answers one request per connection"; else echo "FAIL  door answered '$n' requests"; fail=1; fi
+
+# host relay replaces the jail's Authorization with RELAY_KEY (the key never enters the jail)
+rt=$(mktemp -d); rport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        b = (self.headers.get("Authorization") or "").encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$rport" & up=$!
+RELAY_KEY=sekret python3 "$here/relay.py" unix2http "$rt/s" "127.0.0.1:$rport" & rl=$!
+for _ in $(seq 30); do [ -S "$rt/s" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$rport/" && break; sleep 0.2; done
+got=$(curl -s -m 5 --unix-socket "$rt/s" -H 'Authorization: Bearer none' -d '{}' http://x/v1/chat/completions)
+if [ "$got" = "Bearer sekret" ]; then echo "PASS  relay injects host key"; else echo "FAIL  relay injects host key (got '$got')"; fail=1; fi
+kill $up $rl; rm -rf "$rt"
 
 exit $fail

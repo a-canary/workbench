@@ -35,4 +35,14 @@ run() {
 run "honest worker commits" 'true' ok
 run "nested repo fsmonitor refused" "git init -q sub && touch sub/f && git -C sub add f && git -C sub -c user.name=x -c user.email=x@x commit -qm x && git -C sub config core.fsmonitor 'touch $tmp/pwned' && touch sub/g" refused
 run "nested .git file refused" "mkdir d && echo 'gitdir: /tmp' > d/.git" refused
+# fake GREEN: change how the test runs instead of the code under test
+run "runner config edit refused" 'echo "{}" > package.json' refused
+run "nested conftest refused" 'mkdir -p a && echo x > a/conftest.py' refused
+# a git-ignored file never reaches the commit, so it must not shape GREEN either
+run "ignored file dropped before GREEN" 'rm ok && echo ok > .gitignore && touch ok' refused
+# leak scan uses the host's config: a worker allowlist cannot hide its own leak.
+# The fake token is assembled at runtime so this file itself never trips a secret scan.
+tok=ghp_$(printf %s aBcDeFgHiJkLmNoPqRsTuVwXyZ 0123456789)
+run "secret in diff refused" "echo 'k = \"$tok\"' > s.txt" refused
+run "worker gitleaks allowlist ignored" "printf '[allowlist]\npaths=[\".*\"]\n' > .gitleaks.toml && echo 'k = \"$tok\"' > s.txt" refused
 exit $fail
