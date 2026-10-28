@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
-#   lane-run [--repo DIR] [--label lane:v100] [--once] [--idle 600]
+#   lane-run [--repo DIR]... [--label lane:v100] [--once] [--idle 600]
+#   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
 # The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
 # model can finish: it pushes a branch whose HEAD is a failing test (the RED commit) and files
@@ -16,17 +17,17 @@
 set -uo pipefail
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-repo=$PWD label=lane:v100 once= idle=600
+repos=() label=lane:v100 once= idle=600
 while [ $# -gt 0 ]; do
   case $1 in
-    --repo) repo=$2; shift 2 ;;
+    --repo) repos+=("$(readlink -f "$2")"); shift 2 ;;
     --label) label=$2; shift 2 ;;
     --once) once=1; shift ;;
     --idle) idle=$2; shift 2 ;;
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
   esac
 done
-repo=$(readlink -f "$repo")
+[ ${#repos[@]} -gt 0 ] || repos=("$PWD")
 log() { echo "lane-run: $*" >&2; }
 sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
 
@@ -76,7 +77,9 @@ run_one() { # returns 1 when the queue is empty
 
 [ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
 while :; do
-  run_one && continue
+  did=
+  for repo in "${repos[@]}"; do run_one && did=1; done
+  [ -n "$did" ] && continue
   [ -n "$once" ] && exit 0
   log "queue empty; idle ${idle}s"; sleep "$idle"
 done
