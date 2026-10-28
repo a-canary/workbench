@@ -297,6 +297,21 @@ sys.exit(0 if time.monotonic() - t0 < 6 else 1)
 PY
 then echo "PASS  relay closes a trickling client at the deadline"; else echo "FAIL  relay closes a trickling client at the deadline"; fail=1; fi
 kill $krl
+# ...and a client streaming a pinned body faster than once per ms is closed too (no 1ms grace past the deadline)
+RELAY_TIMEOUT=2 RELAY_MODEL=m python3 "$here/relay.py" unix2http "$rt/f" "127.0.0.1:1" & frl=$!
+for _ in $(seq 30); do [ -S "$rt/f" ] && break; sleep 0.1; done
+if python3 - "$rt/f" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); t0 = time.monotonic()
+try:
+    s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 15000000\r\n\r\n")
+    while time.monotonic() - t0 < 8:
+        s.sendall(b" "); time.sleep(0.0002)
+except OSError: pass
+sys.exit(0 if time.monotonic() - t0 < 6 else 1)
+PY
+then echo "PASS  relay closes a fast-streaming client at the deadline"; else echo "FAIL  relay closes a fast-streaming client at the deadline"; fail=1; fi
+kill $frl
 # connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
 capped() { python3 - "$1" <<'PY'
 import socket, sys, time

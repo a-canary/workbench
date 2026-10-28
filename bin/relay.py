@@ -55,7 +55,9 @@ def http_one(c, dial):
     # a slot either; the timeout is lifted before the (long) response
     deadline = time.monotonic() + float(os.environ.get("RELAY_TIMEOUT", "30"))
     def rx(n):
-        c.settimeout(max(0.001, deadline - time.monotonic()))
+        left = deadline - time.monotonic()
+        if left <= 0: raise socket.timeout("request deadline")  # no grace: a fast sender would never time out
+        c.settimeout(left)
         return c.recv(n)
     buf = b""
     while b"\r\n\r\n" not in buf:
