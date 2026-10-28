@@ -10,7 +10,7 @@
 The sandbox has no network namespace route out; this pair is the only door,
 and it opens onto exactly one upstream endpoint.
 """
-import os, socket, sys, threading
+import os, re, socket, sys, threading
 
 def pipe(a, b):
     try:
@@ -40,8 +40,12 @@ def refuse(c, why):
     c.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" % (len(why), why))
     c.close()
 
-def http_one(c, u):
+TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+SLOTS = threading.BoundedSemaphore(int(os.environ.get("RELAY_MAX_CONN", "16")))
+
+def http_one(c, dial):
     """Forward exactly one request whose head passed the allowlist, then only the response."""
+    c.settimeout(30)  # a slow or idle client can't hold a slot; reset before the (long) response
     buf = b""
     while b"\r\n\r\n" not in buf:
         d = c.recv(65536)
@@ -54,22 +58,30 @@ def http_one(c, u):
         return refuse(c, b"method")
     path = parts[1].split(b"?", 1)[0].decode("latin-1")
     if path not in PATHS: return refuse(c, b"path")
-    keep, length = [], 0
+    # strict head: no folding, no bare lines, one plain-digit Content-Length (no parse differential upstream)
+    keep, length = [], None
     for h in hdrs:
-        k = h.split(b":", 1)[0].strip().lower()
+        k, sep, v = h.partition(b":")
+        if not sep or not TOKEN.fullmatch(k): return refuse(c, b"bad header")
+        k, v = k.lower(), v.strip()
         if k == b"transfer-encoding": return refuse(c, b"chunked")
-        if k == b"content-length": length = int(h.split(b":", 1)[1])
+        if k == b"content-length":
+            if length is not None or not v.isdigit(): return refuse(c, b"bad content-length")
+            length = int(v)
         if k not in DROP and not k.startswith(b"proxy-"): keep.append(h)
+    length = length or 0
     keep.append(b"Connection: close")
     if os.environ.get("RELAY_KEY"): keep.append(b"Authorization: Bearer " + os.environ["RELAY_KEY"].encode())
-    u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
-    left = length - len(body)
-    while left > 0 and (d := c.recv(min(left, 65536))):
-        u.sendall(d); left -= len(d)
-    # anything the client sends after the body (a pipelined 2nd request) is read and dropped, never
-    # forwarded; the client hanging up closes the upstream too, even if the upstream keeps it alive
-    threading.Thread(target=drain, args=(c, u), daemon=True).start()
-    pipe(u, c)
+    with dial() as u:  # dial only once the head passed
+        u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
+        left = length - len(body)
+        while left > 0 and (d := c.recv(min(left, 65536))):
+            u.sendall(d); left -= len(d)
+        c.settimeout(None)
+        # anything the client sends after the body (a pipelined 2nd request) is read and dropped, never
+        # forwarded; the client hanging up closes the upstream too, even if the upstream keeps it alive
+        threading.Thread(target=drain, args=(c, u), daemon=True).start()
+        pipe(u, c)
 
 def drain(c, u):
     try:
@@ -91,11 +103,12 @@ if __name__ == "__main__":
         if mode == "unix2tcp": serve(l, dial)
         while True:
             c, _ = l.accept()
+            if not SLOTS.acquire(blocking=False):  # cap host threads + upstream connections
+                c.close(); continue
             def one(c=c):
-                try:
-                    with dial() as u: http_one(c, u)
+                try: http_one(c, dial)
                 except (OSError, ValueError): pass
-                finally: c.close()
+                finally: c.close(); SLOTS.release()
             threading.Thread(target=one, daemon=True).start()
     elif mode == "tcp2unix":
         l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

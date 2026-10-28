@@ -37,15 +37,19 @@ log() { echo "worker-task: $*" >&2; }
 
 mapfile -t protected < <(git -C "$wt" show --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
-# files that change how the test runs or what the leak scan sees; matched anywhere in the tree
-runner_cfg='(^|/)(package\.json|bunfig\.toml|(vite|vitest|jest)\.config\.[cm]?[jt]s|tsconfig[^/]*\.json|conftest\.py|pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini|sitecustomize\.py|[^/]*\.pth|Makefile|\.gitleaks\.toml|\.gitleaksignore)$'
-ignored() { g ls-files -oi --exclude-standard --directory | sort; }
+# read before the worker runs (the jail masks .git anyway)
+may_edit=$(git -C "$wt" log -1 --format='%(trailers:key=Worker-May-Edit,valueonly,separator=|)' HEAD)
+# files that change how the test runs or what the leak scan sees, matched anywhere in the tree:
+# manifests/locks, *config* and rc/env dotfiles, toml/ini/cfg, make, python import hooks, compiled .pyc,
+# git attributes, gitleaks config. ponytail: a denylist; the upgrade is the RED commit declaring the
+# paths the worker may touch (allowlist). Until then the RED commit can exempt paths explicitly with a
+# trailer, e.g. "Worker-May-Edit: ^tsconfig\.json$" (an ERE matched against each changed path).
+runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*config[^/]*\.([cm]?[jt]s|json|toml|ya?ml)|[^/]*\.(toml|ini|cfg|pth|py[co]|mk)|\.[^/]*rc(\.[a-z]+)?|\.env[^/]*|(GNU)?[Mm]akefile|justfile|conftest\.py|pytest\.py|[^/]*customize\.py|vitest\.workspace[^/]*|\.git(attributes|modules)|\.gitleaks(\.toml|ignore))$'
 
 log "RED: $test"
 if sbx --timeout 300 --exec sh -c "$test" >&2; then die "test already passes — not a RED commit"; fi
 
 log "worker: lane=$lane tools=$tools"
-pre_ignored=$(ignored)
 t0=$(date +%s)
 sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
 log "worker took $(( $(date +%s) - t0 ))s"
@@ -56,15 +60,17 @@ g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test 
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && die "worker produced no changes"
-cfg=$(g diff --cached --name-only | grep -E "$runner_cfg") && die "worker modified test/runner config: $(echo $cfg)"
-# git-ignored files never reach the commit but would shape GREEN (a stub module, a fake runner): drop new ones.
-# ponytail: ignored files that existed before the run (a worktree's own node_modules) are trusted;
-# lane-run lends deps read-only instead, which is the safe setup.
-mapfile -t new_ignored < <(comm -13 <(echo "$pre_ignored") <(ignored))
-[ ${#new_ignored[@]} -eq 0 ] || { log "dropping worker-written ignored files: ${new_ignored[*]}"; g clean -qfdX -- "${new_ignored[@]}"; }
+# --no-renames: a rename would list only its new name and hide the config file it removed
+cfg=$(g diff --cached --no-renames --name-only | grep -E "$runner_cfg" | { [ -n "$may_edit" ] && grep -vE "$may_edit" || cat; }) \
+  && [ -n "$cfg" ] && die "worker modified test/runner config: $(echo $cfg) (RED commit can allow with Worker-May-Edit:)"
 
+# GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
+# the worker left in the worktree (a stub module, a forged .pyc, a patched node_modules) never shape it
+green=$(mktemp -d "${TMPDIR:-/tmp}/worker-green.XXXXXX"); trap 'rm -rf "$green"' EXIT
+g checkout-index -a --prefix="$green/"
 log "GREEN: $test"
-sbx --timeout 300 --exec sh -c "$test" >&2 || die "test still fails after worker"
+"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$green" --lane "$lane" --timeout 300 --exec sh -c "$test" >&2 \
+  || die "test still fails after worker"
 
 # leak scan with the host's pinned config: a worker-written .gitleaks.toml would otherwise allowlist its own leak.
 # (The lane key never enters the jail: the relay adds it host-side.)

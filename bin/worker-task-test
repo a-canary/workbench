@@ -18,8 +18,10 @@ chmod +x "$tmp/stub"
 run() {
   local wt="$tmp/wt-$RANDOM"
   git init -q "$wt"
+  echo '{}' > "$wt/package.json"
+  git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   echo 'test -f ok' > "$wt/t.sh"
-  git -C "$wt" add t.sh && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm red
+  git -C "$wt" add t.sh && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane private \
@@ -36,13 +38,21 @@ run "honest worker commits" 'true' ok
 run "nested repo fsmonitor refused" "git init -q sub && touch sub/f && git -C sub add f && git -C sub -c user.name=x -c user.email=x@x commit -qm x && git -C sub config core.fsmonitor 'touch $tmp/pwned' && touch sub/g" refused
 run "nested .git file refused" "mkdir d && echo 'gitdir: /tmp' > d/.git" refused
 # fake GREEN: change how the test runs instead of the code under test
-run "runner config edit refused" 'echo "{}" > package.json' refused
+run "runner config edit refused" 'echo "{\"scripts\":{}}" > package.json' refused
 run "nested conftest refused" 'mkdir -p a && echo x > a/conftest.py' refused
-# a git-ignored file never reaches the commit, so it must not shape GREEN either
-run "ignored file dropped before GREEN" 'rm ok && echo ok > .gitignore && touch ok' refused
+run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused
+run "rename hiding a config edit refused" 'mv package.json notes.txt' refused
+# a git-ignored file never reaches the commit, so it must not shape GREEN either (GREEN = fresh checkout)
+run "ignored file absent from GREEN" 'echo ok > .gitignore' refused
+run "ignored non-ASCII file absent from GREEN" 'echo "h_*" > .gitignore && touch "$(printf "h_\303\251")" && rm ok && ln -s "$(printf "h_\303\251")" ok' refused
 # leak scan uses the host's config: a worker allowlist cannot hide its own leak.
 # The fake token is assembled at runtime so this file itself never trips a secret scan.
 tok=ghp_$(printf %s aBcDeFgHiJkLmNoPqRsTuVwXyZ 0123456789)
 run "secret in diff refused" "echo 'k = \"$tok\"' > s.txt" refused
 run "worker gitleaks allowlist ignored" "printf '[allowlist]\npaths=[\".*\"]\n' > .gitleaks.toml && echo 'k = \"$tok\"' > s.txt" refused
+# ...even when the worker git-ignores its config so the runner-config check never sees it
+run "ignored gitleaks allowlist ignored" "printf '[allowlist]\npaths=[\".*\"]\n' > .gitleaks.toml && echo .gitleaks.toml > .gitignore && echo 'k = \"$tok\"' > s.txt" refused
+# the RED commit can explicitly allow a config edit
+RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$' run "Worker-May-Edit allows a config edit" 'echo "{\"scripts\":{}}" > package.json' ok
+RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$' run "Worker-May-Edit is not a blanket pass" 'echo x > conftest.py' refused
 exit $fail
