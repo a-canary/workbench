@@ -41,7 +41,7 @@ def serve(listener, dial):
         threading.Thread(target=both, daemon=True).start()
 
 PATHS = tuple(os.environ.get("RELAY_PATHS", "/v1/chat/completions,/v1/models").split(","))
-DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te")
+DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te", b"x-lane")  # x-lane: laneproxy lane pick
 
 def refuse(c, why):
     c.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" % (len(why), why))
@@ -71,6 +71,7 @@ def http_one(c, dial):
         return refuse(c, b"method")
     path = parts[1].split(b"?", 1)[0].decode("latin-1")
     if path not in PATHS: return refuse(c, b"path")
+    line = b" ".join([parts[0], path.encode("latin-1"), parts[2]])  # query dropped: it can skip upstream routing
     # strict head: no folding, no bare lines, one plain-digit Content-Length (no parse differential upstream)
     keep, length = [], None
     for h in hdrs:
@@ -83,6 +84,7 @@ def http_one(c, dial):
             length = int(v)
         if k not in DROP and not k.startswith(b"proxy-"): keep.append(h)
     length = length or 0
+    if parts[0] == b"GET" and length: return refuse(c, b"GET with a body")
     pin = os.environ.get("RELAY_MODEL")
     if pin and parts[0] == b"POST":  # re-serialize, so duplicate "model" keys can't parse differently upstream
         if length > 16 << 20: return refuse(c, b"body too large")
@@ -90,6 +92,7 @@ def http_one(c, dial):
         try: req = json.loads(body[:length])
         except (ValueError, RecursionError): return refuse(c, b"bad json")
         if not isinstance(req, dict): return refuse(c, b"bad json")
+        for k in [k for k in req if k.lower() == "model"]: del req[k]  # case-insensitive upstream parsers
         req["model"] = pin
         body = json.dumps(req).encode(); length = len(body)
         keep = [h for h in keep if h.partition(b":")[0].lower() != b"content-length"] + [b"Content-Length: %d" % length]

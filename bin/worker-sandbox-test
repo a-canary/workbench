@@ -224,7 +224,9 @@ python3 -c '
 import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["model"].encode()
+        j = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        ms = [str(v) for k, v in j.items() if k.lower() == "model"]  # a case-insensitive parser sees all of these
+        b = ("|".join([",".join(ms), self.headers.get("x-lane") or "", self.path])).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$mport" & mup=$!
@@ -232,12 +234,18 @@ RELAY_MODEL=Worker python3 "$here/relay.py" unix2http "$rt/m" "127.0.0.1:$mport"
 for _ in $(seq 30); do [ -S "$rt/m" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$mport/" && break; sleep 0.2; done
 for req in 'jail-picked model|{"model":"claude-opus","messages":[]}' \
            'duplicate model keys|{"model":"Worker","model":"claude-opus","messages":[]}' \
-           'no model|{"messages":[]}'; do
+           'no model|{"messages":[]}' \
+           'case-variant model key|{"model":"Worker","MODEL":"claude-opus","messages":[]}'; do
   got=$(curl -s -m 5 --unix-socket "$rt/m" -d "${req#*|}" http://x/v1/chat/completions)
-  if [ "$got" = Worker ]; then echo "PASS  relay pins model: ${req%%|*}"; else echo "FAIL  relay pins model: ${req%%|*} (got '$got')"; fail=1; fi
+  if [ "$got" = "Worker||/v1/chat/completions" ]; then echo "PASS  relay pins model: ${req%%|*}"; else echo "FAIL  relay pins model: ${req%%|*} (got '$got')"; fail=1; fi
 done
 got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket "$rt/m" -d 'not json' http://x/v1/chat/completions)
 if [ "$got" = 403 ]; then echo "PASS  pinned relay refuses a non-JSON body"; else echo "FAIL  pinned relay refuses a non-JSON body (got '$got')"; fail=1; fi
+# the jail can't pick a laneproxy lane (x-lane) or skip lane routing with a query string
+got=$(curl -s -m 5 --unix-socket "$rt/m" -H 'x-lane: fast' -d '{}' 'http://x/v1/chat/completions?skip=1')
+if [ "$got" = "Worker||/v1/chat/completions" ]; then echo "PASS  relay strips x-lane and query"; else echo "FAIL  relay strips x-lane and query (got '$got')"; fail=1; fi
+got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket "$rt/m" -X GET -d '{"model":"claude-opus"}' http://x/v1/chat/completions)
+if [ "$got" = 403 ]; then echo "PASS  relay refuses a GET with a body"; else echo "FAIL  relay refuses a GET with a body (got '$got')"; fail=1; fi
 kill $mrl $mup
 # strict head: anything an upstream could parse differently is refused (403), never forwarded
 raw() { python3 - "$rt/s" "$1" <<'PY'
