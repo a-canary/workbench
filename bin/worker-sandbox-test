@@ -275,6 +275,20 @@ except socket.timeout: sys.exit(1)
 PY
 then echo "PASS  relay closes client when upstream dies mid-head"; else echo "FAIL  relay closes client when upstream dies mid-head"; fail=1; fi
 kill $dup $drl
+# a client trickling its request one byte at a time is closed at the request deadline, not held forever
+RELAY_TIMEOUT=2 python3 "$here/relay.py" unix2http "$rt/k" "127.0.0.1:1" & krl=$!
+for _ in $(seq 30); do [ -S "$rt/k" ] && break; sleep 0.1; done
+if python3 - "$rt/k" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); t0 = time.monotonic()
+try:
+    for b in b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n":
+        s.sendall(bytes([b])); time.sleep(0.5)
+except OSError: pass
+sys.exit(0 if time.monotonic() - t0 < 6 else 1)
+PY
+then echo "PASS  relay closes a trickling client at the deadline"; else echo "FAIL  relay closes a trickling client at the deadline"; fail=1; fi
+kill $krl
 # connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
 capped() { python3 - "$1" <<'PY'
 import socket, sys, time

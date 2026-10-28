@@ -11,7 +11,7 @@
 The sandbox has no network namespace route out; this pair is the only door,
 and it opens onto exactly one upstream endpoint.
 """
-import json, os, re, socket, sys, threading
+import json, os, re, socket, sys, threading, time
 
 def pipe(a, b):
     try:
@@ -51,10 +51,15 @@ TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 def http_one(c, dial):
     """Forward exactly one request whose head passed the allowlist, then only the response."""
-    c.settimeout(30)  # a slow or idle client can't hold a slot; reset before the (long) response
+    # one deadline for the whole request, not per recv: a client trickling a byte at a time can't hold
+    # a slot either; the timeout is lifted before the (long) response
+    deadline = time.monotonic() + float(os.environ.get("RELAY_TIMEOUT", "30"))
+    def rx(n):
+        c.settimeout(max(0.001, deadline - time.monotonic()))
+        return c.recv(n)
     buf = b""
     while b"\r\n\r\n" not in buf:
-        d = c.recv(65536)
+        d = rx(65536)
         if not d or len(buf) > 65536: return refuse(c, b"bad request head")
         buf += d
     head, body = buf.split(b"\r\n\r\n", 1)
@@ -81,9 +86,9 @@ def http_one(c, dial):
     pin = os.environ.get("RELAY_MODEL")
     if pin and parts[0] == b"POST":  # re-serialize, so duplicate "model" keys can't parse differently upstream
         if length > 16 << 20: return refuse(c, b"body too large")
-        while len(body) < length and (d := c.recv(65536)): body += d
+        while len(body) < length and (d := rx(65536)): body += d
         try: req = json.loads(body[:length])
-        except ValueError: return refuse(c, b"bad json")
+        except (ValueError, RecursionError): return refuse(c, b"bad json")
         if not isinstance(req, dict): return refuse(c, b"bad json")
         req["model"] = pin
         body = json.dumps(req).encode(); length = len(body)
@@ -93,7 +98,7 @@ def http_one(c, dial):
     with dial() as u:  # dial only once the head passed
         u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
         left = length - len(body)
-        while left > 0 and (d := c.recv(min(left, 65536))):
+        while left > 0 and (d := rx(min(left, 65536))):
             u.sendall(d); left -= len(d)
         c.settimeout(None)
         # anything the client sends after the body (a pipelined 2nd request) is read and dropped, never
