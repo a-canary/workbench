@@ -218,6 +218,27 @@ RELAY_KEY=sekret RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2http "$rt/s" "12
 for _ in $(seq 30); do [ -S "$rt/s" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$rport/" && break; sleep 0.2; done
 got=$(curl -s -m 5 --unix-socket "$rt/s" -H 'Authorization: Bearer none' -d '{}' http://x/v1/chat/completions)
 if [ "$got" = "Bearer sekret" ]; then echo "PASS  relay injects host key"; else echo "FAIL  relay injects host key (got '$got')"; fail=1; fi
+# RELAY_MODEL pins the model: the jail can't spend the host key on a model it picks
+mport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["model"].encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$mport" & mup=$!
+RELAY_MODEL=Worker python3 "$here/relay.py" unix2http "$rt/m" "127.0.0.1:$mport" & mrl=$!
+for _ in $(seq 30); do [ -S "$rt/m" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$mport/" && break; sleep 0.2; done
+for req in 'jail-picked model|{"model":"claude-opus","messages":[]}' \
+           'duplicate model keys|{"model":"Worker","model":"claude-opus","messages":[]}' \
+           'no model|{"messages":[]}'; do
+  got=$(curl -s -m 5 --unix-socket "$rt/m" -d "${req#*|}" http://x/v1/chat/completions)
+  if [ "$got" = Worker ]; then echo "PASS  relay pins model: ${req%%|*}"; else echo "FAIL  relay pins model: ${req%%|*} (got '$got')"; fail=1; fi
+done
+got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket "$rt/m" -d 'not json' http://x/v1/chat/completions)
+if [ "$got" = 403 ]; then echo "PASS  pinned relay refuses a non-JSON body"; else echo "FAIL  pinned relay refuses a non-JSON body (got '$got')"; fail=1; fi
+kill $mrl $mup
 # strict head: anything an upstream could parse differently is refused (403), never forwarded
 raw() { python3 - "$rt/s" "$1" <<'PY'
 import socket, sys
