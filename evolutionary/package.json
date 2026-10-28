@@ -27,13 +27,14 @@
     "example:preamble": "ts-node examples/01-preamble-evolution.ts",
     "example:config": "ts-node examples/02-config-evolution.ts",
     "example:pipeline": "ts-node examples/03-pipeline-llm-judge.ts",
-    "test": "ts-node --evaluate 'console.log(\"ok\")'",
+    "test": "vitest run",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
   },
   "type": "module",
   "exports": {

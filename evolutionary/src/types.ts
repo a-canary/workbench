@@ -269,6 +269,7 @@ export interface EAConfig {
 export interface EARunState {
   runId: string;
   generation: number;
+  generationsCompleted: number;
   populationSize: number;
   evaluatedCount: number;
   retiredCount: number;

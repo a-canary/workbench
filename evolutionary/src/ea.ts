@@ -120,6 +120,7 @@ export class EA extends EventEmitter {
     return {
       runId: this.config.runId,
       generation: this.generation,
+      generationsCompleted: this.generation,
       populationSize: this.population.length,
       evaluatedCount: evaluated.length,
       retiredCount: this.population.filter(i => i.status === 'retired').length,
