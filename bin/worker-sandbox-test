@@ -191,6 +191,11 @@ mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
 unlink "$wt/__pycache__/x.pyc"; rmdir "$wt/__pycache__"
+# WORKER_DEPS is lent to the private lane only: a public jail never sees host deps
+deps=$(mktemp -d); touch "$deps/marker"
+if WORKER_DEPS=$deps WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c '[ ! -e /work/node_modules/marker ]' >/dev/null 2>&1
+then echo "PASS  public lane gets no host deps"; else echo "FAIL  public lane gets no host deps"; fail=1; fi
+unlink "$deps/marker"; rmdir "$deps"; rmdir "$wt/node_modules" 2>/dev/null
 kill $kup
 # research with an empty worktree = web-only, allowed on any repo
 empty=$(mktemp -d)

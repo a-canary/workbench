@@ -11,7 +11,8 @@
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
 set -euo pipefail
 
-die() { echo "worker-task: $*" >&2; exit 2; }
+log() { echo "worker-task: $*" >&2; [ -z "${WORKER_TASK_LOG:-}" ] || echo "$*" >>"$WORKER_TASK_LOG"; }
+die() { log "$*"; exit 2; }
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 wt= lane= task= test= tools=read,edit,write,bash tmo=600 push=
@@ -35,7 +36,6 @@ g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quoteP
 g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] || die "worktree not clean"
 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
-log() { echo "worker-task: $*" >&2; }
 
 mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
@@ -87,8 +87,8 @@ g -c user.name="${WORKER_GIT_NAME:-pi-worker}" -c user.email="${WORKER_GIT_EMAIL
 log "committed $(g rev-parse --short HEAD)"
 
 if [ -n "$push" ]; then
-  g push -q --no-verify -u origin HEAD
+  g push -q --no-verify -u origin HEAD || { log "push failed; GREEN commit kept on the local branch"; exit 3; }
   # --base: never trust the GitHub default branch; arc-webui's was a 3-month-stale master (wb-7xq).
   base=${WORKER_BASE:-$(g rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
-  (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)")
+  (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") || { log "PR create failed; branch pushed"; exit 3; }
 fi

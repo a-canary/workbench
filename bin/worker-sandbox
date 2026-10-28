@@ -210,7 +210,8 @@ if [ -d "$wt/.git" ]; then args+=(--tmpfs /work/.git)
 elif [ -e "$wt/.git" ]; then args+=(--ro-bind /dev/null /work/.git); fi
 # No network in the jail, so a fresh worktree can't install deps: lend the host repo's, read-only.
 # Skip only a real (non-empty) node_modules: bwrap leaves an empty mountpoint dir behind after each run.
-[ -n "${WORKER_DEPS:-}" ] && [ -d "$WORKER_DEPS" ] && [ -z "$(ls -A "$wt/node_modules" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$WORKER_DEPS")" /work/node_modules)
+# Private lane, build/qa only: a public or research jail can carry what it reads off the host.
+[ "$lane" = private ] && [ "$profile" != research ] && [ -n "${WORKER_DEPS:-}" ] && [ -d "$WORKER_DEPS" ] && [ -z "$(ls -A "$wt/node_modules" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$WORKER_DEPS")" /work/node_modules)
 args+=(--bind "$tmp/agent" /home/worker/.pi/agent
   --ro-bind "$tmp/relay.py" /run/relay.py --bind "$tmp/ep.sock" /run/ep.sock
   --setenv HOME /home/worker --setenv PATH "$path" --setenv TERM dumb
