@@ -119,14 +119,14 @@ if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec 
 then echo "FAIL  unknown profile refused"; fail=1; else echo "PASS  unknown profile refused"; fi
 
 # fail-closed: public lane must refuse a non-PUBLIC (or unresolvable) repo
-nogh=$(mktemp -d)
+nogh=$(mktemp -d); echo private > "$nogh/notes.txt"  # non-empty: research could read it
 if "$here/worker-sandbox" --worktree "$nogh" --lane public --exec true >/dev/null 2>&1
 then echo "FAIL  public lane refuses non-github dir"; fail=1
 else echo "PASS  public lane refuses non-github dir"; fi
 if "$here/worker-sandbox" --worktree "$nogh" --lane private --profile research --exec true >/dev/null 2>&1
 then echo "FAIL  research refuses non-github dir"; fail=1
 else echo "PASS  research refuses non-github dir"; fi
-rmdir "$nogh"
+rm "$nogh/notes.txt"; rmdir "$nogh"
 
 # WORKER_DEPS: host deps visible at /work/node_modules, read-only (trading-lare: npx had no network)
 deps=$(mktemp -d); touch "$deps/marker"
@@ -146,16 +146,41 @@ then echo "PASS  WORKER_NO_LIMITS=1 opt-out runs"; else echo "FAIL  WORKER_NO_LI
 code=$("$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
   "curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:$port/__lanes" 2>/dev/null)
 if [ "$code" = 403 ]; then echo "PASS  door refuses non-API path"; else echo "FAIL  door refuses non-API path (got $code)"; fail=1; fi
-n=$("$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec python3 -c '
-import os, socket
+# keep-alive HTTP/1.1 upstream that ignores Connection: close: a raw byte relay would let it answer every request
+kport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+        self.close_connection = False  # ignore Connection: close, as lane-front does
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$kport" & kup=$!
+for _ in $(seq 30); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$kport/v1/models" && break; sleep 0.2; done
+n=$(WORKER_PRIVATE_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec python3 -c '
+import os, socket, time
 s = socket.create_connection(("127.0.0.1", int(os.environ["WORKER_PORT"])), 5)
-s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\nGET /__lanes HTTP/1.1\r\nHost: x\r\n\r\n")
+# same write: the relay forwards only the declared body; a later write: the relay must drop it, not forward it
+s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\nGET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+time.sleep(0.5); s.sendall(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
 out = b""
 try:
     while (d := s.recv(65536)): out += d
 except TimeoutError: pass  # upstream may keep the connection open; count what arrived
 print(out.count(b"HTTP/1."))' 2>/dev/null)
 if [ "$n" = 1 ]; then echo "PASS  door answers one request per connection"; else echo "FAIL  door answered '$n' requests"; fail=1; fi
+# public lane: the key reaches the relay, never the jail (files under the jail home or its env)
+k=sbx-key-$RANDOM$RANDOM
+if WORKER_PUBLIC_KEY=$k WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c \
+  "! grep -rqsF -- '$k' /home/worker && ! env | grep -qF -- '$k'" >/dev/null 2>&1
+then echo "PASS  public key never enters the jail"; else echo "FAIL  public key never enters the jail"; fail=1; fi
+kill $kup
+# research with an empty worktree = web-only, allowed on any repo
+empty=$(mktemp -d)
+if "$here/worker-sandbox" --worktree "$empty" --lane private --profile research --timeout 90 --exec true >/dev/null 2>&1
+then echo "PASS  research allows an empty worktree"; else echo "FAIL  research allows an empty worktree"; fail=1; fi
+rmdir "$empty"
 
 # host relay replaces the jail's Authorization with RELAY_KEY (the key never enters the jail)
 rt=$(mktemp -d); rport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
@@ -168,10 +193,36 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$rport" & up=$!
-RELAY_KEY=sekret python3 "$here/relay.py" unix2http "$rt/s" "127.0.0.1:$rport" & rl=$!
+RELAY_KEY=sekret RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2http "$rt/s" "127.0.0.1:$rport" & rl=$!
 for _ in $(seq 30); do [ -S "$rt/s" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$rport/" && break; sleep 0.2; done
 got=$(curl -s -m 5 --unix-socket "$rt/s" -H 'Authorization: Bearer none' -d '{}' http://x/v1/chat/completions)
 if [ "$got" = "Bearer sekret" ]; then echo "PASS  relay injects host key"; else echo "FAIL  relay injects host key (got '$got')"; fail=1; fi
+# strict head: anything an upstream could parse differently is refused (403), never forwarded
+raw() { python3 - "$rt/s" "$1" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode().decode("unicode_escape").encode("latin-1"))
+try: print(s.recv(200).split(b"\r\n")[0].decode())
+except Exception as e: print("ERR", e)
+PY
+}
+for bad in 'duplicate content-length|Content-Length: 2\r\nContent-Length: 0\r\n' \
+           'signed content-length|Content-Length: +2\r\n' \
+           'folded header|X-A: 1\r\n Content-Length: 2\r\n' \
+           'header without colon|Content-Length 2\r\n'; do
+  got=$(raw "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n${bad#*|}\r\n{}")
+  case $got in *403*) echo "PASS  relay refuses ${bad%%|*}" ;; *) echo "FAIL  relay refuses ${bad%%|*} (got '$got')"; fail=1 ;; esac
+done
+# connection cap: with 3 slots held by idle clients, a 4th is closed at once
+python3 - "$rt/s" <<'PY' && echo "PASS  relay caps idle connections" || { echo "FAIL  relay caps idle connections"; fail=1; }
+import socket, sys
+held = []
+for _ in range(3):
+    h = socket.socket(socket.AF_UNIX); h.connect(sys.argv[1]); held.append(h)
+import time; time.sleep(0.3)
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+sys.exit(0 if s.recv(10) == b"" else 1)
+PY
 kill $up $rl; rm -rf "$rt"
 
 exit $fail

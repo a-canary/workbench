@@ -9,7 +9,7 @@
 # Profiles, never mixed (an agent that reads the internet must not be able to act on it):
 #   build    (default) read-write-execute: any tools, incl. whitelisted --extensions (only those files enter the
 #            jail's pi home); worktree writable; no internet — so an extension that curls/searches/downloads just fails.
-#   research internet + read-only, PUBLIC repos only (a fetch URL can carry what it read out):
+#   research internet + read-only, PUBLIC repos or an empty dir only (a fetch URL can carry what it read out):
 #            tools ⊆ read,grep,find,ls plus a search/fetch MCP door; worktree read-only;
 #            the answer is pi's stdout — the host writes any file. Internet = only what the search MCP fetches
 #            (its SSRF guard refuses private/loopback hosts; forced on here).
@@ -95,8 +95,9 @@ need_public() {
   done
   [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
 }
-# research can fetch any URL, so whatever it reads can leave in a query string
-[ "$profile" != research ] || need_public "research profile"
+# research can fetch any URL, so whatever it reads can leave in a query string: it may read a PUBLIC
+# repo, or nothing at all (an empty --worktree = web-only research)
+[ "$profile" != research ] || [ -z "$(ls -A "$wt")" ] || need_public "research profile"
 case $lane in
   private)
     port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key= ;;
@@ -236,7 +237,7 @@ for _ in $(seq 50); do python3 -c "import socket,os;socket.create_connection((\"
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
 if [ "${WORKER_NO_LIMITS:-}" = 1 ]; then lim=()
-elif ! systemd-run --user --scope -q true 2>/dev/null; then die "no systemd user scope for cgroup limits (WORKER_NO_LIMITS=1 to run without)"; fi
+elif ! "${lim[@]}" true 2>/dev/null; then die "no systemd user scope for cgroup limits (WORKER_NO_LIMITS=1 to run without)"; fi
 set +e
 "${lim[@]}" timeout -k 10 "$tmo" bwrap "${args[@]}" /bin/sh -c "$inner" sh "${exec_cmd[@]}"
 rc=$?
