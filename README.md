@@ -68,3 +68,7 @@ This is the automation that keeps the workbench current with component improveme
 ## Manifest
 
 `manifest.json` pins the exact tested combination. Bump a component's `ref` and re-run nightly qualification before committing the manifest change.
+
+## License
+
+[Apache License 2.0](LICENSE): open source, with an explicit patent grant.

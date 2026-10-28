@@ -20,6 +20,11 @@ if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$SWEEP_LOG"; }
 
+# qualified <bench output> — a summary line with at least one pass (dry-run always qualifies).
+qualified() {
+    [[ $DRY_RUN -eq 1 ]] || { grep -q 'passed [0-9]*/' <<<"$1" && ! grep -q 'passed 0/' <<<"$1"; }
+}
+
 run() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo "[dry-run] would run: $*"
@@ -36,7 +41,7 @@ apply_manifest() {
 
     # Deploy pi-extensions
     local ext_src="$WORKBENCH_DIR/pi/extensions"
-    local ext_dest=$(jq -r '.components.pi-extensions.dest' "$manifest")
+    local ext_dest=$(jq -r '.components["pi-extensions"].dest' "$manifest")
     ext_dest=$(eval echo "$ext_dest")
     if [[ -d "$ext_src" ]]; then
         run mkdir -p "$ext_dest"
@@ -65,8 +70,8 @@ log "=== daily sweep start ==="
 
 # Component to sweep: skills
 COMPONENT="skills"
-REPO=$(jq -r ".components.$COMPONENT.repo" "$WORKBENCH_DIR/manifest.json")
-CURRENT_REF=$(jq -r ".components.$COMPONENT.ref" "$WORKBENCH_DIR/manifest.json")
+REPO=$(jq -r --arg c "$COMPONENT" ".components[\$c].repo" "$WORKBENCH_DIR/manifest.json")
+CURRENT_REF=$(jq -r --arg c "$COMPONENT" ".components[\$c].ref" "$WORKBENCH_DIR/manifest.json")
 COMPONENT_DIR="$WORKBENCH_DIR/.sweep-$COMPONENT"
 
 # Clone/fetch component
@@ -88,7 +93,7 @@ log "$COMPONENT: current=$CURRENT_REF latest=$LATEST"
 # If no new commits, skip
 if [[ "$CURRENT_REF" == "main" ]]; then
     # Check if the current HEAD matches what we already tested
-    LAST_TESTED=$(jq -r ".components.$COMPONENT.last_tested // \"\"" "$WORKBENCH_DIR/manifest.json" 2>/dev/null || echo "")
+    LAST_TESTED=$(jq -r --arg c "$COMPONENT" ".components[\$c].last_tested // \"\"" "$WORKBENCH_DIR/manifest.json" 2>/dev/null || echo "")
     if [[ "$LAST_TESTED" == "$LATEST" ]]; then
         log "$COMPONENT: no new commits since last sweep, skipping"
     else
@@ -99,7 +104,9 @@ if [[ "$CURRENT_REF" == "main" ]]; then
         LABEL="sweep-$COMPONENT-$(date -u +%Y%m%d)"
 
         # Run benchmark (use the component's latest)
-        if run bin/bench run core --model "local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG"; then
+        # bench exits 1 only on an infra fault, so a 0/N run would otherwise qualify and auto-deploy (wb-qiy).
+        # ponytail: floor at >=1 pass; compare against the last qualified run's Wilson CI if regressions slip through.
+        if out=$(run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG") && qualified "$out"; then
             # Tests passed — update manifest
             log "$COMPONENT: tests passed, updating manifest"
 

@@ -1,14 +1,14 @@
 {
   "name": "workbench",
   "description": "Tested agent configuration: model through skills",
-  "qualified": "2026-10-03",
+  "qualified": "2026-10-27",
   "components": {
     "skills": {
       "repo": "https://github.com/a-canary/arc-skills",
       "ref": "main",
       "path": "skills",
       "dest": "~/.pi/skills",
-      "last_tested": "50e0d3611d202c1021ce132be834c33731401280"
+      "last_tested": "f9806f9e6512f65a3ac3b4da79de18f6f42c6946"
     },
     "proxy": {
       "repo": "https://github.com/a-canary/arc-llm-proxy",
@@ -26,6 +26,11 @@
       "path": "services/health",
       "schedule": "*/5",
       "description": "Service health probes with Discord alerts"
+    },
+    "director": {
+      "path": "director",
+      "vet": "own tests (bun test 135/0 at last_tested) + write-lane hook live and identical to master; not pass-rate benchable",
+      "last_tested": "16d3e98b3e0df3f9955f1c0bdca4dc1b546da780"
     }
   },
   "bench": {
