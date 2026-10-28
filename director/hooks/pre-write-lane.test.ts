@@ -228,3 +228,41 @@ test("Bash redirect to the stderr device is still blocked", () => {
   const r = runHook({ tool_name: "Bash", tool_input: { command: `echo x > ${se}` } }, emptyDb);
   expect(r.code).toBe(2);
 });
+
+// A heredoc body is prose, not commands: `cat > f <<TAG ... EOF` mentioning a
+// write verb and a path must not extract a target from the body. This bug
+// blocked the very report of itself, so the body case is pinned here.
+test("heredoc body mentioning a write verb is not a write target", () => {
+  const out = "~" + "/bin/x";
+  const cmd = [
+    "cat > /tmp/report.md <<EOF",
+    `we must never cp secrets ${out}`,
+    "EOF",
+  ].join("\n");
+  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+  expect(r.code).toBe(0);
+});
+
+// The heredoc-opening line is NOT part of the body: its redirect still gates.
+test("the redirect that opens a heredoc is still gated", () => {
+  const out = "~" + "/bin/evil.txt";
+  const cmd = ["cat > " + out + " <<EOF", "payload", "EOF"].join("\n");
+  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+  expect(r.code).toBe(2);
+});
+
+// Body-stripping must not swallow the rest of the command when the terminator
+// is present: writes after the heredoc closes are still gated.
+test("a write after the heredoc terminator is still gated", () => {
+  const out = "~" + "/bin/after.txt";
+  const cmd = ["cat > /tmp/a.md <<EOF", "body", "EOF", "echo x > " + out].join("\n");
+  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+  expect(r.code).toBe(2);
+});
+
+// Trailing whitespace once made the last-arg extractor return nothing (fail-open).
+test("mv with trailing whitespace still gates its destination", () => {
+  const cmd = "mv a.json " + "~" + "/bin/ ";
+  const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+  expect(r.code).toBe(2);
+});

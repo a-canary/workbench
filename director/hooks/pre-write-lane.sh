@@ -30,6 +30,17 @@ case "$tool" in
   Bash)
     cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty')"
     if [ -n "$cmd" ]; then
+      # Heredoc bodies are prose, not commands: a body mentioning cp/mv and a
+      # path must not yield a write target. Strip bodies once, before every
+      # extractor below; the opening line stays, so the redirect that starts
+      # the heredoc is still scanned normally.
+      scan="$(printf '%s' "$cmd" | awk '
+        !inbody && /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?[[:space:]]*$/ {
+          tag = $0; sub(/.*<<-?[[:space:]]*/, "", tag); gsub(/["'"'"']/, "", tag)
+          inbody = 1; print; next }
+        inbody { line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+          if (line == tag) inbody = 0; next }
+        { print }')"
       # output redirections: > path, >> path, >| path, and explicit-fd forms
       # (1> path). fd dups like 2>&1 still don't match: `&` is not in the target
       # char class, so there is nothing to extract.
@@ -38,25 +49,25 @@ case "$tool" in
       # `{}()` and backtick stay IN the class so `${HOME}/bin/a` and
       # `$(...)/bin/a` reach the check and are rejected there as unresolvable;
       # dropping them extracted a bare `$` instead, which resolved clean.
-      redir="$(printf '%s' "$cmd" \
+      redir="$(printf '%s' "$scan" \
         | grep -oE '(^|[[:space:];|&(])[0-9]?>>?\|?[[:space:]]*"?'"'"'?[~$`(){}A-Za-z0-9_./-]+' \
         | sed -E 's/^[[:space:];|&()]*[0-9]?>>?\|?[[:space:]]*["'"'"']?//')"
       # tee [ -a ] path... — an opening quote is stepped over, same as redirects:
       # the old char class excluded `"`, so a quoted destination extracted nothing.
-      teed="$(printf '%s' "$cmd" \
+      teed="$(printf '%s' "$scan" \
         | grep -oE '\btee[[:space:]]+(-a[[:space:]]+)?"?'"'"'?[^[:space:];|&<>"'"'"']+' \
         | sed -E 's/^tee[[:space:]]+//; s/^-a[[:space:]]+//; s/^["'"'"']//')"
       # write-verb destinations (last arg of cp/mv/ln/rsync; dd of=; curl/wget -o).
       # Regex layer: quoted decoys (echo "cp a ~/bin/x") fail closed — acceptable.
-      verbs="$(printf '%s' "$cmd" \
+      verbs="$(printf '%s' "$scan" \
         | grep -oE '\b(cp|mv|ln|rsync)\b[^;|&<>]*' \
-        | sed -E 's/.*[[:space:]]([^[:space:]]+)$/\1/')"
+        | sed -E 's/[[:space:]]+$//; s/.*[[:space:]]([^[:space:]]+)$/\1/')"
       # of= and -o destinations: an opening quote is stepped over here too —
       # the old classes excluded it, so a quoted destination extracted nothing.
-      ofargs="$(printf '%s' "$cmd" \
+      ofargs="$(printf '%s' "$scan" \
         | grep -oE '\bof="?'"'"'?[^[:space:];|&<>"'"'"']+' \
         | sed -E 's/^of=["'"'"']?//')"
-      outargs="$(printf '%s' "$cmd" \
+      outargs="$(printf '%s' "$scan" \
         | grep -oE '\-o[[:space:]]+"?'"'"'?[^[:space:];|&<>"'"'"']+' \
         | sed -E 's/^-o[[:space:]]+["'"'"']?//')"
       paths="$(printf '%s\n%s\n%s\n%s\n%s' "$redir" "$teed" "$verbs" "$ofargs" "$outargs")"
