@@ -29,7 +29,7 @@ run() {
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
-    --task "$tmp/task" --test "sh '$redf'" >/dev/null 2>&1
+    --task "$tmp/task" --test "sh '$redf'" ${WT_EXTRA:-} >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
   if [ -e "$tmp/pwned" ]; then echo "FAIL  $1 (host code ran)"; fail=1
@@ -85,4 +85,19 @@ RED_MSG=$'red\n\nWorker-May-Edit: -e.' run "Worker-May-Edit '-e.' is a pattern, 
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$\nWorker-May-Edit: ' run "empty Worker-May-Edit adds nothing" 'echo x > conftest.py' refused
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
+
+# repos-ecu.15 --review: WORKER_REVIEW_CMD gets the task + staged diff on stdin; first stdout line
+# must be exactly PASS or the commit is refused (fail closed). Without --review it never runs.
+printf '#!/bin/sh\nin=$(cat); case $in in *"make ok exist"*"+++ b/ok"*) echo PASS ;; *) echo "FAIL: no task/diff on stdin" ;; esac\n' > "$tmp/rv-pass"
+printf '#!/bin/sh\ncat >/dev/null; echo "FAIL: off-task edit"\n' > "$tmp/rv-fail"
+printf '#!/bin/sh\ncat >/dev/null; echo LGTM\n' > "$tmp/rv-vague"
+printf '#!/bin/sh\ncat >/dev/null; echo PASS; exit 1\n' > "$tmp/rv-crash"
+chmod +x "$tmp"/rv-*
+WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-pass run "review PASS commits (task+diff on stdin)" 'true' ok
+WORKER_TASK_LOG=$tmp/rvlog WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-fail run "review FAIL refused" 'true' refused
+if grep -q 'review FAIL' "$tmp/rvlog"; then echo "PASS  review verdict reaches WORKER_TASK_LOG"
+else echo "FAIL  review verdict reaches WORKER_TASK_LOG"; fail=1; fi
+WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-vague run "review non-PASS verdict refused" 'true' refused
+WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-crash run "review command failure refused" 'true' refused
+WORKER_REVIEW_CMD=$tmp/rv-fail run "no --review: reviewer never runs" 'true' ok
 exit $fail
