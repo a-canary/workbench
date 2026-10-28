@@ -168,13 +168,20 @@ out = b""
 try:
     while (d := s.recv(65536)): out += d
 except TimeoutError: pass  # upstream may keep the connection open; count what arrived
-print(out.count(b"HTTP/1."))' 2>/dev/null)
-if [ "$n" = 1 ]; then echo "PASS  door answers one request per connection"; else echo "FAIL  door answered '$n' requests"; fail=1; fi
+print(out.count(b"HTTP/1."), out.lower().count(b"connection: close"))' 2>/dev/null)
+if [ "${n% *}" = 1 ]; then echo "PASS  door answers one request per connection"; else echo "FAIL  door answered '$n' requests"; fail=1; fi
+# ...and tells a keep-alive client so, or the client would wait on this connection for its next answer
+if [ "${n#* }" = 1 ]; then echo "PASS  door response says Connection: close"; else echo "FAIL  door response says Connection: close ($n)"; fail=1; fi
 # public lane: the key reaches the relay, never the jail (files under the jail home or its env)
 k=sbx-key-$RANDOM$RANDOM
 if WORKER_PUBLIC_KEY=$k WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c \
   "! grep -rqsF -- '$k' /home/worker && ! env | grep -qF -- '$k'" >/dev/null 2>&1
 then echo "PASS  public key never enters the jail"; else echo "FAIL  public key never enters the jail"; fail=1; fi
+# public lane: untracked/ignored files (a .env, notes) would leave the host with the repo
+touch "$wt/.sbx-untracked-probe"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses untracked files"; fail=1; else echo "PASS  public lane refuses untracked files"; fi
+unlink "$wt/.sbx-untracked-probe"
 kill $kup
 # research with an empty worktree = web-only, allowed on any repo
 empty=$(mktemp -d)
@@ -209,20 +216,26 @@ PY
 for bad in 'duplicate content-length|Content-Length: 2\r\nContent-Length: 0\r\n' \
            'signed content-length|Content-Length: +2\r\n' \
            'folded header|X-A: 1\r\n Content-Length: 2\r\n' \
-           'header without colon|Content-Length 2\r\n'; do
+           'header without colon|Content-Length 2\r\n' \
+           'bare LF in a header|X-A: 1\nContent-Length: 0\r\n'; do
   got=$(raw "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n${bad#*|}\r\n{}")
   case $got in *403*) echo "PASS  relay refuses ${bad%%|*}" ;; *) echo "FAIL  relay refuses ${bad%%|*} (got '$got')"; fail=1 ;; esac
 done
-# connection cap: with 3 slots held by idle clients, a 4th is closed at once
-python3 - "$rt/s" <<'PY' && echo "PASS  relay caps idle connections" || { echo "FAIL  relay caps idle connections"; fail=1; }
-import socket, sys
+# connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
+capped() { python3 - "$1" <<'PY'
+import socket, sys, time
 held = []
 for _ in range(3):
     h = socket.socket(socket.AF_UNIX); h.connect(sys.argv[1]); held.append(h)
-import time; time.sleep(0.3)
+time.sleep(0.3)
 s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
 sys.exit(0 if s.recv(10) == b"" else 1)
 PY
-kill $up $rl; rm -rf "$rt"
+}
+capped "$rt/s" && echo "PASS  relay caps idle connections" || { echo "FAIL  relay caps idle connections"; fail=1; }
+RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2tcp "$rt/t" "127.0.0.1:$rport" & rt2=$!
+for _ in $(seq 30); do [ -S "$rt/t" ] && break; sleep 0.1; done
+capped "$rt/t" && echo "PASS  byte door caps idle connections" || { echo "FAIL  byte door caps idle connections"; fail=1; }
+kill $up $rl $rt2; rm -rf "$rt"
 
 exit $fail
