@@ -33,7 +33,7 @@ log() { echo "lane-run: $*" >&2; }
 sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
 
 # field <name> <description> — value of the first "Name: value" header line, before the --- fence
-field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");print;exit}' <<<"$2"; }
+field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");sub(/[ \t]+$/,"");print;exit}' <<<"$2"; }
 # safe_branch <name> — only lane/* or v100/* branch names; blocks refspecs (+a:b), options and existing release branches
 safe_branch() { [[ $1 =~ ^(lane|v100)/[A-Za-z0-9._/-]+$ ]] && git check-ref-format --branch "$1" >/dev/null 2>&1; }
 # body <description> — everything after the first --- fence
@@ -50,13 +50,14 @@ fail() { # fail <id> <why> [label] -- note, label (default qwen-failed: the deco
   bd -C "$repo" update "$1" -s open -a "" >/dev/null
 }
 
-bd_down=
-run_one() { # 0 = worked a bead; 1 = nothing done in this repo
-  local j id desc branch test wt= task= wlog= out rc t0 sha
-  if ! j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human 2>&1); then
-    log "$repo: bd ready failed: $(tail -1 <<<"$j")"; bd_down=1; return 1  # an outage, not an empty queue
-  fi
-  id=$(jq -r '.[0].id // empty' <<<"$j"); [ -n "$id" ] || return 1
+down=
+run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
+  local j id desc branch test wt= task= wlog= lf= wpid rc t0 sha sig=
+  # bd's stderr (warnings even on success) goes to our log, never into the JSON
+  j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human) \
+    && id=$(jq -er '.[0].id // ""' <<<"$j") \
+    || { log "$repo: bd ready failed or returned non-JSON"; down=1; return 1; }  # an outage, not an empty queue
+  [ -n "$id" ] || return 1
   desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
   branch=$(field Branch "$desc") test=$(field Test "$desc")
   # a lost claim is no progress (returning 0 spun --once in a tight loop).
@@ -69,40 +70,62 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo
   if ! safe_branch "$branch"; then
     fail "$id" "Branch: must be lane/* or v100/* (got '$branch')"; sprint end "$id" blocked "unsafe branch"; return 0
   fi
+  # a local branch of that name may hold someone's unpushed work: never reset or delete it
+  if git -C "$repo" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+    fail "$id" "local branch $branch already exists in $repo; lane-run will not reset it" human
+    sprint end "$id" blocked "local branch exists"; return 0
+  fi
   log "▶ $id $branch"
-  wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX") wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX")
-  # killed mid-run: reopen the bead (not qwen-failed: not the model's fault) and drop the worktree
-  trap 'fail "$id" "lane-run interrupted" lane-interrupted; git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task" "$wlog"; exit 130' INT TERM HUP
+  wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
+  wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX") lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
   body "$desc" >"$task"
-  if timeout 300 git -C "$repo" fetch -q origin -- "$branch" && git -C "$repo" worktree add -q -B "$branch" "$wt/wt" FETCH_HEAD; then
-    out=$(WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" "${WORKER_TASK:-$here/worker-task}" --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push 2>&1)
-    rc=$?
+  timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+  if [ $rc -eq 0 ] && git -C "$repo" worktree add -q -b "$branch" "$wt/wt" FETCH_HEAD; then
+    # own session, in the background: a signal to lane-run alone runs the trap now (bash defers traps
+    # while a foreground child runs) and the trap kills the whole worker tree
+    WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid "${WORKER_TASK:-$here/worker-task}" \
+      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push >"$lf" 2>&1 & wpid=$!
+    # interrupted: the worker may have pushed already, so a human looks (a rerun would read "already GREEN")
+    # ponytail: SIGKILL leaves the bead claimed; add a stale-claim sweep if lane-run ever gets killed that way
+    trap 'kill -TERM -- -$wpid 2>/dev/null; wait $wpid; fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+      git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; git -C "$repo" branch -q -D -- "$branch" 2>/dev/null
+      rm -rf "$wt" "$task" "$wlog"; exit 130' INT TERM HUP
+    wait $wpid; rc=$?
+    trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
+  elif [ $rc -eq 124 ]; then
+    echo "fetch of origin/$branch timed out" >"$wlog"; rc=4
   else
-    echo "could not check out origin/$branch" >"$wlog"; out=; rc=2
+    echo "could not check out origin/$branch" >"$wlog"; rc=5
   fi
   sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
   git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
+  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran)
   case $rc in
     0) bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(summary "$wlog" 1)" >/dev/null
        log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
-       git -C "$repo" branch -q -D -- "$branch" 2>/dev/null ;;  # pushed; a stale local copy would only confuse -B
-    3) # GREEN commit made, push or PR failed: keep the local branch and hand it to a human
-       fail "$id" "$(summary "$wlog") (GREEN $sha on local branch $branch)" human
-       sprint end "$id" blocked "push/PR failed" seconds=$(( $(date +%s) - t0 )) ;;
-    *) local lf; lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
-       printf '%s\n' "$out" >"$lf"  # full worker output for a human; the bead keeps worker-task's own lines
-       fail "$id" "$(summary "$wlog") (log: $lf)"
-       sprint end "$id" blocked "worker failed rc=$rc" seconds=$(( $(date +%s) - t0 ))
-       git -C "$repo" branch -q -D -- "$branch" 2>/dev/null ;;
+       rm -f "$lf" ;;
+    2) fail "$id" "$(summary "$wlog") (log: $lf)"  # full worker output for a human; the bead keeps worker-task's own lines
+       sprint end "$id" blocked "worker failed" seconds=$(( $(date +%s) - t0 )) ;;
+    4) # retried next pass, unblamed; stop this pass so one outage doesn't sweep the queue
+       log "$id: infra: $(summary "$wlog")"; bd -C "$repo" note "$id" "lane-infra: $(summary "$wlog")" >/dev/null
+       bd -C "$repo" update "$id" -s open -a "" >/dev/null; down=1
+       sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+    *) # 3 (GREEN commit on the local branch), 5 (branch missing on origin), anything unexpected
+       fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
+       sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;
   esac
-  rm -f "$wlog"; trap - INT TERM HUP
+  # pushed or failed, the local branch is ours to drop; after rc=3 it holds the only copy of GREEN
+  [ $rc -eq 3 ] || git -C "$repo" branch -q -D -- "$branch" 2>/dev/null
+  rm -f "$wlog"; trap - INT TERM HUP; [ -z "$sig" ] || exit 130
+  [ -z "$down" ]
 }
 
 [ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
 while :; do
-  did= bd_down=
-  for repo in "${repos[@]}"; do run_one && did=1; done
-  [ -n "$did" ] && continue
-  [ -n "$once" ] && { [ -z "$bd_down" ] || exit 3; exit 0; }
-  log "queue empty; idle ${idle}s"; sleep "$idle"
+  did= down=
+  for repo in "${repos[@]}"; do run_one && did=1; [ -z "$down" ] || break; done
+  [ -n "$once" ] && [ -n "$down" ] && exit 3
+  [ -n "$did" ] && [ -z "$down" ] && continue
+  [ -n "$once" ] && exit 0
+  log "${down:+outage}${down:-queue empty}; idle ${idle}s"; sleep "$idle"
 done

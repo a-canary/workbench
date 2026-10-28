@@ -54,7 +54,7 @@ if sbx --timeout 300 --exec sh -c "$test" >&2; then die "test already passes —
 
 log "worker: lane=$lane tools=$tools"
 t0=$(date +%s)
-sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || log "worker rc=$? (judging by tests)"
+wrc=0; sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || { wrc=$?; log "worker rc=$wrc (judging by tests)"; }
 log "worker took $(( $(date +%s) - t0 ))s"
 
 # a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
@@ -62,10 +62,11 @@ log "worker took $(( $(date +%s) - t0 ))s"
 g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
-g diff --cached --quiet && die "worker produced no changes"
+g diff --cached --quiet && { [ "$wrc" -eq 0 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
 # --no-renames: a rename would list only its new name and hide the config file it removed
 cfg=$(g diff --cached --no-renames --name-only -z | grep -zE "$runner_cfg" | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ') \
-  && [ -n "$cfg" ] && die "worker modified test/runner config: $(echo $cfg) (RED commit can allow with Worker-May-Edit:)"
+  && [ -n "$cfg" ] && { echo "worker-task: config files: $cfg" >&2
+    die "worker modified $(wc -w <<<"$cfg") test/runner config file(s) (RED commit can allow with Worker-May-Edit:)"; }
 
 # GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
 # the worker left in the worktree (a stub module, a forged .pyc, a patched node_modules) never shape it.
