@@ -3,6 +3,7 @@
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 LANE_RUN_LIB=1 source "$here/lane-run"
+export LANES_URL=http://127.0.0.1:9/__lanes  # hermetic: never read the live laneproxy (unreachable = fail open)
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
 
@@ -79,6 +80,21 @@ bead $'Branch: lane/nope\nTest: true\n---\nx'
 check "branch missing on origin: human" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
 bead "$good"
 check "fetch timeout is infra"         "$(timeout() { return 124; }; go)" "rc=1 down=1"
+# wb-sn4: a saturated lane (a waiter older than LANE_MAX_WAIT_S, default 300) defers the pass BEFORE the
+# claim, so queue wait never eats the worker timeout and the bead is not blamed (no note, no label)
+lanes_json() { echo '{"waiting":[{"req":1,"lane":"fast","waited_s":4.0},{"req":2,"lane":"queue","waited_s":1230.0}]}'; }
+check "saturated lane defers the pass" "$(go)" "rc=1 down=1"
+check "saturated: nothing claimed"     "$(grep -c -- '--claim' "$calls")" 0
+check "saturated: bead not labelled"   "$(grep -c 'label add' "$calls")" 0
+check "saturated: empty queue no-op"   "$(READY_JSON='[]' go)" "rc=1 down=0"
+check "threshold is configurable"      "$(LANE_MAX_WAIT_S=2000 STUB_RC=0 go)" "rc=0 down=0"
+lanes_json() { echo '{"waiting":[{"req":1,"lane":"queue","waited_s":12.0}]}'; }
+check "short wait dispatches"          "$(STUB_RC=0 go)" "rc=0 down=0"
+lanes_json() { echo 'not json'; }
+check "garbled /__lanes fails open"    "$(STUB_RC=0 go)" "rc=0 down=0"
+lanes_json() { return 7; }
+check "unreachable /__lanes fails open" "$(STUB_RC=0 go)" "rc=0 down=0"
+unset -f lanes_json
 # main loop: an outage stops the pass (second repo untouched) and --once exits 3
 export -f bd; export calls READY_JSON
 : >"$calls"; STUB_RC=4 "$here/lane-run" --repo "$tmp/r" --repo "$tmp/r" --once 2>/dev/null
