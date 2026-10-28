@@ -37,7 +37,7 @@ g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 log() { echo "worker-task: $*" >&2; }
 
-mapfile -t protected < <(g show --name-only --format= HEAD)
+mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
 # read before the worker runs (the jail masks .git anyway)
 may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
@@ -64,7 +64,7 @@ g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && die "worker produced no changes"
 # --no-renames: a rename would list only its new name and hide the config file it removed
-cfg=$(g diff --cached --no-renames --name-only | grep -E "$runner_cfg" | { [ -n "$may_edit" ] && grep -vE -- "$may_edit" || cat; }) \
+cfg=$(g diff --cached --no-renames --name-only -z | grep -zE "$runner_cfg" | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ') \
   && [ -n "$cfg" ] && die "worker modified test/runner config: $(echo $cfg) (RED commit can allow with Worker-May-Edit:)"
 
 # GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
