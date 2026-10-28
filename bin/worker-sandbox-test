@@ -213,6 +213,25 @@ for bad in 'duplicate content-length|Content-Length: 2\r\nContent-Length: 0\r\n'
   got=$(raw "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n${bad#*|}\r\n{}")
   case $got in *403*) echo "PASS  relay refuses ${bad%%|*}" ;; *) echo "FAIL  relay refuses ${bad%%|*} (got '$got')"; fail=1 ;; esac
 done
+# an upstream that dies mid-head must not leave the client hanging (it gets EOF, not its own timeout)
+dport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import socket, sys
+l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); l.bind(("127.0.0.1", int(sys.argv[1]))); l.listen(4)
+while True:
+    c, _ = l.accept(); c.recv(65536); c.sendall(b"HTTP/1.1 200 OK\r\nX-A: 1"); c.close()' "$dport" & dup=$!
+python3 "$here/relay.py" unix2http "$rt/d" "127.0.0.1:$dport" & drl=$!
+for _ in $(seq 30); do [ -S "$rt/d" ] && break; sleep 0.1; done
+if python3 - "$rt/d" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+try:
+    while s.recv(65536): pass
+except socket.timeout: sys.exit(1)
+PY
+then echo "PASS  relay closes client when upstream dies mid-head"; else echo "FAIL  relay closes client when upstream dies mid-head"; fail=1; fi
+kill $dup $drl
 # connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
 capped() { python3 - "$1" <<'PY'
 import socket, sys, time

@@ -24,6 +24,7 @@ run() {
   git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   echo 'test -f ok' > "$wt/t.sh"
   git -C "$wt" add t.sh && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
+  [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
@@ -42,6 +43,9 @@ run "nested .git file refused" "mkdir d && echo 'gitdir: /tmp' > d/.git" refused
 # fake GREEN: change how the test runs instead of the code under test
 run "runner config edit refused" 'echo "{\"scripts\":{}}" > package.json' refused
 run "nested conftest refused" 'mkdir -p a && echo x > a/conftest.py' refused
+run "non-ASCII path conftest refused" 'mkdir -p té && echo x > té/conftest.py' refused
+# a repo whose hooksPath lives in the tree: the worker's hooks must not run on the host commit/push
+HOOKS=.githooks run "worker-written commit hook never runs" "mkdir -p .githooks && printf '#!/bin/sh\ntouch $tmp/pwned\n' > .githooks/pre-commit && chmod +x .githooks/pre-commit" ok
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok
 run "vite.config.ts refused" 'echo x > vite.config.ts' refused
 run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused
@@ -60,6 +64,8 @@ run "ignored gitleaks allowlist ignored" "printf '[allowlist]\npaths=[\".*\"]\n'
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$' run "Worker-May-Edit allows a config edit" 'echo "{\"scripts\":{}}" > package.json' ok
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$' run "Worker-May-Edit is not a blanket pass" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|' run "Worker-May-Edit matching everything refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: .' run "Worker-May-Edit '.' refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: -e.' run "Worker-May-Edit '-e.' is a pattern, not an option" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$\nWorker-May-Edit: ' run "empty Worker-May-Edit adds nothing" 'echo x > conftest.py' refused
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
