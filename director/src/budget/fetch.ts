@@ -25,9 +25,8 @@ export async function fetchMeter(deps?: {
     const doFetch = deps?.fetch ?? fetch;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), deps?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    let res: Response;
-    try {
-      res = await doFetch(USAGE_URL, {
+    try { // timer spans the body read too: a stalled body must not hang the queue pick
+      const res = await doFetch(USAGE_URL, {
         method: "GET",
         headers: {
           authorization: `Bearer ${token}`,
@@ -35,13 +34,11 @@ export async function fetchMeter(deps?: {
         },
         signal: controller.signal,
       });
+      if (!res.ok) return null;
+      return meterOf(parseUsage(await res.json()));
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return null;
-    const json = await res.json();
-    const limits = parseUsage(json);
-    return meterOf(limits);
   } catch {
     return null;
   }

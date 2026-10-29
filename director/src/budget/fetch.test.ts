@@ -33,3 +33,11 @@ test("a hung endpoint is abandoned at timeoutMs (default 3000)", async () => {
   expect(await fetchMeter({ token: async () => "t", fetch: hang as typeof fetch, timeoutMs: 50 })).toBeNull();
   expect(Date.now() - t0).toBeLessThan(1000);
 });
+
+test("a stalled BODY is also abandoned at timeoutMs (headers arrive, body never ends)", async () => {
+  const t0 = Date.now();
+  const stall = async (_: unknown, init?: RequestInit) =>
+    new Response(new ReadableStream({ start(c) { init?.signal?.addEventListener("abort", () => c.error(new Error("aborted"))); } }));
+  expect(await fetchMeter({ token: async () => "t", fetch: stall as typeof fetch, timeoutMs: 50 })).toBeNull();
+  expect(Date.now() - t0).toBeLessThan(1000);
+});
