@@ -95,5 +95,11 @@ if [ -n "$push" ]; then
   g push -q --no-verify -u origin HEAD || { log "push failed; GREEN commit kept on the local branch"; exit 3; }
   # --base: never trust the GitHub default branch; arc-webui's was a 3-month-stale master (wb-7xq).
   base=${WORKER_BASE:-$(g rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
-  (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") || { log "PR create failed; branch pushed"; exit 3; }
+  # api.github.com refused intermittently (2 of 5 lane runs, 2026-10-29), turning GREEN into rc=3 human work: retry.
+  # ponytail: fixed 3 tries at 20/40 s; an existing PR for the branch also fails all three (still rc=3, harmless).
+  for i in 1 2 3; do
+    (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") && break
+    [ "$i" = 3 ] && { log "PR create failed; branch pushed"; exit 3; }
+    sleep $((i * ${WORKER_PR_RETRY_S:-20}))
+  done
 fi
