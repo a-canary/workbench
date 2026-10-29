@@ -64,9 +64,13 @@ g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && { [ "$wrc" -eq 0 ] || [ "$wrc" -eq 124 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
 # --no-renames: a rename would list only its new name and hide the config file it removed
-cfg=$(g diff --cached --no-renames --name-only -z | grep -zE "$runner_cfg" | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ') \
-  && [ -n "$cfg" ] && { echo "worker-task: config files: $cfg" >&2
-    die "worker modified $(wc -w <<<"$cfg") test/runner config file(s) (RED commit can allow with Worker-May-Edit:)"; }
+# names go to a file first so a git error dies here instead of reading as "no config files"
+names=$(mktemp "${TMPDIR:-/tmp}/worker-names.XXXXXX")
+g diff --cached --no-renames --name-only -z > "$names" || { rm -f "$names"; die "git diff --cached failed; config check cannot run"; }
+cfg=$({ grep -zE "$runner_cfg" "$names" || true; } | { [ -n "$may_edit" ] && grep -zvE -- "$may_edit" || cat; } | tr '\0' ' ')
+rm -f "$names"
+[ -z "$cfg" ] || { echo "worker-task: config files: $cfg" >&2
+  die "worker modified $(wc -w <<<"$cfg") test/runner config file(s) (RED commit can allow with Worker-May-Edit:)"; }
 
 # GREEN runs on a fresh checkout of exactly what will be committed: git-ignored or untracked files
 # the worker left in the worktree (a stub module, a forged .pyc, a patched node_modules) never shape it.
@@ -91,5 +95,13 @@ if [ -n "$push" ]; then
   g push -q --no-verify -u origin HEAD || { log "push failed; GREEN commit kept on the local branch"; exit 3; }
   # --base: never trust the GitHub default branch; arc-webui's was a 3-month-stale master (wb-7xq).
   base=${WORKER_BASE:-$(g rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo main || echo master)}
-  (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") || { log "PR create failed; branch pushed"; exit 3; }
+  # api.github.com refused intermittently (2 of 5 lane runs, 2026-10-29), turning GREEN into rc=3 human work: retry.
+  # ponytail: fixed 3 tries at 20/40 s; an existing PR for the branch also fails all three (still rc=3, harmless).
+  for i in 1 2 3; do
+    (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") && break
+    # a re-run onto a branch whose PR is already open: the push updated that PR, so GREEN is delivered (nd-ubf.1, 2026-10-29)
+    [ "$(cd "$wt" && gh pr view "$(git branch --show-current)" --json state -q .state 2>/dev/null)" = OPEN ] && { log "PR already open; push updated it"; break; }
+    [ "$i" = 3 ] && { log "PR create failed; branch pushed"; exit 3; }
+    sleep $((i * ${WORKER_PR_RETRY_S:-20}))
+  done
 fi
