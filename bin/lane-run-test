@@ -98,6 +98,11 @@ check "racing branch survives"         "$(timeout() { G branch -q lane/x-1 origi
 G branch -q -D lane/x-1
 bead $'Branch: lane/nope\nTest: true\n---\nx'
 check "branch missing on origin: human" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
+G remote set-url origin "$tmp/gone.git"
+check "unreachable origin stops the pass" "$(go)" "rc=1 down=1"
+check "unreachable origin: no label"   "$(grep -c 'label add' "$calls")" 0
+check "unreachable origin: reopened"   "$(grep -c 'update X-1 -s open' "$calls")" 1
+G remote set-url origin "$tmp/o.git"
 bead "$good"
 check "fetch timeout is infra"         "$(timeout() { return 124; }; go)" "rc=1 down=1"
 # main loop: an outage stops the pass (second repo untouched) and --once exits 3
