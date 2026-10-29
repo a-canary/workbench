@@ -203,6 +203,20 @@ test("a quoted write-verb destination is gated", () => {
   expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
 });
 
+// A quote that closes mid-token (or never closes) left the quotes on, so the
+// path resolved relative to an in-lane cwd and failed open.
+test("a partially quoted or unterminated write-verb destination is gated", () => {
+  const bin = `${process.env.HOME}/bin`;
+  for (const command of [
+    `cp /tmp/a "${bin}"/lane-hook-test-x`,
+    `cp -t "${bin}"/ /tmp/a`,
+    `cp /tmp/a '${bin}'/lane-hook-test-x`,
+    `mv /tmp/a "${bin}/lane-hook-test-x`,
+  ]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code }).toEqual({ command, code: 2 });
+  }
+});
+
 test("a trailing stderr redirect does not mask the write-verb destination", () => {
   const command = `mv /tmp/a ${process.env.HOME}/bin/lane-hook-test-x 2>/tmp/err.log`;
   expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);

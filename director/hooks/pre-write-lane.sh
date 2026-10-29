@@ -47,7 +47,8 @@ case "$tool" in
         | grep -oE '\btee[[:space:]]+(-a[[:space:]]+)?"?'"'"'?[^[:space:];|&<>"'"'"']+' \
         | sed -E 's/^tee[[:space:]]+//; s/^-a[[:space:]]+//; s/^["'"'"']//')"
       # write-verb destinations (last arg of cp/mv/ln/rsync, plus -t/--target-directory;
-      # dd of=; curl/wget -o). One surrounding quote pair is stripped; an empty
+      # dd of=; curl/wget -o). Every quote char is stripped (`"$D"/x`, an
+      # unterminated `"$D/x` would otherwise resolve against cwd); an empty
       # result (`cp a ""`) becomes `.` so it is checked against cwd, not skipped.
       # Redirect tokens (`2>/e`, `>>x`, `2>&1`) are dropped first so `mv a b 2>/e`
       # still ends in `b`; `redir=` above gates the redirect targets themselves.
@@ -64,7 +65,7 @@ case "$tool" in
                    else if (a[i] ~ /^-[A-Za-z]*t./) print substr(a[i], index(a[i], "t") + 1)
                  }
                  print a[n] }' \
-        | sed -E "s/^\"(.*)\"\$/\\1/; s/^'(.*)'\$/\\1/; s/^\$/./")"
+        | sed -E "s/[\"']//g; s/^\$/./")"
       # of= and -o destinations: an opening quote is stepped over here too —
       # the old classes excluded it, so a quoted destination extracted nothing.
       ofargs="$(printf '%s' "$cmd" \
