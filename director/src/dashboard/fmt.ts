@@ -1,5 +1,6 @@
 export function ago(ts: string, now: number): string {
   const m = Math.round((now - Date.parse(ts)) / 60000);
+  if (!Number.isFinite(m)) return ""; // unparseable ts: show nothing, not "NaNm ago"
   if (m < 60) return `${m}m ago`;
   if (m < 2880) return `${Math.round(m / 60)}h ago`;
   return `${Math.round(m / 1440)}d ago`;

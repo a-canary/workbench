@@ -10,6 +10,8 @@ describe("ago", () => {
     expect(ago("2026-10-28T09:00:00Z", now)).toBe("3h ago");
     expect(ago("2026-10-26T13:00:00Z", now)).toBe("47h ago");
     expect(ago("2026-10-25T12:00:00Z", now)).toBe("3d ago");
+    expect(ago("", now)).toBe("");
+    expect(ago("not a date", now)).toBe("");
   });
 });
 
