@@ -25,19 +25,18 @@ qualified() {
     [[ $DRY_RUN -eq 1 ]] || { grep -q 'passed [0-9]*/' <<<"$1" && ! grep -q 'passed 0/' <<<"$1"; }
 }
 
-# inert_only <repo> <from> <to>: 0 iff every changed path is inert (docs/beads/CI/LICENSE/.md);
-# non-zero for code changes, SKILL/AGENTS/CLAUDE.md, empty diff, or git errors.
+# inert_only <repo> <from> <to>: 0 iff every changed path is inert (docs/, .beads/, .github/, LICENSE, README, CHANGELOG);
+# non-zero for anything else (code, SKILL/AGENTS/GLOBAL-RULES .md), empty diff, or git errors.
 inert_only() {
     local repo="$1" from="$2" to="$3"
     local paths
-    paths=$(git -C "$repo" diff --name-only "$from" "$to" 2>/dev/null) || return 1
+    paths=$(git -C "$repo" diff --no-renames --name-only "$from" "$to" 2>/dev/null) || return 1
     [[ -n "$paths" ]] || return 1
     while IFS= read -r p; do
         case "$p" in
-            */SKILL.md|SKILL.md|*/AGENTS.md|AGENTS.md|*/CLAUDE.md|CLAUDE.md) return 1 ;;
+            # allowlist, not *.md: in skills repos most .md (SKILL, GLOBAL-RULES, references/) IS behavior
             docs/*|.beads/*|.github/*) continue ;;
-            LICENSE*) continue ;;
-            *.md) continue ;;
+            LICENSE*|README*|*/README.md|CHANGELOG*) continue ;;
             *) return 1 ;;
         esac
     done <<< "$paths"
