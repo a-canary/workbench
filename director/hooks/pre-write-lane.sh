@@ -46,11 +46,21 @@ case "$tool" in
       teed="$(printf '%s' "$cmd" \
         | grep -oE '\btee[[:space:]]+(-a[[:space:]]+)?"?'"'"'?[^[:space:];|&<>"'"'"']+' \
         | sed -E 's/^tee[[:space:]]+//; s/^-a[[:space:]]+//; s/^["'"'"']//')"
-      # write-verb destinations (last arg of cp/mv/ln/rsync; dd of=; curl/wget -o).
+      # write-verb destinations (last arg of cp/mv/ln/rsync, plus -t/--target-directory;
+      # dd of=; curl/wget -o). One surrounding quote pair is stripped.
+      # Redirect tokens (`2>/e`, `>>x`, `2>&1`) are dropped first so `mv a b 2>/e`
+      # still ends in `b`; `redir=` above gates the redirect targets themselves.
       # Regex layer: quoted decoys (echo "cp a ~/bin/x") fail closed — acceptable.
       verbs="$(printf '%s' "$cmd" \
+        | sed -E 's/(^|[[:space:]])[0-9]*>>?[&|]?[[:space:]]*[^[:space:];|&<>]*//g' \
         | grep -oE '\b(cp|mv|ln|rsync)\b[^;|&<>]*' \
-        | sed -E 's/[[:space:]]+$//; s/.*[[:space:]]([^[:space:]]+)$/\1/')"
+        | awk '{ n = split($0, a, /[[:space:]]+/); if (a[n] == "") n--
+                 for (i = 2; i <= n; i++) {
+                   if ((a[i] == "-t" || a[i] == "--target-directory") && i < n) print a[i + 1]
+                   else if (a[i] ~ /^--target-directory=/) print substr(a[i], 20)
+                 }
+                 print a[n] }' \
+        | sed -E "s/^\"(.*)\"\$/\\1/; s/^'(.*)'\$/\\1/")"
       # of= and -o destinations: an opening quote is stepped over here too —
       # the old classes excluded it, so a quoted destination extracted nothing.
       ofargs="$(printf '%s' "$cmd" \
