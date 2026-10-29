@@ -4,9 +4,10 @@
 # Generic roles only (operator, worker); paths via $HOME or env overrides. /home/worker and /home/testuser
 # are sandbox/test fixtures, not identity.
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel)" || exit 2
+# No git: the lane jail runs on a checkout-index copy without .git (git grep there failed open).
+cd "$(dirname "$0")/.." || exit 2
 pat='\baaron\b|enzonic|ndivisible|onenation|ournation|home-lab-[0-9]|ai-lab-[0-9]|/home/[a-z][a-z0-9_-]*/'
-hits=$(git grep -I -n -i -E "$pat" -- . ':!bin/oss-scrub-check' | grep -v -E '/home/(worker|testuser)/')
+hits=$(grep -rIniE "$pat" --exclude-dir=.git --exclude-dir=node_modules --exclude=oss-scrub-check . | grep -v -E '/home/(worker|testuser)/')
 [ -z "$hits" ] && { echo "oss-scrub-check: clean"; exit 0; }
 printf '%s\n' "$hits"
 echo "oss-scrub-check: $(printf '%s\n' "$hits" | wc -l) hit(s)" >&2
