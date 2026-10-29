@@ -84,3 +84,22 @@ test("an unknown silo gets the strictest (public) threshold", () => {
   expect(start(ls, "mystery")).toBe(false);
   expect(start(ls, "dev")).toBe(true);
 });
+
+test("an unparseable reset fails closed as meter-unreachable (review of #45)", () => {
+  const ls = [{ ...L("session", 0.9, 100), reset: "garbage" }];
+  expect(burnGate(ls, "public", NOW)).toEqual({ start: false, reason: "meter-unreachable", burn: null });
+  expect(start(ls, "critical")).toBe(true);
+});
+
+test("boundaries: util 0.20 is gated by burn, util 0.97 is the hard cap", () => {
+  expect(burnGate([L("session", 0.2, 30)], "public", NOW).reason).toBe("ok"); // burn 0.2 / 0.9 = 0.22, not low-util
+  expect(burnGate([L("session", 0.2, 299)], "public", NOW).reason).toBe("burn"); // ~0 elapsed -> burn 60
+  expect(burnGate([L("session", 0.1999, 299)], "public", NOW).reason).toBe("low-util");
+  expect(burnGate([L("session", 0.97, 0)], "trading", NOW).reason).toBe("hard-cap");
+  expect(burnGate([L("session", 0.9699, 0)], "trading", NOW).reason).toBe("ok"); // burn 0.97 < 1.2
+});
+
+test("object-prototype names are neither windows nor silos", () => {
+  expect(burnGate([L("constructor", 0.9, 1)], "public", NOW).reason).toBe("meter-unreachable");
+  expect(burnGate([L("session", 0.425, 150)], "toString", NOW).start).toBe(false); // public threshold, burn 0.85
+});

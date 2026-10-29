@@ -20,10 +20,12 @@ export function burnGate(
 ): { start: boolean; reason: string; burn: number | null } {
   // 1. Windows: active, scope == null, group session or weekly
   const windows = ls.filter(
-    (l) => l.active && l.scope == null && WINDOW_MINUTES[l.group!] != null,
+    (l) => l.active && l.scope == null && Object.hasOwn(WINDOW_MINUTES, l.group!),
   );
 
-  if (windows.length === 0 || windows.some((w) => !Number.isFinite(w.util))) {
+  // Bad meter data fails closed: a non-finite util or an unparseable reset reads as unreachable.
+  const bad = (w: Limit) => !Number.isFinite(w.util) || (w.reset != null && Number.isNaN(Date.parse(w.reset)));
+  if (windows.length === 0 || windows.some(bad)) {
     return { start: silo === "critical", reason: "meter-unreachable", burn: null };
   }
 
@@ -62,7 +64,7 @@ export function burnGate(
   }
 
   // 7. burn vs silo threshold (strictly less)
-  const threshold = SILO_THRESHOLDS[silo] ?? SILO_THRESHOLDS["public"];
+  const threshold = Object.hasOwn(SILO_THRESHOLDS, silo) ? SILO_THRESHOLDS[silo] : SILO_THRESHOLDS.public;
   const ok = burn < threshold;
   return { start: ok, reason: ok ? "ok" : "burn", burn };
 }
