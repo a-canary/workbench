@@ -122,7 +122,7 @@ cleanup() {
 trap cleanup EXIT
 
 # host side of the only door: unix socket -> 127.0.0.1:$port, one allowlisted LLM API request per connection
-RELAY_KEY=$key python3 "$here/relay.py" unix2http "$tmp/ep.sock" "127.0.0.1:$port" &
+RELAY_KEY=$key RELAY_MODEL=$model python3 "$here/relay.py" unix2http "$tmp/ep.sock" "127.0.0.1:$port" &
 relay_pid=$!
 for _ in $(seq 50); do [ -S "$tmp/ep.sock" ] && break; sleep 0.1; done
 [ -S "$tmp/ep.sock" ] || die "relay failed to start"
