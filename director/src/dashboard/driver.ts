@@ -147,7 +147,8 @@ export function driverPanel(
     if (steer.skip.length > 0) h += `<div>${chip("skip", steer.skip.join(", "))}</div>`;
     if (steer.notes.length > 0) {
       for (const n of steer.notes) {
-        h += `<div><em>${ago(n.ts, now)}:</em> ${esc(n.text)}</div>`;
+        const t = ago(n.ts, now);
+        h += `<div>${t ? `<em>${t}:</em> ` : ""}${esc(n.text)}</div>`;
       }
     }
     h += `</div>`;
