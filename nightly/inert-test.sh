@@ -26,6 +26,10 @@ c9=$(commit GLOBAL-RULES.md); c10=$(commit skills/x/references/y.md)
 check "other .md (rules, references) is behavior"     "$(io "$c8" "$c9")$(io "$c9" "$c10")" benchbench
 g mv src/b.ts docs/b.md; g commit -qm mv; c11=$(g rev-parse HEAD)
 check "rename code -> docs still benches"           "$(io "$c10" "$c11")" bench
+c12=$(commit README-tools/run.py); c13=$(commit docs/run.sh)
+check "README*/docs prefix does not cover code"     "$(io "$c11" "$c12")$(io "$c12" "$c13")" benchbench
+c14=$(commit "docs/é.md")
+check "non-ASCII doc path is still inert"           "$(io "$c13" "$c14")" inert
 check "empty range -> bench (nothing proves inert)"  "$(io "$c8" "$c8")" bench
 check "unknown ref -> bench (fail safe)"             "$(io "$base" deadbeef)" bench
 check "sweep calls inert_only before benching" \
