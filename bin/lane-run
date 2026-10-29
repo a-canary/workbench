@@ -55,11 +55,20 @@ fail() { # fail <id> <why> [label] -- note, label (default qwen-failed: the deco
 interrupted() {
   if [ -n "$wpid" ]; then  # the worker may have pushed already, so a human looks (a rerun would read "already GREEN")
     kill -TERM -- -"$wpid" 2>/dev/null; wait "$wpid"
-    fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+    keep=0
+    if [ -n "$made" ]; then
+      cur=$(git -C "$wt/wt" rev-parse HEAD 2>/dev/null)
+      if [ -n "$cur" ] && [ "$cur" != "$base" ]; then keep=1; fi
+    fi
+    if [ "$keep" = "1" ]; then
+      fail "$id" "lane-run interrupted; kept local branch $branch (worker commits, maybe unpushed); check origin/$branch" human
+    else
+      fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+    fi
   else
     log "$id: interrupted before the worker started"; bd -C "$repo" update "$id" -s open -a "" >/dev/null
   fi
-  [ -z "$made" ] || { git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; git -C "$repo" branch -q -D -- "$branch" 2>/dev/null; }
+  [ -z "$made" ] || { git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; [ "$keep" = "1" ] || git -C "$repo" branch -q -D -- "$branch" 2>/dev/null; }
   rm -rf "$wt" "$task" "$wlog"; exit 130
 }
 
@@ -71,7 +80,7 @@ lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout bef
   log "lane busy ($n waiting); deferring"
 }
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
-  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig=
+  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
   lane_busy && return 1
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
@@ -106,6 +115,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
   if [ $rc -eq 0 ] && git -C "$repo" worktree add -q -b "$branch" "$wt/wt" FETCH_HEAD; then
     made=1  # only a branch this run created is ever deleted (another process may make one meanwhile)
+    base=$(git -C "$wt/wt" rev-parse HEAD)
     # own session, in the background: a signal to lane-run alone runs the trap now (bash defers traps
     # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
     # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
