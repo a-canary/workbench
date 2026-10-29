@@ -45,9 +45,11 @@ test("stale claims come from the in-progress list; operator steering pins and sk
 
 test("an unreadable db warns and the rest still rank", () => {
   const { c, out, warn } = ctx({ "/r/a": { ready: [bead("a-1", 1)] } }, { dbs: ["/r/gone", "/r/a"] });
-  next(c, 1);
+  expect(next(c, 1)).toBe(0);
   expect(out).toEqual(["/r/a\ta-1\tP1\tt-a-1"]);
   expect(warn.join("\n")).toContain("/r/gone");
+  c.dbs = ["/r/gone"]; // every db unreadable is an error, not an empty queue
+  expect(next(c, 1)).toBe(1);
 });
 
 test("v100-starved row when the lane is up, nothing runs, and its queue is idle", () => {
@@ -63,6 +65,24 @@ test("v100-starved row when the lane is up, nothing runs, and its queue is idle"
   c.exec = (cmd) => (cmd[0] === "curl" ? lanes({ waiting: [1], slots: [] })(cmd) : base(cmd));
   next(c, 2);
   expect(out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+
+  out.length = 0; // a lane:v100 bead already running → not starved
+  const running = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Running: 1 } }, { laneUrl: "http://lane" });
+  const rb = running.c.exec;
+  running.c.exec = (cmd) => (cmd[0] === "curl" ? lanes({ waiting: [], slots: [] })(cmd) : rb(cmd));
+  next(running.c, 2);
+  expect(running.out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+
+  out.length = 0; // garbled /__lanes or an unreadable db could hide a running bead → fail closed
+  c.exec = (cmd) => (cmd[0] === "curl" ? (cmd.at(-1)!.endsWith("/v1/models") ? "200" : "<html>") : base(cmd));
+  next(c, 2);
+  expect(out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+  out.length = 0;
+  c.exec = (cmd) => (cmd[0] === "curl" ? lanes({ waiting: [], slots: [] })(cmd) : base(cmd));
+  c.dbs = ["/r/a", "/r/gone"];
+  next(c, 2);
+  expect(out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+  c.dbs = ["/r/a"];
 
   out.length = 0; // lane down (502) → "down", not starved
   c.exec = (cmd) => (cmd[0] === "curl" ? "502" : base(cmd));

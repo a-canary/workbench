@@ -30,18 +30,23 @@ const beads = (c: Ctx, dir: string, args: string[]): Bead[] | null => {
 };
 
 // V100 up but idle (no lane:v100 bead running anywhere, laneproxy queue empty) → top row tells the
-// Driver to feed it. A lane that answers non-200 is down, not starved.
+// Driver to feed it. A lane that answers non-200 is down, not starved. Fails closed: an unreadable
+// db or /__lanes could hide a running bead, so either suppresses the row (the shell assumed idle).
 function starved(c: Ctx): Bead | null {
   if (!c.laneUrl || c.exec(["curl", "-s", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", `${c.laneUrl}/v1/models`]) !== "200") return null;
-  const count = (args: string[]) => c.dbs.reduce((n, d) => n + (beads(c, d, args)?.length ?? 0), 0);
-  if (count(["list", "--status", "in_progress", "-l", "lane:v100", "--json", "--limit", "100"]) > 0) return null;
-  let busy = 0;
+  const count = (args: string[]) => {
+    const ns = c.dbs.map((d) => beads(c, d, args)?.length);
+    return ns.length && ns.every((n) => n !== undefined) ? ns.reduce((a, n) => a! + n!, 0)! : null;
+  };
+  if (count(["list", "--status", "in_progress", "-l", "lane:v100", "--json", "--limit", "100"]) !== 0) return null;
   try {
     const l = JSON.parse(c.exec(["curl", "-s", "-m", "3", `${c.laneUrl}/__lanes`]));
-    busy = (l.waiting?.length ?? 0) + (l.slots ?? []).filter((s: { lane: unknown }) => s.lane != null).length;
-  } catch {} // unreadable /__lanes = assume idle, like the shell's `|| echo 0`
-  if (busy > 0) return null;
-  const rdy = count(["ready", "--json", "-n", "100", "-l", "lane:v100", "--exclude-label", "qwen-failed,human"]);
+    if (!Array.isArray(l.waiting) || !Array.isArray(l.slots)) return null;
+    if (l.waiting.length + l.slots.filter((s: { lane: unknown }) => s.lane != null).length > 0) return null;
+  } catch {
+    return null;
+  }
+  const rdy = count(["ready", "--json", "-n", "100", "-l", "lane:v100", "--exclude-label", "qwen-failed,human"]) ?? 0;
   return {
     dir: "-", id: "v100-starved", priority: 0, created_at: "0000", updated_at: "", labels: [], issue_type: "task", status: "open",
     title: `[v100-starved] V100 idle (${rdy} lane:v100 ready, 0 running): decompose one into lane-run RED-test beads, then run lane-run`,
@@ -51,10 +56,12 @@ function starved(c: Ctx): Bead | null {
 export function next(c: Ctx, n: number): number {
   const ready: Bead[] = [];
   const claimed: Bead[] = [];
+  let read = 0;
   for (const d of c.dbs) {
     const r = beads(c, d, ["ready", "--json", "--limit", "1000", "--exclude-label", "human,lane:v100,lane:free", "--exclude-type", "epic"]);
     const p = beads(c, d, ["list", "--status", "in_progress", "--json", "--limit", "1000"]);
     if (!r || !p) c.warn(`queue: unreadable beads db ${d}`);
+    else read++;
     ready.push(...(r ?? []));
     claimed.push(...(p ?? []));
   }
@@ -62,7 +69,7 @@ export function next(c: Ctx, n: number): number {
   if (s) ready.push(s);
   const out = format(rank(ready, claimed, readSteer(c.steer), c.now).slice(0, n));
   if (out) c.print(out);
-  return 0;
+  return c.dbs.length && !read ? 1 : 0; // every db unreadable ≠ an empty queue
 }
 
 if (import.meta.main) {
