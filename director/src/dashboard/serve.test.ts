@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Sprint } from "../sprint/log.ts";
-import { handle, loadCtx, readLog, type Run, type Srv } from "./serve.ts";
+import { handle, loadCtx, readLog, spawnRun, type Run, type Srv } from "./serve.ts";
 
 const T0 = Date.parse("2026-10-29T20:00:00Z");
 const cur = { dir: "/r/wb", id: "wb-7", project: "wb" } as Sprint;
@@ -114,4 +114,10 @@ describe("handle", () => {
     expect((await handle(new Request("http://x/driver/steer"), s)).status).toBe(404);
     expect((await handle(new Request("http://x/driver/", { method: "POST" }), s)).status).toBe(404);
   });
+});
+
+test("spawnRun: stdout of a real process on exit 0; \"\" on non-zero exit or a missing binary", async () => {
+  expect(await spawnRun(["sh", "-c", "sleep 0.05; echo hi"])).toBe("hi\n");
+  expect(await spawnRun(["sh", "-c", "echo no; exit 1"])).toBe("");
+  expect(await spawnRun(["/nonexistent-binary-xyz"])).toBe("");
 });

@@ -180,19 +180,18 @@ export async function handle(req: Request, s: Srv): Promise<Response> {
   return new Response("not found", { status: 404 });
 }
 
-if (import.meta.main) {
-  const run: Run = async (cmd) => {
-    try {
-      const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", timeout: 30000 });
-      if (p.exitCode === 0 && p.stdout) {
-        return new TextDecoder().decode(await p.stdout);
-      }
-      return "";
-    } catch {
-      return "";
-    }
-  };
+/** Real Run: stdout of a zero exit, else "" (spawn error, non-zero exit, or the 30s timeout). */
+export const spawnRun: Run = async (cmd) => {
+  try {
+    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", timeout: 30_000 });
+    const out = await new Response(p.stdout).text();
+    return (await p.exited) === 0 ? out : "";
+  } catch {
+    return "";
+  }
+};
 
+if (import.meta.main) {
   const lane = process.env.DRIVER_LANE ?? "claude";
   const log = process.env.SPRINT_LOG ?? "sprints.jsonl";
   const steer = process.env.SPRINT_STEER ?? `steer-${lane}.json`;
@@ -200,10 +199,11 @@ if (import.meta.main) {
     ? process.env.QUEUE_CMD.split(" ")
     : ["bun", join(import.meta.dir, "../queue/cli.ts"), "6"];
 
-  const s: Srv = { lane, log, steer, run, queueCmd };
+  const s: Srv = { lane, log, steer, run: spawnRun, queueCmd };
 
   const port = Number(process.env.PORT ?? 8097);
   const host = process.env.HOST ?? "127.0.0.1";
-  Bun.serve({ port, hostname: host, fetch: (r) => handle(r, s) });
+  // idleTimeout: a GET waits on the queue command + 3 bd calls (~20s on a busy estate); bun defaults to 10s.
+  Bun.serve({ port, hostname: host, idleTimeout: 60, fetch: (r) => handle(r, s) });
   console.log(`driver dashboard listening on http://${host}:${port}/driver/`);
 }
