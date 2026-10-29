@@ -1,5 +1,6 @@
 // Pure dashboard steering transition: one form post → next steer-<lane>.json content, or an error string.
-export type Steer = { pin: string[]; skip: string[]; notes: { ts: string; text: string }[] };
+import type { Steer } from "../sprint/steer.ts";
+export type { Steer };
 
 const BEAD_ID_RE = /^[a-z0-9]+-[a-z0-9.]+$/i;
 const drop = (a: string[], x: string) => a.filter((v) => v !== x);
