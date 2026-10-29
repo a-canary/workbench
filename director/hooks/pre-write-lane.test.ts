@@ -18,8 +18,9 @@ let approvedDb: string;
 // must be outside every lane (not /tmp, not under $HOME) — string only, never created
 const approvedPrefix = `/opt/lane-hook-approved-${Date.now()}`;
 
-function runHook(payload: object, db: string): { code: number; stderr: string } {
+function runHook(payload: object, db: string, cwd?: string): { code: number; stderr: string } {
   const r = spawnSync("bash", [HOOK], {
+    cwd,
     input: JSON.stringify(payload),
     env: { ...process.env, LEDGER_DB: db },
     encoding: "utf8",
@@ -79,8 +80,9 @@ test("clobber and explicit-fd redirect forms are gated too", () => {
 
 // A relative target is in-lane exactly when the cwd it resolves against is.
 // The hook runs with cwd = the worktree, so ordinary relative writes must pass.
+// cwd is pinned to the in-lane sandbox: the inherited cwd is /work in the lane-run jail (wb-xn0).
 test("Bash redirect to a relative in-lane target is allowed", () => {
-  const r = runHook({ tool_name: "Bash", tool_input: { command: "echo x > lane-hook-test-note.txt" } }, emptyDb);
+  const r = runHook({ tool_name: "Bash", tool_input: { command: "echo x > lane-hook-test-note.txt" } }, emptyDb, sandbox);
   expect(r.code).toBe(0);
 });
 
@@ -88,6 +90,7 @@ test("a relative target climbing out of the lane is blocked", () => {
   const r = runHook(
     { tool_name: "Bash", tool_input: { command: "echo x > ../../../../../../etc/lane-hook-test-a" } },
     emptyDb,
+    sandbox,
   );
   expect(r.code).toBe(2);
   expect(r.stderr).toContain("outside the write-lane allowlist");
@@ -176,6 +179,65 @@ test("Bash fd dup (2>&1) is not a false positive", () => {
 test("Bash cp to ~/bin is blocked (write-verb destination)", () => {
   const r = runHook({ tool_name: "Bash", tool_input: { command: `cp /tmp/tool ${process.env.HOME}/bin/lane-hook-test-x` } }, emptyDb);
   expect(r.code).toBe(2);
+});
+
+// repos-ged1: the extractor gated only the LAST arg of cp/mv/ln/rsync.
+test("cp/mv -t and --target-directory= destinations are gated", () => {
+  const bin = `${process.env.HOME}/bin`;
+  for (const command of [
+    `cp -t ${bin} /tmp/tool`,
+    `mv -t ${bin} /tmp/a /tmp/b`,
+    `cp --target-directory=${bin} /tmp/tool`,
+    `cp --target-directory ${bin} /tmp/tool`,
+    `cp -rt ${bin} /tmp/tool`,
+    `cp -at ${bin} /tmp/tool`,
+    `cp -t${bin} /tmp/tool`,
+    `ln -sft${bin} /tmp/tool`,
+    `cp --target-dir=${bin} /tmp/tool`,
+    `mv --t ${bin} /tmp/tool`,
+  ]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code }).toEqual({ command, code: 2 });
+  }
+});
+
+test("a quoted write-verb destination is gated", () => {
+  const command = `mv /tmp/a "${process.env.HOME}/bin/lane-hook-test-x"`;
+  expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
+});
+
+// A quote that closes mid-token (or never closes) left the quotes on, so the
+// path resolved relative to an in-lane cwd and failed open.
+test("a partially quoted or unterminated write-verb destination is gated", () => {
+  const bin = `${process.env.HOME}/bin`;
+  for (const command of [
+    `cp /tmp/a "${bin}"/lane-hook-test-x`,
+    `cp -t "${bin}"/ /tmp/a`,
+    `cp /tmp/a '${bin}'/lane-hook-test-x`,
+    `mv /tmp/a "${bin}/lane-hook-test-x`,
+  ]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code }).toEqual({ command, code: 2 });
+  }
+});
+
+test("a trailing stderr redirect does not mask the write-verb destination", () => {
+  const command = `mv /tmp/a ${process.env.HOME}/bin/lane-hook-test-x 2>/tmp/err.log`;
+  expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
+});
+
+test("an empty quoted destination is checked against cwd", () => {
+  for (const command of [`rsync -a --old-args /tmp/src/ ""`, `cp /tmp/a ''`]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb, "/").code }).toEqual({ command, code: 2 });
+  }
+});
+
+test("rsync -t (preserve times) is not a target-directory flag", () => {
+  const r = runHook({ tool_name: "Bash", tool_input: { command: `rsync -t ${process.env.HOME}/bin/x /tmp/b` } }, emptyDb);
+  expect(r.code).toBe(0);
+});
+
+test("cp -t into an in-lane dir passes", () => {
+  const r = runHook({ tool_name: "Bash", tool_input: { command: "cp -t /tmp/d /tmp/a /tmp/b" } }, emptyDb);
+  expect(r.code).toBe(0);
 });
 
 test("Bash mv within /tmp passes", () => {

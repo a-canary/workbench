@@ -46,7 +46,7 @@ Updated: 2026-06-22 (post-fix)
 - `fast` — alias for v100/flash (critical for fast work)
 - `queue` — alias for v100/queue (critical for background work)
 
-**Schema incompatibility:** Aaron's config is `{"providers": {...}}` (object), workbench template is `[{baseUrl, models}]` (array). Pi accepts both but switching formats could break assumptions in other tooling.
+**Schema incompatibility:** The operator's config is `{"providers": {...}}` (object), workbench template is `[{baseUrl, models}]` (array). Pi accepts both but switching formats could break assumptions in other tooling.
 
 **FIX APPLIED:** Deploy script no longer overwrites models.json. Backs up local config and preserves it. Workbench template kept only for fresh installs.
 
@@ -119,7 +119,7 @@ Proxy commit not pinned in manifest — `ref: "main"` means deploy gets whatever
 
 ## Verdict
 
-**First deploy is now SAFE** for aaron's existing setup (items 1-2 fixed). Models preserved, skills update in-place.
+**First deploy is now SAFE** for the operator's existing setup (items 1-2 fixed). Models preserved, skills update in-place.
 
 **Remaining risk:** Skills pinned commit `50e0d361` is 12 commits behind current HEAD. First deploy will roll back agent-mode work. Decision needed: bump pin or accept rollback.
 

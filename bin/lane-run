@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
-#   lane-run [--repo DIR]... [--label lane:v100] [--once] [--idle 600]
+#   lane-run [--repo DIR]... [--label lane:v100] [--lane private|public] [--once] [--idle 600]
+#   --lane public sends the worker to the 9router Worker combo; worker-sandbox refuses any repo that is
+#   neither PUBLIC nor listed in $WORKER_PREPUBLIC (e.g. --label lane:9router --lane public).
 #   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
 # The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
@@ -9,6 +11,7 @@
 # a bead labelled lane:v100 whose description starts with
 #   Branch: <branch>
 #   Test: <command that goes RED -> GREEN>
+#   Timeout: <worker seconds, optional; default 600, max 3600>
 #   ---
 #   <task prompt: one goal, exact files, nothing else>
 # Success: bd close with the GREEN commit (worker-task pushes it and opens the PR).
@@ -17,16 +20,19 @@
 set -uo pipefail
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-repos=() label=lane:v100 once= idle=600
+repos=() label=lane:v100 lane=private once= idle=600
 while [ $# -gt 0 ]; do
   case $1 in
     --repo) repos+=("$(readlink -f "$2")"); shift 2 ;;
     --label) label=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
     --once) once=1; shift ;;
     --idle) idle=$2; shift 2 ;;
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+# a bad lane would fail every bead as the model's fault (qwen-failed) and poison the queue
+[[ $lane == private || $lane == public ]] || { echo "lane-run: --lane private|public, got '$lane'" >&2; exit 2; }
 [ ${#repos[@]} -gt 0 ] || repos=("$PWD")
 [[ $idle =~ ^[0-9]+$ ]] || { echo "lane-run: --idle wants seconds, got '$idle'" >&2; exit 2; }
 log() { echo "lane-run: $*" >&2; }
@@ -54,17 +60,33 @@ fail() { # fail <id> <why> [label] -- note, label (default qwen-failed: the deco
 interrupted() {
   if [ -n "$wpid" ]; then  # the worker may have pushed already, so a human looks (a rerun would read "already GREEN")
     kill -TERM -- -"$wpid" 2>/dev/null; wait "$wpid"
-    fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+    keep=0
+    if [ -n "$made" ]; then
+      cur=$(git -C "$wt/wt" rev-parse HEAD 2>/dev/null)
+      if [ -n "$cur" ] && [ "$cur" != "$base" ]; then keep=1; fi
+    fi
+    if [ "$keep" = "1" ]; then
+      fail "$id" "lane-run interrupted; kept local branch $branch (worker commits, maybe unpushed); check origin/$branch (log: $lf)" human
+    else
+      fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN (log: $lf)" human
+    fi
   else
     log "$id: interrupted before the worker started"; bd -C "$repo" update "$id" -s open -a "" >/dev/null
   fi
-  [ -z "$made" ] || { git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; git -C "$repo" branch -q -D -- "$branch" 2>/dev/null; }
+  [ -z "$made" ] || { git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; [ "$keep" = "1" ] || git -C "$repo" branch -q -D -- "$branch" 2>/dev/null; }
   rm -rf "$wt" "$task" "$wlog"; exit 130
 }
 
 down=
+lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout before the model runs
+  [ -n "${LANES_URL:-}" ] || return 1
+  local n; n=$(curl -s -m 5 "$LANES_URL" | jq -er '.waiting | length' 2>/dev/null) || return 1
+  [ "$n" -ge "${LANE_MAX_WAITERS:-4}" ] || return 1
+  log "lane busy ($n waiting); deferring"
+}
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
-  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig=
+  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
+  [ "$lane" = public ] || ! lane_busy || return 1  # the 9router lane does not queue on laneproxy
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
     && id=$(jq -er '.[0].id // ""' <<<"$j") \
@@ -72,6 +94,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   [ -n "$id" ] || return 1
   desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
   branch=$(field Branch "$desc") test=$(field Test "$desc")
+  # optional per-bead worker budget (a big GREEN outgrows worker-task's 600s); digits only, 1h lane ceiling
+  tmo=$(field Timeout "$desc"); [[ $tmo =~ ^[123456789][0123456789]{0,5}$ ]] || tmo=600; [ "$tmo" -le 3600 ] || tmo=3600
   # a lost claim is no progress (returning 0 spun --once in a tight loop).
   # ponytail: a bead whose claim always fails starves its repo's queue; bd ready -n 1 keeps offering it.
   bd -C "$repo" update "$id" --claim >/dev/null 2>&1 || { log "$id: claim lost, skipping"; return 1; }
@@ -93,24 +117,30 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
   wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX") lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
   body "$desc" >"$task"
-  timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+  for try in 1 2 3; do  # a fast failure (443 refused) is usually a blip: retry before calling the branch missing (wb-o49)
+    timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+    { [ $rc -eq 0 ] || [ $rc -eq 124 ] || [ $try -eq 3 ]; } && break; sleep 25
+  done
   if [ $rc -eq 0 ] && git -C "$repo" worktree add -q -b "$branch" "$wt/wt" FETCH_HEAD; then
     made=1  # only a branch this run created is ever deleted (another process may make one meanwhile)
+    base=$(git -C "$wt/wt" rev-parse HEAD)
     # own session, in the background: a signal to lane-run alone runs the trap now (bash defers traps
     # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
     # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
     WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid -w "${WORKER_TASK:-$here/worker-task}" \
-      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --push >"$lf" 2>&1 & wpid=$!
+      --worktree "$wt/wt" --lane "$lane" --task "$task" --test "$test" --timeout "$tmo" --push >"$lf" 2>&1 & wpid=$!
     wait $wpid; rc=$?
     trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
   elif [ $rc -eq 124 ]; then
     echo "fetch of origin/$branch timed out" >"$wlog"; rc=4
+  elif ! timeout 60 git -C "$repo" ls-remote -q origin HEAD >/dev/null 2>&1; then
+    echo "origin unreachable" >"$wlog"; rc=6  # an outage, not a missing branch
   else
     echo "could not check out origin/$branch" >"$wlog"; rc=5
   fi
   sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
   git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
-  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran)
+  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran, or the runner crashed at startup in RED/GREEN)
   case $rc in
     0) bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(summary "$wlog" 1)" >/dev/null \
          || { log "$id: GREEN $sha pushed but bd close failed; bead left in_progress"; down=1; }
@@ -123,6 +153,10 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
        fail "$id" "$(summary "$wlog") (log: $lf)" lane-infra; down=1
        sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+    6) # hand back unlabelled so the next pass retries it (2026-10-29: a GitHub 443 blip sent wb-an0.5.2 to a human)
+       log "$id: origin unreachable; handed back for the next pass"
+       bd -C "$repo" update "$id" -s open -a "" >/dev/null; down=1; rm -f "$lf"
+       sprint end "$id" blocked "origin unreachable" seconds=$(( $(date +%s) - t0 )) ;;
     *) # 3 (GREEN commit on the local branch), 5 (branch missing on origin), anything unexpected
        fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
        sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;

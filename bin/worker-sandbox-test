@@ -35,9 +35,16 @@ EOF
 )
 
 fail=0
+# probe <name> <worker-sandbox args...>: on FAIL show the jail's stderr, so a jail that never
+# started (e.g. search door down) is distinguishable from a probe that ran and failed (wb-v2k)
+err=$(mktemp)
+probe() {
+  local name=$1; shift
+  if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"
+  then echo "PASS  $name"; else echo "FAIL  $name"; tail -n 5 "$err" | sed 's/^/      /'; fail=1; fi
+}
 while IFS=$'\t' read -r name cmd; do
-  if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd" >/dev/null 2>&1
-  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+  probe "$name" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd"
 done <<< "$checks"
 
 # research profile = internet (search door only) + read-only files; never write or execute tools
@@ -50,11 +57,9 @@ research: endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/
 EOF
 )
 while IFS=$'\t' read -r name cmd; do
-  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
-  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+  probe "$name" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd"
 done <<< "$rchecks"
-if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]' >/dev/null 2>&1
-then echo "PASS  build: no search door"; else echo "FAIL  build: no search door"; fail=1; fi
+probe "build: no search door" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]'
 for t in write edit bash; do
   if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --tools "read,$t" --exec true >/dev/null 2>&1
   then echo "FAIL  research refuses $t tool"; fail=1; else echo "PASS  research refuses $t tool"; fi
@@ -199,8 +204,7 @@ unlink "$deps/marker"; rmdir "$deps"; rmdir "$wt/node_modules" 2>/dev/null
 kill $kup
 # research with an empty worktree = web-only, allowed on any repo
 empty=$(mktemp -d)
-if "$here/worker-sandbox" --worktree "$empty" --lane private --profile research --timeout 90 --exec true >/dev/null 2>&1
-then echo "PASS  research allows an empty worktree"; else echo "FAIL  research allows an empty worktree"; fail=1; fi
+probe "research allows an empty worktree" --worktree "$empty" --lane private --profile research --timeout 90 --exec true
 rmdir "$empty"
 
 # host relay replaces the jail's Authorization with RELAY_KEY (the key never enters the jail)
@@ -218,6 +222,35 @@ RELAY_KEY=sekret RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2http "$rt/s" "12
 for _ in $(seq 30); do [ -S "$rt/s" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$rport/" && break; sleep 0.2; done
 got=$(curl -s -m 5 --unix-socket "$rt/s" -H 'Authorization: Bearer none' -d '{}' http://x/v1/chat/completions)
 if [ "$got" = "Bearer sekret" ]; then echo "PASS  relay injects host key"; else echo "FAIL  relay injects host key (got '$got')"; fail=1; fi
+# RELAY_MODEL pins the model: the jail can't spend the host key on a model it picks
+mport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        j = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        ms = [str(v) for k, v in j.items() if k.lower() == "model"]  # a case-insensitive parser sees all of these
+        b = ("|".join([",".join(ms), self.headers.get("x-lane") or "", self.path])).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()' "$mport" & mup=$!
+RELAY_MODEL=Worker python3 "$here/relay.py" unix2http "$rt/m" "127.0.0.1:$mport" & mrl=$!
+for _ in $(seq 30); do [ -S "$rt/m" ] && curl -s -m 1 -o /dev/null "http://127.0.0.1:$mport/" && break; sleep 0.2; done
+for req in 'jail-picked model|{"model":"claude-opus","messages":[]}' \
+           'duplicate model keys|{"model":"Worker","model":"claude-opus","messages":[]}' \
+           'no model|{"messages":[]}' \
+           'case-variant model key|{"model":"Worker","MODEL":"claude-opus","messages":[]}'; do
+  got=$(curl -s -m 5 --unix-socket "$rt/m" -d "${req#*|}" http://x/v1/chat/completions)
+  if [ "$got" = "Worker||/v1/chat/completions" ]; then echo "PASS  relay pins model: ${req%%|*}"; else echo "FAIL  relay pins model: ${req%%|*} (got '$got')"; fail=1; fi
+done
+got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket "$rt/m" -d 'not json' http://x/v1/chat/completions)
+if [ "$got" = 403 ]; then echo "PASS  pinned relay refuses a non-JSON body"; else echo "FAIL  pinned relay refuses a non-JSON body (got '$got')"; fail=1; fi
+# the jail can't pick a laneproxy lane (x-lane) or skip lane routing with a query string
+got=$(curl -s -m 5 --unix-socket "$rt/m" -H 'x-lane: fast' -d '{}' 'http://x/v1/chat/completions?skip=1')
+if [ "$got" = "Worker||/v1/chat/completions" ]; then echo "PASS  relay strips x-lane and query"; else echo "FAIL  relay strips x-lane and query (got '$got')"; fail=1; fi
+got=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --unix-socket "$rt/m" -X GET -d '{"model":"claude-opus"}' http://x/v1/chat/completions)
+if [ "$got" = 403 ]; then echo "PASS  relay refuses a GET with a body"; else echo "FAIL  relay refuses a GET with a body (got '$got')"; fail=1; fi
+kill $mrl $mup
 # strict head: anything an upstream could parse differently is refused (403), never forwarded
 raw() { python3 - "$rt/s" "$1" <<'PY'
 import socket, sys
@@ -254,6 +287,35 @@ except socket.timeout: sys.exit(1)
 PY
 then echo "PASS  relay closes client when upstream dies mid-head"; else echo "FAIL  relay closes client when upstream dies mid-head"; fail=1; fi
 kill $dup $drl
+# a client trickling its request one byte at a time is closed at the request deadline, not held forever
+RELAY_TIMEOUT=2 python3 "$here/relay.py" unix2http "$rt/k" "127.0.0.1:1" & krl=$!
+for _ in $(seq 30); do [ -S "$rt/k" ] && break; sleep 0.1; done
+if python3 - "$rt/k" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); t0 = time.monotonic()
+try:
+    for b in b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n":
+        s.sendall(bytes([b])); time.sleep(0.5)
+except OSError: pass
+sys.exit(0 if time.monotonic() - t0 < 6 else 1)
+PY
+then echo "PASS  relay closes a trickling client at the deadline"; else echo "FAIL  relay closes a trickling client at the deadline"; fail=1; fi
+kill $krl
+# ...and a client streaming a pinned body faster than once per ms is closed too (no 1ms grace past the deadline)
+RELAY_TIMEOUT=2 RELAY_MODEL=m python3 "$here/relay.py" unix2http "$rt/f" "127.0.0.1:1" & frl=$!
+for _ in $(seq 30); do [ -S "$rt/f" ] && break; sleep 0.1; done
+if python3 - "$rt/f" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); t0 = time.monotonic()
+try:
+    s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 15000000\r\n\r\n")
+    while time.monotonic() - t0 < 8:
+        s.sendall(b" "); time.sleep(0.0002)
+except OSError: pass
+sys.exit(0 if time.monotonic() - t0 < 6 else 1)
+PY
+then echo "PASS  relay closes a fast-streaming client at the deadline"; else echo "FAIL  relay closes a fast-streaming client at the deadline"; fail=1; fi
+kill $frl
 # connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
 capped() { python3 - "$1" <<'PY'
 import socket, sys, time
@@ -270,5 +332,32 @@ RELAY_MAX_CONN=3 python3 "$here/relay.py" unix2tcp "$rt/t" "127.0.0.1:$rport" & 
 for _ in $(seq 30); do [ -S "$rt/t" ] && break; sleep 0.1; done
 capped "$rt/t" && echo "PASS  byte door caps idle connections" || { echo "FAIL  byte door caps idle connections"; fail=1; }
 kill $up $rl $rt2; rm -rf "$rt"
+
+# wb-68n item 1: a group kill of the caller (lane-run's interrupt) must take the jail down with it.
+# GNU timeout moves itself to its own process group unless --foreground, so the signal missed
+# timeout -> bwrap -> pi and the jail kept its cgroup until the timeout.
+mark="97$$"
+setsid "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 120 --exec sleep "$mark" >/dev/null 2>&1 & gk=$!
+for _ in $(seq 100); do pgrep -f "^sleep $mark" >/dev/null && break; sleep 0.1; done
+kill -TERM -- -"$gk" 2>/dev/null; sleep 2
+if pgrep -f "^sleep $mark" >/dev/null
+then echo "FAIL  group kill takes the jail down"; pkill -f "^sleep $mark"; fail=1
+else echo "PASS  group kill takes the jail down"; fi
+
+# pre-public registry (WORKER_PREPUBLIC): a PRIVATE repo the operator listed may use the public
+# (9router) lane; research stays PUBLIC-only, since what it reads can leave in any URL
+pp=$(mktemp -d); mkdir "$pp/bin" "$pp/repo"
+printf '#!/bin/sh\necho "PRIVATE a-canary/sbx-prepub"\n' > "$pp/bin/gh"; chmod +x "$pp/bin/gh"
+git -C "$pp/repo" init -q && git -C "$pp/repo" remote add origin https://github.com/a-canary/sbx-prepub
+printf 'a-canary/sbx-prepub\tdecided in a test\n' > "$pp/list"; printf 'a-canary/other\n' > "$pp/other"
+# ppr ARGS: exit 0 = ran; refused() = failed FOR the visibility reason (not, say, a search MCP that would not start)
+ppr() { PATH="$pp/bin:$PATH" WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$pp/repo" --timeout 60 "$@" --exec true >/dev/null 2>"$pp/err"; }
+refused() { ! ppr "$@" && grep -q "refused: repo visibility" "$pp/err"; }
+if WORKER_PREPUBLIC= refused --lane public; then echo "PASS  public lane refuses unlisted private repo"; else echo "FAIL  public lane refuses unlisted private repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/other refused --lane public; then echo "PASS  public lane refuses private repo listed nowhere"; else echo "FAIL  public lane refuses private repo listed nowhere"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/list ppr --lane public; then echo "PASS  public lane allows pre-public repo"; else echo "FAIL  public lane allows pre-public repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/list refused --lane private --profile research && grep -q "research profile refused" "$pp/err"; then echo "PASS  research refuses pre-public repo"; else echo "FAIL  research refuses pre-public repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/missing refused --lane public; then echo "PASS  public lane fails closed on missing registry"; else echo "FAIL  public lane fails closed on missing registry"; fail=1; fi
+rm -rf "$pp"
 
 exit $fail

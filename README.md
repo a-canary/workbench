@@ -34,6 +34,47 @@ cd workbench
 
 Pulls the pinned component versions, installs config, symlinks skills.
 
+QA profile (`worker-sandbox --role qa`, headless browser + screenshot collapse; optional):
+
+```sh
+npx @puppeteer/browsers install chrome-headless-shell   # found under ~/.cache/puppeteer
+pip install --user pillow numpy                         # img-collapse
+# elsewhere? export WORKER_CHROME=/path/to/chrome-headless-shell-linux64
+```
+
+## Quickstart: frontier model decomposes, local model implements
+
+Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, `python3`, `curl`, and any OpenAI-compatible local endpoint (llama.cpp, vLLM, Ollama).
+
+1. Point the private lane at your local endpoint (it must listen on 127.0.0.1; the worker jail reaches it through a unix-socket relay and nothing else):
+
+   ```sh
+   export WORKER_PRIVATE_PORT=8080 WORKER_PRIVATE_MODEL=qwen2.5-coder-32b
+   ```
+
+2. Decompose (Claude, or any frontier model): push a branch whose HEAD commit is a failing test, then file a bead whose description is the task contract:
+
+   ```sh
+   cat > task.txt <<'EOF'
+   Branch: lane/add-slugify
+   Test: bun test src/slug.test.ts
+   Timeout: 600
+   ---
+   Make `bun test src/slug.test.ts` pass. Create ONLY src/slug.ts exporting slugify(s: string): string.
+   EOF
+   bd create --title "lane: slugify" --type task --label lane:v100 --body-file task.txt
+   ```
+
+3. Run the lane. Each pass takes one bead, runs the local model jailed to a worktree, and on GREEN pushes the commit, opens a PR and closes the bead; if the model fails it labels the bead `qwen-failed` for re-decomposition (infra failures get `lane-infra` or `human`):
+
+   ```sh
+   bin/lane-run --repo ~/src/myproject --once     # drop --once to keep draining
+   ```
+
+4. Review and merge the PR as usual. Worker code never runs on the host: tests run inside the jail too.
+
+Run `bin/merge-gate` on a clean checkout before merging a change to workbench itself. It needs the private-lane endpoint up and a search MCP (`search-mcp` on PATH, or `WORKER_SEARCH_CMD`).
+
 ## Qualification
 
 Every change must pass harness-bench with no quality regression:
@@ -52,7 +93,7 @@ Results in `BENCH/`. Nightly build in `nightly/`.
 1. PRs require tests + harness-bench delta + evidence of value
 2. Nightly build runs stable + all open PRs through harness-bench
 3. Auto-merge: survive 3 nightlies with no related regressions
-4. Private (aaron) uses stable + own WIP PRs
+4. The operator's private setup uses stable + own WIP PRs
 
 
 ## Daily sweep (automated)
