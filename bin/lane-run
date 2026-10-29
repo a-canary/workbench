@@ -125,6 +125,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
     trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
   elif [ $rc -eq 124 ]; then
     echo "fetch of origin/$branch timed out" >"$wlog"; rc=4
+  elif ! timeout 60 git -C "$repo" ls-remote -q origin HEAD >/dev/null 2>&1; then
+    echo "origin unreachable" >"$wlog"; rc=6  # an outage, not a missing branch
   else
     echo "could not check out origin/$branch" >"$wlog"; rc=5
   fi
@@ -143,6 +145,10 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
        fail "$id" "$(summary "$wlog") (log: $lf)" lane-infra; down=1
        sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+    6) # hand back unlabelled so the next pass retries it (2026-10-29: a GitHub 443 blip sent wb-an0.5.2 to a human)
+       log "$id: origin unreachable; handed back for the next pass"
+       bd -C "$repo" update "$id" -s open -a "" >/dev/null; down=1; rm -f "$lf"
+       sprint end "$id" blocked "origin unreachable" seconds=$(( $(date +%s) - t0 )) ;;
     *) # 3 (GREEN commit on the local branch), 5 (branch missing on origin), anything unexpected
        fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
        sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;
