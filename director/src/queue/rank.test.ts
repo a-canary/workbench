@@ -36,8 +36,9 @@ test("in-progress beads count only when untouched 48h+ and not human or another 
     b("fresh", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-26T13:00:00Z" }),
     b("oldh", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-20T00:00:00Z", labels: ["human"] }),
     b("oldv", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-20T00:00:00Z", labels: ["lane:v100"] }),
+    b("oldf", 2, "2026-10-02", { status: "in_progress", updated_at: "2026-10-20T00:00:00Z", labels: ["lane:free"] }),
   ], none, NOW);
-  expect(rows.map((r) => [r.id, r.title])).toEqual([["old", "[stale-claim] t-old"]]);
+  expect(rows.map((r) => [r.id, r.title])).toEqual([["old", "[stale-claim] t-old"], ["oldf", "[stale-claim] t-oldf"]]);
 });
 
 test("pinned first, skipped hidden", () => {
@@ -49,4 +50,18 @@ test("format: dir, id, P<pri>, [pinned] title, tab-separated; tabs in titles bec
   const rows = rank([b("a", 2, "2026-10-01", { title: "x\ty", dir: "/home/u/repos" })], [], { pin: ["a"], skip: [] }, NOW);
   expect(format(rows)).toBe("/home/u/repos\ta\tP2\t[pinned] x y");
   expect(format([])).toBe("");
+});
+
+test("unlabelled beads (bd omits labels) do not throw", () => {
+  const nolab = (id: string, status: string) => ({ ...b(id, 1, "2026-10-01", { status, updated_at: "2026-10-01" }), labels: undefined }) as unknown as Bead;
+  expect(ids(rank([nolab("r", "open")], [nolab("p", "in_progress")], none, NOW))).toEqual(["p", "r"]);
+});
+
+test("ties break on dir, id, title (the shell sort's whole-line order)", () => {
+  const rows = rank([b("z", 1, "2026-10-01"), b("a", 1, "2026-10-01", { dir: "/s" }), b("m", 1, "2026-10-01")], [], none, NOW);
+  expect(ids(rows)).toEqual(["m", "z", "a"]);
+});
+
+test("line breaks in a title cannot split a TSV row", () => {
+  expect(format(rank([b("a", 1, "2026-10-01", { title: "x\r\ny\nz" })], [], none, NOW))).toBe("/r\ta\tP1\tx y z");
 });
