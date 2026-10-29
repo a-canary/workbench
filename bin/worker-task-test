@@ -77,6 +77,11 @@ REDBODY='[ -f ok ] && { echo "failed to load config from /w/vitest.config.ts" >&
   run "startup crash in GREEN is infra (rc 4)" 'true' rc4
 REDBODY='echo "AssertionError: expected EROFS handling" >&2; test -f ok' \
   run "an assertion that mentions EROFS is still a valid RED" 'true' ok
+# rc 126/127 = the test command never ran (wb-s8v: ~/.bun/bin/bun absent under the sandbox HOME): infra, not RED/GREEN
+REDBODY='[ -f ok ] || no-such-cmd-wb-s8v' \
+  run "test command not found in RED is infra (rc 4)" 'true' rc4
+REDBODY='[ -f ok ] && exit 126; exit 1' \
+  run "test command not executable in GREEN is infra (rc 4)" 'true' rc4
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok
 run "vite.config.ts refused" 'echo x > vite.config.ts' refused
 run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused
