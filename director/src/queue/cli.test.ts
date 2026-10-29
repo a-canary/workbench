@@ -96,3 +96,36 @@ test("readDbs: one dir per line, blanks and # comments ignored", () => {
   writeFileSync(f, "/r/a\n\n# retired\n  /r/b  \n");
   expect(readDbs(f)).toEqual(["/r/a", "/r/b"]);
 });
+
+// wb-an0.4: budget gate wired into the pick. util >= 0.9 (or meter unreachable) with lane:v100 work queued
+// → no NEW claude beads (ready rows dropped); claimed work continues; a budget-hold row heads the list.
+test("budget hold: high util + local lane queued drops ready claude beads, keeps claims, heads with budget-hold", () => {
+  const db = { "/r/a": { ready: [bead("a-1", 1)], claimed: [bead("a-9", 2, { status: "in_progress", updated_at: "2026-10-01" })], v100Ready: 2 } };
+  const { c, out } = ctx(db, { meter: { util: 0.95, limited: false } });
+  expect(next(c, 5)).toBe(0);
+  const rows = out[0]!.split("\n");
+  expect(rows[0]).toMatch(/^-\tbudget-hold\tP0\t\[budget-hold\] local-first util=95%: 2 lane:v100 queued/);
+  expect(rows.some((r) => r.includes("a-1"))).toBe(false);
+  expect(rows.some((r) => r.includes("a-9"))).toBe(true);
+});
+
+test("budget: limited holds even with an empty local queue; unreachable meter (null) holds only while local work is queued", () => {
+  const lim = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 0 } }, { meter: { util: 1, limited: true } });
+  next(lim.c, 5);
+  expect(lim.out[0]).toMatch(/\[budget-hold\] limited util=100%/);
+  expect(lim.out[0]).not.toContain("a-1");
+  const down = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 3 } }, { meter: null });
+  next(down.c, 5);
+  expect(down.out[0]).toMatch(/\[budget-hold\] meter-unreachable: 3 lane:v100 queued/);
+  const downIdle = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 0 } }, { meter: null });
+  next(downIdle.c, 5);
+  expect(downIdle.out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+});
+
+test("budget ok, or no meter configured (undefined): the pick is unchanged", () => {
+  for (const meter of [{ util: 0.5, limited: false }, undefined]) {
+    const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 4 } }, { meter });
+    next(c, 5);
+    expect(out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+  }
+});
