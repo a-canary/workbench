@@ -245,7 +245,7 @@ lim=(systemd-run --user --scope -q -p TasksMax=512 -p MemoryMax=8G --)
 if [ "${WORKER_NO_LIMITS:-}" = 1 ]; then lim=()
 elif ! "${lim[@]}" true 2>/dev/null; then die "no systemd user scope for cgroup limits (WORKER_NO_LIMITS=1 to run without)"; fi
 set +e
-"${lim[@]}" timeout -k 10 "$tmo" bwrap "${args[@]}" /bin/sh -c "$inner" sh "${exec_cmd[@]}"
+"${lim[@]}" timeout --foreground -k 10 "$tmo" bwrap "${args[@]}" /bin/sh -c "$inner" sh "${exec_cmd[@]}"
 rc=$?
 [ $rc -eq 124 ] && echo "worker-sandbox: timeout after ${tmo}s" >&2
 exit $rc

@@ -333,4 +333,15 @@ for _ in $(seq 30); do [ -S "$rt/t" ] && break; sleep 0.1; done
 capped "$rt/t" && echo "PASS  byte door caps idle connections" || { echo "FAIL  byte door caps idle connections"; fail=1; }
 kill $up $rl $rt2; rm -rf "$rt"
 
+# wb-68n item 1: a group kill of the caller (lane-run's interrupt) must take the jail down with it.
+# GNU timeout moves itself to its own process group unless --foreground, so the signal missed
+# timeout -> bwrap -> pi and the jail kept its cgroup until the timeout.
+mark="97$$"
+setsid "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 120 --exec sleep "$mark" >/dev/null 2>&1 & gk=$!
+for _ in $(seq 100); do pgrep -f "^sleep $mark" >/dev/null && break; sleep 0.1; done
+kill -TERM -- -"$gk" 2>/dev/null; sleep 2
+if pgrep -f "^sleep $mark" >/dev/null
+then echo "FAIL  group kill takes the jail down"; pkill -f "^sleep $mark"; fail=1
+else echo "PASS  group kill takes the jail down"; fi
+
 exit $fail
