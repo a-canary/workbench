@@ -36,7 +36,7 @@ Pulls the pinned component versions, installs config, symlinks skills.
 
 ## Quickstart: frontier model decomposes, local model implements
 
-Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, and any OpenAI-compatible local endpoint (llama.cpp, vLLM, Ollama).
+Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, `python3`, `curl`, and any OpenAI-compatible local endpoint (llama.cpp, vLLM, Ollama).
 
 1. Point the private lane at your local endpoint (it must listen on 127.0.0.1; the worker jail reaches it through a unix-socket relay and nothing else):
 
@@ -57,7 +57,7 @@ Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, and any OpenAI-compatible 
    bd create --title "lane: slugify" --type task --label lane:v100 --body-file task.txt
    ```
 
-3. Run the lane. Each pass takes one bead, runs the local model jailed to a worktree, and on GREEN pushes the commit, opens a PR and closes the bead; on failure it labels the bead `qwen-failed` for re-decomposition:
+3. Run the lane. Each pass takes one bead, runs the local model jailed to a worktree, and on GREEN pushes the commit, opens a PR and closes the bead; if the model fails it labels the bead `qwen-failed` for re-decomposition (infra failures get `lane-infra` or `human`):
 
    ```sh
    bin/lane-run --repo ~/src/myproject --once     # drop --once to keep draining
@@ -65,7 +65,7 @@ Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, and any OpenAI-compatible 
 
 4. Review and merge the PR as usual. Worker code never runs on the host: tests run inside the jail too.
 
-Run `bin/merge-gate` before merging a change to workbench itself.
+Run `bin/merge-gate` on a clean checkout before merging a change to workbench itself. It needs the private-lane endpoint up and a search MCP (`search-mcp` on PATH, or `WORKER_SEARCH_CMD`).
 
 ## Qualification
 

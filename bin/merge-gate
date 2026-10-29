@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # merge-gate — every check a workbench change must pass before merge; exit 0 = all green.
 #   bin/merge-gate     run from anywhere; prints PASS/FAIL per check, logs under $TMPDIR
-# Includes the OSS release checks: identity/host scrub and a gitleaks scan of all history reachable from HEAD (what merging ships).
+# Includes the OSS release checks: identity/host scrub of the tree and a gitleaks scan of all history reachable
+# from HEAD (what merging ships). History is NOT identity-scrubbed: publish from a squashed/orphan release commit.
 # Needs a search MCP for the research-profile sandbox tests: search-mcp on PATH, or WORKER_SEARCH_CMD.
 set -u
 cd "$(dirname "$(readlink -f "$0")")/.."
@@ -11,6 +12,7 @@ run() {
   local name=$1; shift
   if "$@" > "$logs/$name.log" 2>&1; then echo "PASS  $name"; else echo "FAIL  $name ($logs/$name.log)"; fails=1; fi
 }
+run clean-tree         test -z "$(git status --porcelain)"  # every check below sees exactly HEAD
 run lane-run-test      bin/lane-run-test
 run worker-task-test   bin/worker-task-test
 run worker-sandbox-test bin/worker-sandbox-test
