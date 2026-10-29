@@ -1,42 +1,28 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+// Operator steering file (steer-<lane>.json {pin, skip, notes}) — port of ~/vault/director/scripts/sprint.ts.
+import { readFileSync, writeFileSync } from "node:fs";
 
 export type Steer = { pin: string[]; skip: string[]; notes: { ts: string; text: string }[] };
 
-const EMPTY: Steer = { pin: [], skip: [], notes: [] };
-
-export function readSteer(path: string): Steer {
-  if (!existsSync(path)) return EMPTY;
+/** Raw file object, or {} when the file is missing, unparseable, or not a JSON object. */
+function readRaw(path: string): Record<string, unknown> {
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8"));
-    return {
-      pin: Array.isArray(raw.pin) ? raw.pin : [],
-      skip: Array.isArray(raw.skip) ? raw.skip : [],
-      notes: Array.isArray(raw.notes) ? raw.notes : [],
-    };
+    const j = JSON.parse(readFileSync(path, "utf8"));
+    return j && typeof j === "object" && !Array.isArray(j) ? j : {};
   } catch {
-    return EMPTY;
+    return {};
   }
 }
 
+const list = <T>(v: unknown): T[] => (Array.isArray(v) ? v : []);
+const norm = (raw: Record<string, unknown>): Steer => ({ pin: list(raw.pin), skip: list(raw.skip), notes: list(raw.notes) });
+
+export const readSteer = (path: string): Steer => norm(readRaw(path));
+
+/** Return the pending notes and write the file back with them cleared and `id` unpinned; other keys survive.
+ * ponytail: read-modify-write with no lock; the dashboard and Driver rarely write within the same second. */
 export function consumeSteer(path: string, id: string): Steer["notes"] {
-  let raw: object;
-  if (existsSync(path)) {
-    try {
-      raw = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      raw = EMPTY;
-    }
-  } else {
-    raw = EMPTY;
-  }
-  const steer = {
-    pin: Array.isArray(raw.pin) ? raw.pin : [],
-    skip: Array.isArray(raw.skip) ? raw.skip : [],
-    notes: Array.isArray(raw.notes) ? raw.notes : [],
-  };
-  const notes = steer.notes;
-  // Preserve all keys from the file, only mutating pin and notes.
-  const next = { ...raw, pin: steer.pin.filter((p) => p !== id), notes: [] };
-  writeFileSync(path, JSON.stringify(next, null, 2));
-  return notes;
+  const raw = readRaw(path);
+  const s = norm(raw);
+  writeFileSync(path, JSON.stringify({ ...raw, pin: s.pin.filter((p) => p !== id), notes: [] }, null, 2));
+  return s.notes;
 }

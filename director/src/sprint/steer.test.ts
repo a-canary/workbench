@@ -35,3 +35,14 @@ test("consumeSteer: missing file writes empty steering", () => {
   expect(consumeSteer(p, "a")).toEqual([]);
   expect(readSteer(p)).toEqual({ pin: [], skip: [], notes: [] });
 });
+
+test("non-object JSON (null, array) is empty steering, and the empty result is not shared", () => {
+  const p = tmp();
+  for (const body of ["null", "[1]"]) {
+    writeFileSync(p, body);
+    expect(readSteer(p)).toEqual({ pin: [], skip: [], notes: [] });
+    expect(consumeSteer(p, "a")).toEqual([]);
+  }
+  readSteer(tmp()).pin.push("leak");
+  expect(readSteer(tmp()).pin).toEqual([]);
+});
