@@ -97,7 +97,7 @@ G branch -q -D lane/x-1
 check "racing branch survives"         "$(timeout() { G branch -q lane/x-1 origin/main; command timeout "$@"; }; go >/dev/null; G branch --list lane/x-1 | wc -l)" 1
 G branch -q -D lane/x-1
 bead $'Branch: lane/nope\nTest: true\n---\nx'
-check "branch missing on origin: human" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
+check "branch missing on origin: human" "$(sleep() { :; }; go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
 G remote set-url origin "$tmp/gone.git"
 check "unreachable origin stops the pass" "$(go)" "rc=1 down=1"
 check "unreachable origin: no label"   "$(grep -c 'label add' "$calls")" 0
@@ -105,6 +105,9 @@ check "unreachable origin: reopened"   "$(grep -c 'update X-1 -s open' "$calls")
 G remote set-url origin "$tmp/o.git"
 bead "$good"
 check "fetch timeout is infra"         "$(timeout() { return 124; }; go)" "rc=1 down=1"
+# a fast fetch failure (443 refused, rc 128) that clears on retry is a blip, not a missing branch (wb-o49)
+check "fetch blip is retried"          "$(sleep() { :; }; timeout() { [ "$5" = fetch ] && [ ! -e "$tmp/blip" ] && { touch "$tmp/blip"; return 128; }; command timeout "$@"; }; go >/dev/null; grep -c 'label add X-1 human' "$calls"; grep -c 'close X-1' "$calls")" "0
+1"
 # main loop: an outage stops the pass (second repo untouched) and --once exits 3
 export -f bd; export calls READY_JSON
 : >"$calls"; STUB_RC=4 "$here/lane-run" --repo "$tmp/r" --repo "$tmp/r" --once 2>/dev/null
