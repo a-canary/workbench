@@ -94,12 +94,12 @@ need_public() {
   local vis= name= _
   for _ in 1 2 3; do  # gh flakes on the network; still fails closed after 3 tries
     read -r vis name < <(cd "$wt" && gh repo view "$(git remote get-url origin)" --json visibility,nameWithOwner \
-      -q '.visibility+" "+.nameWithOwner' 2>/dev/null) && [ -n "$vis" ] && break; vis=; sleep 1
+      -q '.visibility+" "+.nameWithOwner' 2>/dev/null) && [ -n "$vis" ] && break; vis= name=; sleep 1
   done
   if [ "$vis" != PUBLIC ]; then
     [ "${2:-}" = prepublic ] && [ -n "$name" ] && [ -f "${WORKER_PREPUBLIC:-}" ] &&
       awk -v n="$name" '$1 == n { f = 1 } END { exit !f }' "$WORKER_PREPUBLIC" ||
-      die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC${WORKER_PREPUBLIC:+ or listed in WORKER_PREPUBLIC})"
+      die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC${2:+ or listed in WORKER_PREPUBLIC})"
   fi
   local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache | head -3)
   [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"

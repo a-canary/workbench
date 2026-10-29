@@ -31,6 +31,8 @@ while [ $# -gt 0 ]; do
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
   esac
 done
+# a bad lane would fail every bead as the model's fault (qwen-failed) and poison the queue
+[[ $lane == private || $lane == public ]] || { echo "lane-run: --lane private|public, got '$lane'" >&2; exit 2; }
 [ ${#repos[@]} -gt 0 ] || repos=("$PWD")
 [[ $idle =~ ^[0-9]+$ ]] || { echo "lane-run: --idle wants seconds, got '$idle'" >&2; exit 2; }
 log() { echo "lane-run: $*" >&2; }
@@ -84,7 +86,7 @@ lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout bef
 }
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
   local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
-  lane_busy && return 1
+  [ "$lane" = public ] || ! lane_busy || return 1  # the 9router lane does not queue on laneproxy
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
     && id=$(jq -er '.[0].id // ""' <<<"$j") \
