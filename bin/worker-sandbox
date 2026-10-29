@@ -87,13 +87,20 @@ if [ "$profile" = qa ]; then
 fi
 [[ $tmo =~ ^[0-9]+$ ]] || die "bad --timeout"
 
-# fail closed: only a repo GitHub reports PUBLIC may be read by something that can reach the internet
+# fail closed: only a repo GitHub reports PUBLIC may be read by something that can reach the internet.
+# need_public WHAT [prepublic]: with "prepublic", a repo whose owner/name is the first field of a line in
+# $WORKER_PREPUBLIC (the operator's pre-public registry: the cloud model may read it, nothing else) also passes.
 need_public() {
-  local vis= _
+  local vis= name= _
   for _ in 1 2 3; do  # gh flakes on the network; still fails closed after 3 tries
-    vis=$(cd "$wt" && gh repo view "$(git remote get-url origin)" --json visibility -q .visibility 2>/dev/null) && break; vis=; sleep 1
+    read -r vis name < <(cd "$wt" && gh repo view "$(git remote get-url origin)" --json visibility,nameWithOwner \
+      -q '.visibility+" "+.nameWithOwner' 2>/dev/null) && [ -n "$vis" ] && break; vis= name=; sleep 1
   done
-  [ "$vis" = PUBLIC ] || die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC)"
+  if [ "$vis" != PUBLIC ]; then
+    [ "${2:-}" = prepublic ] && [ -n "$name" ] && [ -f "${WORKER_PREPUBLIC:-}" ] &&
+      awk -v n="$name" '$1 == n { f = 1 } END { exit !f }' "$WORKER_PREPUBLIC" ||
+      die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC${2:+ or listed in WORKER_PREPUBLIC})"
+  fi
   local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache | head -3)
   [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"
 }
@@ -105,7 +112,7 @@ case $lane in
   private)
     port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key= ;;
   public)
-    need_public "public lane"  # sends the code to a cloud model
+    need_public "public lane" prepublic  # sends the code to a cloud model
     port=${WORKER_PUBLIC_PORT:-20128} model=${WORKER_PUBLIC_MODEL:-Worker}
     # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;

@@ -344,4 +344,20 @@ if pgrep -f "^sleep $mark" >/dev/null
 then echo "FAIL  group kill takes the jail down"; pkill -f "^sleep $mark"; fail=1
 else echo "PASS  group kill takes the jail down"; fi
 
+# pre-public registry (WORKER_PREPUBLIC): a PRIVATE repo the operator listed may use the public
+# (9router) lane; research stays PUBLIC-only, since what it reads can leave in any URL
+pp=$(mktemp -d); mkdir "$pp/bin" "$pp/repo"
+printf '#!/bin/sh\necho "PRIVATE a-canary/sbx-prepub"\n' > "$pp/bin/gh"; chmod +x "$pp/bin/gh"
+git -C "$pp/repo" init -q && git -C "$pp/repo" remote add origin https://github.com/a-canary/sbx-prepub
+printf 'a-canary/sbx-prepub\tdecided in a test\n' > "$pp/list"; printf 'a-canary/other\n' > "$pp/other"
+# ppr ARGS: exit 0 = ran; refused() = failed FOR the visibility reason (not, say, a search MCP that would not start)
+ppr() { PATH="$pp/bin:$PATH" WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$pp/repo" --timeout 60 "$@" --exec true >/dev/null 2>"$pp/err"; }
+refused() { ! ppr "$@" && grep -q "refused: repo visibility" "$pp/err"; }
+if WORKER_PREPUBLIC= refused --lane public; then echo "PASS  public lane refuses unlisted private repo"; else echo "FAIL  public lane refuses unlisted private repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/other refused --lane public; then echo "PASS  public lane refuses private repo listed nowhere"; else echo "FAIL  public lane refuses private repo listed nowhere"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/list ppr --lane public; then echo "PASS  public lane allows pre-public repo"; else echo "FAIL  public lane allows pre-public repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/list refused --lane private --profile research && grep -q "research profile refused" "$pp/err"; then echo "PASS  research refuses pre-public repo"; else echo "FAIL  research refuses pre-public repo"; fail=1; fi
+if WORKER_PREPUBLIC=$pp/missing refused --lane public; then echo "PASS  public lane fails closed on missing registry"; else echo "FAIL  public lane fails closed on missing registry"; fail=1; fi
+rm -rf "$pp"
+
 exit $fail
