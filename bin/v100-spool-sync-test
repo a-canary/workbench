@@ -15,9 +15,35 @@ reason() { cat "$1/REASON" 2>/dev/null | head -c 200; }
 spool=$tmp/spool q=$tmp/q work=$tmp/work arch=$tmp/arch
 mkdir -p "$spool"/{ready,done,failed} "$q"/{ready,running,done,failed} "$work"
 
-# stubs: the "remote" logs the command string it is handed, the job-user prefix logs its argv
-printf '#!/bin/sh\necho "$1" >>"$REM_LOG"\nexec bash -c "$1"\n' >"$tmp/remstub"
-printf '#!/bin/sh\necho "$*" >>"$STUB_LOG"\nexec "$@"\n' >"$tmp/jobrun"
+# stubs: the "remote" logs "<script tag> <command>" and can inject faults; the job-user prefix logs its argv
+# and can fail like a broken sudo. Fault knobs (env): REM_FAIL_TAG + REM_FAIL_MODE=before|after (exit 255; after
+# = "lost ack"), REM_TRUNC_TAG + REM_TRUNC_BYTES (cut the stdin stream), REM_OUT_TAG + REM_OUT_VAL (fake stdout),
+# REM_TEE=file (record the result stream the remote managed to emit before the caller hung up),
+# JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies).
+cat >"$tmp/remstub" <<'EOF'
+#!/bin/bash
+b=$(printf %s "$1" | sed -n 's/.*echo \([A-Za-z0-9+\/=]*\) | base64 -d.*/\1/p')
+tag=$(printf %s "$b" | base64 -d | sed -n '1s/^#//p')
+echo "$tag $1" >>"$REM_LOG"
+echo $(ls -d "$TMPDIR"/v100-sync.*/j.* 2>/dev/null | wc -l) >>"$J_LOG"
+if [ "$tag" = "${REM_OUT_TAG:-}" ]; then echo "$REM_OUT_VAL"; exit 0; fi
+if [ "$tag" = "${REM_FAIL_TAG:-}" ] && [ "${REM_FAIL_MODE:-}" = before ]; then exit 255; fi
+if [ "$tag" = "${REM_TRUNC_TAG:-}" ]; then head -c "$REM_TRUNC_BYTES" | bash -c "$1"; exit $?; fi
+if [ "$tag" = work ] && [ -n "${REM_TEE:-}" ]; then bash -c "$1" | tee "$REM_TEE"; exit 0; fi
+bash -c "$1"; rc=$?
+if [ "$tag" = "${REM_FAIL_TAG:-}" ]; then exit 255; fi
+exit $rc
+EOF
+cat >"$tmp/jobrun" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$STUB_LOG"
+[ -z "${JOB_SUDO_FAIL:-}" ] || exit 1
+if [ -n "${JOB_PROBE_FAIL:-}" ] && [ "$1" = sh ]; then case "${3:-}" in "[ -e"*) [ "$JOB_PROBE_FAIL" = empty ] && exit 0; exit 1 ;; esac; fi
+if [ "$1" = du ] && [ -n "${JOB_DU_EMPTY:-}" ]; then exit 0; fi
+if [ "$1" = du ] && [ -n "${DU_LIE:-}" ]; then for a; do :; done; printf '1\t%s\n' "$a"; exit 0; fi
+if [ "$1" = tar ] && [ -n "${JOB_FAIL_TAR:-}" ]; then case " $* " in *" -xf "*) "$@"; exit 137 ;; esac; fi
+exec "$@"
+EOF
 # after the agent-side tar finishes, mutate the spool dir the way a hostile agent would
 cat >"$tmp/pubtoctou" <<'EOF'
 #!/bin/sh
@@ -32,14 +58,21 @@ exit $rc
 EOF
 chmod +x "$tmp/remstub" "$tmp/jobrun" "$tmp/pubtoctou"
 
-tick() {  # tick [PUB_RUN]; runs in $tmp so an injected `touch PWNED` would land there
-  cd "$tmp" && env PUB_RUN="${1:-env}" SPOOL="$spool" REMOTE="$tmp/remstub" V100JOB_RUN="$tmp/jobrun" V100_Q="$q" \
-    V100_WORK="$work" V100_ARCHIVE="$arch" STUB_LOG="$tmp/job.log" REM_LOG="$tmp/rem.log" "$sync" 2>"$tmp/err"
+# tick [VAR=val ...]: one sync tick, prints its exit code; runs in $tmp so an injected `touch PWNED` lands there
+tick() {
+  mkdir -p "$tmp/st"
+  cd "$tmp" && env PUB_RUN=env SPOOL="$spool" REMOTE="$tmp/remstub" V100JOB_RUN="$tmp/jobrun" V100_Q="$q" \
+    V100_WORK="$work" V100_ARCHIVE="$arch" STUB_LOG="$tmp/job.log" REM_LOG="$tmp/rem.log" J_LOG="$tmp/jcount.log" \
+    TMPDIR="$tmp/st" "$@" "$sync" 2>"$tmp/err"
   echo $?
 }
+remcalls() { grep -c "^$1 " "$tmp/rem.log"; }
 mkjob() { mkdir -p "$spool/ready/$1"; printf '#!/bin/sh\necho hi\n' >"$spool/ready/$1/run.sh"; }
+# finished STATE NAME: a runner-finished token + payload on the "remote"
+finished() { mkdir -p "$q/$1/3-rnd-$2" "$work/3-rnd-$2"; echo "log-$2" >"$q/$1/3-rnd-$2/job.log"; echo "out-$2" >"$work/3-rnd-$2/out.txt"; }
 
-# ---- tick 1: one good job plus every kind of bad one
+# ---- tick 1: good jobs plus every kind of bad one
+mkjob good2
 mkjob good; echo data >"$spool/ready/good/in.txt"; mkdir "$spool/ready/good/sub"; echo deep >"$spool/ready/good/sub/f"
 long=$(printf 'a%.0s' $(seq 42))
 for n in A a_b -x "a b" "$long" 'x;touch PWNED' 'y$(touch PWNED2)'; do mkjob "$n"; done
@@ -57,13 +90,16 @@ check "good: work dir has run.sh"      "$(isfile "$work/3-rnd-good/run.sh")" y
 check "good: work dir has input"       "$(cat "$work/3-rnd-good/in.txt" 2>/dev/null)" data
 check "good: work dir nested file"     "$(cat "$work/3-rnd-good/sub/f" 2>/dev/null)" deep
 check "good: queue token exists"       "$(isfile "$q/ready/3-rnd-good/run.sh")" y
-check "good: token run.sh copied"      "$(cat "$q/ready/3-rnd-good/run.sh" 2>/dev/null | tail -n1)" "echo hi"
+check "good: token run.sh is a stub"   "$(cat "$q/ready/3-rnd-good/run.sh" 2>/dev/null)" 'echo "3-rnd token: payload runs from the v100job work dir" >&2; exit 1'
+check "good: token carries a sha"      "$(grep -c '^[0-9a-f]\{64\}$' "$q/ready/3-rnd-good/.sha")" 1
+check "good: sha not in the work dir"  "$(exists "$work/3-rnd-good/.sha")" n
 check "good: no hidden token left"     "$(exists "$q/ready/.3-rnd-good")" n
-check "good: no incoming dir left"     "$(exists "$work/.incoming-good")" n
+check "good: no incoming dir/tar left" "$(exists "$work/.incoming-good")$(exists "$work/.incoming-good.tar")" nn
 check "good: moved out of ready"       "$(exists "$spool/ready/good")" n
 check "good: moved aside, not lost"    "$(exists "$spool/ready/.submitted-good/run.sh")" y
-check "good: job-user prefix used"     "$(grep -c -e '--no-same-owner --no-same-permissions' "$tmp/job.log")" 1
-check "good: extract ran under prefix" "$(grep -c 'tar -C .*incoming-good' "$tmp/job.log")" 1
+check "good: job-user prefix used"     "$(grep -c -e '--no-same-owner --no-same-permissions' "$tmp/job.log")" 2
+check "good: extract ran under prefix" "$(grep -c 'tar -C [^ ]*incoming-good --no' "$tmp/job.log")" 1
+check "stage: a finished job's stage is deleted before the next" "$(sort -n "$tmp/jcount.log" | tail -n1)" 1
 
 for n in A a_b -x "a b" "$long"; do
   check "bad name rejected: ${n:0:12}" "$(reason "$spool/failed/$n" | grep -c 'name must match')" 1
@@ -93,16 +129,16 @@ cp -a "$work" "$tmp/work.snap"; : >"$tmp/rem.log"
 check "tick 2 exit" "$(tick)" 0
 check "tick 2 submits nothing"         "$(grep -c submitted "$tmp/err")" 0
 check "tick 2 remote untouched"        "$(diff -r "$work" "$tmp/work.snap" >/dev/null && echo same)" same
-check "tick 2 no remote submit call"   "$(grep -c 'incoming' "$tmp/rem.log")" 0
+check "tick 2 no remote submit call"   "$(remcalls submit)" 0
 
 # ---- tick 3: validation reads the STAGED copy, not the spool the agent can still mutate
 mkjob race1                                   # valid when copied; spool turned hostile right after
 mkjob race2; ln -s /etc/passwd "$spool/ready/race2/planted"   # hostile when copied; spool cleaned right after
-check "tick 3 exit" "$(tick "$tmp/pubtoctou")" 0
+check "tick 3 exit" "$(tick PUB_RUN="$tmp/pubtoctou")" 0
 check "toctou: valid-at-copy accepted"  "$(isfile "$work/3-rnd-race1/run.sh")" y
 check "toctou: shipped the staged bytes" "$(tail -n1 "$work/3-rnd-race1/run.sh" 2>/dev/null)" "echo hi"
 check "toctou: later mutation not shipped" "$(exists "$work/3-rnd-race1/evil")" n
-check "toctou: token is staged bytes"   "$(tail -n1 "$q/ready/3-rnd-race1/run.sh" 2>/dev/null)" "echo hi"
+check "toctou: token is the stub"       "$(grep -c 'payload runs from the v100job work dir' "$q/ready/3-rnd-race1/run.sh")" 1
 check "toctou: hostile-at-copy rejected" "$(reason "$spool/failed/race2" | grep -c 'symlink')" 1
 check "toctou: hostile-at-copy not shipped" "$(exists "$work/3-rnd-race2")" n
 
@@ -130,6 +166,7 @@ check ">200MB: big file not copied"    "$(exists "$spool/done/r3/big.bin")$(exis
 check ">200MB: still retired"          "$(exists "$arch/3-rnd-r3/big.bin")$(exists "$q/collected/3-rnd-r3")" yy
 check "bad result name ignored"        "$(exists "$q/done/3-rnd-BAD")$(exists "$spool/done/BAD")" yn
 check "unfinished token untouched"     "$(exists "$q/ready/3-rnd-pending")" y
+check "no leftover hidden result dirs" "$(ls -A "$spool/done" "$spool/failed" | grep -c '^\.dest-tmp')" 0
 
 # ---- tick 5: nothing is collected twice
 find "$spool" "$q" "$arch" | sort >"$tmp/tree1"
@@ -137,6 +174,129 @@ check "tick 5 exit" "$(tick)" 0
 find "$spool" "$q" "$arch" | sort >"$tmp/tree2"
 check "tick 5 collects nothing"        "$(grep -c collected "$tmp/err")" 0
 check "tick 5 tree unchanged"          "$(cmp -s "$tmp/tree1" "$tmp/tree2" && echo same)" same
-check "no duplicate result dirs"       "$(ls "$spool/done" "$spool/failed" | grep -c '\.[0-9]\{6,\}$')" 0
+check "no duplicate result dirs"       "$(ls "$spool/done" "$spool/failed" | grep -c '\.[0-9]\+$')" 0
+
+# ---- lost submit ack: the remote finished the submit but the caller saw 255
+mkjob ack; echo one >"$spool/ready/ack/x"
+check "lost ack: tick exits nonzero"   "$(tick REM_FAIL_TAG=submit REM_FAIL_MODE=after)" 1
+check "lost ack: remote did submit"    "$(isfile "$work/3-rnd-ack/run.sh")$(isfile "$q/ready/3-rnd-ack/.sha")" yy
+check "lost ack: job kept in ready"    "$(exists "$spool/ready/ack/run.sh")" y
+: >"$tmp/rem.log"
+check "lost ack: next tick exit"       "$(tick)" 0
+check "lost ack: moved aside, not failed" "$(exists "$spool/ready/.submitted-ack/run.sh")$(exists "$spool/failed/ack")$(exists "$spool/ready/ack")" ynn
+check "lost ack: not submitted twice"  "$(remcalls submit)" 0
+check "lost ack: recognised as submitted" "$(grep -c 'already submitted' "$tmp/err")" 1
+mkjob ack; echo two >"$spool/ready/ack/x"                       # same name, DIFFERENT content: a real duplicate
+check "changed content: tick exit"     "$(tick)" 0
+check "changed content rejected as duplicate" "$(reason "$spool/failed/ack" | grep -c duplicate)" 1
+check "changed content: token untouched" "$(isfile "$q/ready/3-rnd-ack/.sha")" y
+
+# the dup check looks in every queue state: same sha = already submitted, other sha = duplicate
+mkjob seed; echo q >"$spool/ready/seed/x"; cp -a "$spool/ready/seed" "$tmp/seed.orig"
+check "dup states: seed submit exit"   "$(tick)" 0
+sha=$(cat "$q/ready/3-rnd-seed/.sha")
+for s in ready running done failed collected; do
+  mkdir -p "$q/$s/3-rnd-same$s" "$q/$s/3-rnd-diff$s"
+  printf %s "$sha" >"$q/$s/3-rnd-same$s/.sha"; printf %s deadbeef >"$q/$s/3-rnd-diff$s/.sha"
+  cp -a "$tmp/seed.orig" "$spool/ready/same$s"; cp -a "$tmp/seed.orig" "$spool/ready/diff$s"
+done
+: >"$tmp/rem.log"
+check "dup states: tick exit"          "$(tick)" 0
+for s in ready running done failed collected; do
+  check "dup state $s: same sha = already submitted" "$(exists "$spool/ready/.submitted-same$s")$(exists "$spool/failed/same$s/REASON")$(exists "$work/3-rnd-same$s")" ynn
+  check "dup state $s: other sha = duplicate" "$(reason "$spool/failed/diff$s" | grep -c duplicate)" 1
+done
+check "dup states: same sha not resubmitted" "$(remcalls submit)" 0
+
+# ---- failed or truncated submits leave nothing behind and retry cleanly
+mkjob killx
+check "killed extract: tick exits nonzero" "$(tick JOB_FAIL_TAR=1)" 1
+check "killed extract: no remote residue" "$(exists "$work/3-rnd-killx")$(exists "$work/.incoming-killx")$(exists "$work/.incoming-killx.tar")$(exists "$q/ready/3-rnd-killx")$(exists "$q/ready/.3-rnd-killx")" nnnnn
+check "killed extract: job kept for retry" "$(exists "$spool/ready/killx/run.sh")" y
+check "killed extract: retry succeeds" "$(tick)$(isfile "$q/ready/3-rnd-killx/.sha")" 0y
+
+mkjob trunc
+check "truncated stream: tick exits nonzero" "$(tick REM_TRUNC_TAG=submit REM_TRUNC_BYTES=5120)" 1
+check "truncated stream: nothing extracted" "$(exists "$work/3-rnd-trunc")$(exists "$work/.incoming-trunc")$(exists "$work/.incoming-trunc.tar")$(exists "$q/ready/3-rnd-trunc")" nnnn
+check "truncated stream: job kept for retry" "$(exists "$spool/ready/trunc/run.sh")" y
+check "truncated stream: retry succeeds" "$(tick)$(isfile "$q/ready/3-rnd-trunc/.sha")" 0y
+
+mkjob stale; mkdir -p "$q/ready/.3-rnd-stale"; echo junk >"$q/ready/.3-rnd-stale/old"   # a dead earlier tick
+check "stale hidden token: tick exit"  "$(tick)" 0
+check "stale hidden token: submitted anyway" "$(isfile "$q/ready/3-rnd-stale/.sha")$(exists "$q/ready/3-rnd-stale/old")" yn
+
+# ---- a failed sudo must never read as "absent", and a bad probe must never retire anything
+mkjob sf
+finished done sfr
+: >"$tmp/rem.log"
+check "sudo fail: tick exits nonzero"  "$(tick JOB_SUDO_FAIL=1)" 1
+check "sudo fail: never reached submit" "$(remcalls submit)" 0
+check "sudo fail: submit retried, not rejected" "$(exists "$spool/ready/sf/run.sh")$(exists "$spool/failed/sf")$(exists "$work/3-rnd-sf")" ynn
+check "sudo fail: result not retired"  "$(exists "$q/done/3-rnd-sfr/job.log")$(exists "$work/3-rnd-sfr/out.txt")$(exists "$spool/done/sfr")" yyn
+finished done fz
+check "retire fails (setup): exit" "$(tick REM_FAIL_TAG=final REM_FAIL_MODE=before)" 1
+mkjob pf; mkdir -p "$work/3-rnd-pf"; echo theirs >"$work/3-rnd-pf/keep"   # a job-private dir we can only see via a probe
+: >"$tmp/rem.log"
+check "probe fail: tick exits nonzero" "$(tick JOB_PROBE_FAIL=1)" 1
+check "probe fail: dup check retried, not 'free'" "$(remcalls submit)$(exists "$spool/ready/pf/run.sh")$(exists "$spool/failed/pf")" 0yn
+check "probe fail: foreign dir untouched" "$(cat "$work/3-rnd-pf/keep")" theirs
+check "probe fail: retire not done on a failed probe" "$(exists "$q/done/3-rnd-fz")$(exists "$work/3-rnd-fz/out.txt")$(exists "$q/collected/3-rnd-fz")" yyn
+check "probe fail: recovery"           "$(tick)" 0
+check "probe fail: recovered dup is a duplicate" "$(reason "$spool/failed/pf" | grep -c duplicate)" 1
+check "probe fail: recovered retire"   "$(exists "$q/done/3-rnd-fz")$(exists "$q/collected/3-rnd-fz")" ny
+finished done fz2
+check "retire fails (setup 2): exit"   "$(tick REM_FAIL_TAG=final REM_FAIL_MODE=before)" 1
+check "empty probe: tick exits nonzero" "$(tick JOB_PROBE_FAIL=empty)" 1
+check "empty probe: not read as absent" "$(exists "$q/done/3-rnd-fz2")$(exists "$work/3-rnd-fz2/out.txt")$(exists "$q/collected/3-rnd-fz2")" yyn
+check "empty probe: recovery"          "$(tick)$(exists "$q/done/3-rnd-fz2")$(exists "$q/collected/3-rnd-fz2")" 0ny
+finished done duq
+check "empty du: tick exits nonzero"   "$(tick JOB_DU_EMPTY=1)" 1
+check "empty du: not treated as big"   "$(exists "$spool/done/duq")$(exists "$q/done/3-rnd-duq")" ny
+finished done um
+check "unknown size mode: tick exits nonzero" "$(tick REM_OUT_TAG=prep REM_OUT_VAL=garbage)" 1
+check "unknown size mode: never retired" "$(exists "$spool/done/um")$(exists "$q/done/3-rnd-um")$(exists "$work/3-rnd-um")" nyy
+check "recovery: tick exit"            "$(tick)" 0
+check "recovery: submit happened"      "$(isfile "$q/ready/3-rnd-sf/.sha")" y
+check "recovery: results delivered"    "$(cat "$spool/done/sfr/out.txt")$(cat "$spool/done/duq/out.txt")$(cat "$spool/done/um/out.txt")" out-sfrout-duqout-um
+check "recovery: results retired"      "$(exists "$q/collected/3-rnd-sfr")$(exists "$q/collected/3-rnd-duq")$(exists "$q/collected/3-rnd-um")" yyy
+
+# ---- delivery is idempotent and atomic; never timestamped copies
+finished done fin
+check "retire fails: tick exits nonzero" "$(tick REM_FAIL_TAG=final REM_FAIL_MODE=before)" 1
+check "retire fails: result delivered with marker" "$(cat "$spool/done/fin/out.txt")$(exists "$spool/done/fin/.v100-delivered")" out-finy
+check "retire fails: token still queued" "$(exists "$q/done/3-rnd-fin")" y
+check "retire retry: tick exit"        "$(tick)" 0
+check "retire retry: no second copy"   "$(ls "$spool/done" | grep -c '^fin')" 1
+check "retire retry: retired"          "$(exists "$q/done/3-rnd-fin")$(exists "$q/collected/3-rnd-fin")" ny
+mkdir -p "$spool/done/.dest-tmp-y"; echo junk >"$spool/done/.dest-tmp-y/junk"   # a dead earlier delivery
+finished done y
+check "stale temp dir: tick exit"      "$(tick)" 0
+check "stale temp dir: clean delivery" "$(cat "$spool/done/y/out.txt")$(exists "$spool/done/y/junk")$(exists "$spool/done/.dest-tmp-y")" out-ynn
+mkdir -p "$q/failed/3-rnd-dup"; echo duplog >"$q/failed/3-rnd-dup/job.log"   # failed/dup already holds a REASON dir
+check "name collision: tick exit"      "$(tick)" 0
+check "name collision: earlier dir untouched" "$(reason "$spool/failed/dup" | grep -c duplicate)" 1
+check "name collision: result next to it" "$(cat "$spool/failed/dup.2/job.log" 2>/dev/null)" duplog
+
+# ---- result caps
+finished done cap; truncate -s 4M "$work/3-rnd-cap/big.bin"
+check "stream cap: tick exit"          "$(tick DU_LIE=1 V100_OUTMAX=1000000 REM_TEE="$tmp/tee.out")" 0
+check "stream cap: stops reading at the cap" "$([ "$(stat -c %s "$tmp/tee.out")" -lt 3000000 ] && echo y)" y
+check "stream cap: TRUNCATED"          "$(grep -c 'size cap' "$spool/done/cap/TRUNCATED" 2>/dev/null)" 1
+check "stream cap: log only"           "$(cat "$spool/done/cap/job.log")$(exists "$spool/done/cap/big.bin")$(exists "$spool/done/cap/out.txt")" log-capnn
+check "stream cap: still retired"      "$(exists "$q/collected/3-rnd-cap")$(exists "$arch/3-rnd-cap/big.bin")" yy
+finished done many; for i in $(seq 20); do echo "$i" >"$work/3-rnd-many/f$i"; done
+check "file cap: tick exit"            "$(tick V100_MAXFILES=10)" 0
+check "file cap: TRUNCATED"            "$(grep -c 'files' "$spool/done/many/TRUNCATED" 2>/dev/null)" 1
+check "file cap: log only"             "$(cat "$spool/done/many/job.log")$(exists "$spool/done/many/f1")" log-manyn
+
+# ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
+mkdir -p "$tmp/bin" "$tmp/emptyspool"
+printf '#!/bin/sh\necho "$*" >>"$SSH_LOG"\nexit 255\n' >"$tmp/bin/ssh"; chmod +x "$tmp/bin/ssh"
+rc=$(cd "$tmp" && env -u REMOTE PATH="$tmp/bin:$PATH" PUB_RUN=env SPOOL="$tmp/emptyspool" V100_HOST=gpu-host SSH_LOG="$tmp/ssh.log" "$sync" 2>"$tmp/err"; echo $?)
+check "unreachable remote: exit nonzero" "$rc" 1
+check "default ssh: BatchMode"         "$(grep -c 'BatchMode=yes' "$tmp/ssh.log")" 1
+check "default ssh: ConnectTimeout"    "$(grep -c 'ConnectTimeout=10' "$tmp/ssh.log")" 1
+check "default ssh: ServerAlive"       "$(grep -c 'ServerAliveInterval=15 -o ServerAliveCountMax=4' "$tmp/ssh.log")" 1
+check "default ssh: host"              "$(grep -c ' gpu-host ' "$tmp/ssh.log")" 1
 
 exit $fails
