@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # worker-review — default reviewer for worker-task --review. stdin: task, blank line, staged diff.
 # stdout: first line PASS, or FAIL: <reason>. Non-zero exit on any transport/parse failure.
+# ponytail: an LLM verdict on worker-controlled text is a second opinion, not the gate; the RED->GREEN test is.
 set -euo pipefail
-in=$(cat)
 sys='You review a worker'"'"'s diff against its task. Reply PASS if the diff does only what the task asks; otherwise reply FAIL: <reason>. First line is the verdict.'
-body=$(jq -n --arg m "${WORKER_PRIVATE_MODEL:-queue}" --arg s "$sys" --arg u "$in" \
-  '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
-curl -sS --fail --max-time 300 -H 'Content-Type: application/json' -d "$body" \
-  "http://127.0.0.1:${WORKER_PRIVATE_PORT:-8099}/v1/chat/completions" | jq -er '.choices[0].message.content'
+# stdin streams through jq -Rs and curl @-: no argv copy of the diff, so no ARG_MAX ceiling.
+jq -Rs --arg m "${WORKER_PRIVATE_MODEL:-queue}" --arg s "$sys" \
+  '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:.}]}' |
+  curl -sS --fail --noproxy '*' --max-time 300 -H 'Content-Type: application/json' --data-binary @- \
+    "http://127.0.0.1:${WORKER_PRIVATE_PORT:-8099}/v1/chat/completions" | jq -er '.choices[0].message.content'
