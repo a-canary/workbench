@@ -51,7 +51,7 @@ describe("readLog", () => {
   test("parses JSONL, skipping blank and unparseable lines; missing file = []", () => {
     const d = mkdtempSync(join(tmpdir(), "serve-"));
     const p = join(d, "sprints.jsonl");
-    writeFileSync(p, `{"ev":"start","id":"a"}\n\nnot json\n{"ev":"end","id":"a"}\n`);
+    writeFileSync(p, `{"ev":"start","id":"a"}\n\nnot json\nnull\n[1]\n{"ev":"end","id":"a"}\n`);
     expect(readLog(p).map((e) => e.ev)).toEqual(["start", "end"]);
     expect(readLog(join(d, "nope.jsonl"))).toEqual([]);
   });
@@ -106,6 +106,33 @@ describe("handle", () => {
     expect(r.status).toBe(303);
     expect(r.headers.get("location")).toBe(`/driver/?flash=${encodeURIComponent("bad bead id")}`);
     expect(() => readFileSync(s.steer, "utf8")).toThrow();
+  });
+
+  test("POST keeps steer-file keys it does not own (as consumeSteer does)", async () => {
+    const s = srv();
+    writeFileSync(s.steer, JSON.stringify({ pin: [], skip: [], notes: [], extra: "keep" }));
+    await handle(post({ action: "pin", id: "wb-1" }), s);
+    expect(JSON.parse(readFileSync(s.steer, "utf8"))).toEqual({ pin: ["wb-1"], skip: [], notes: [], extra: "keep" });
+  });
+
+  test("POST: a cross-origin form is 403, a non-form body is 400; neither writes", async () => {
+    const s = srv();
+    const xo = new Request("http://x/driver/steer", { method: "POST", body: new URLSearchParams({ action: "note", text: "pwn" }), headers: { origin: "http://evil.example" } });
+    expect((await handle(xo, s)).status).toBe(403);
+    const same = new Request("http://x/driver/steer", { method: "POST", body: new URLSearchParams({ action: "note", text: "ok" }), headers: { origin: "http://x" } });
+    expect((await handle(same, s)).status).toBe(303);
+    const s2 = srv();
+    const json = new Request("http://x/driver/steer", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+    expect((await handle(json, s2)).status).toBe(400);
+    expect(() => readFileSync(s2.steer, "utf8")).toThrow();
+  });
+
+  test("GET with no live sprint renders the idle panel", async () => {
+    const s = srv();
+    writeFileSync(s.log, "");
+    const r = await handle(new Request("http://x/driver/"), s);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain('name="action" value="pin"');
   });
 
   test("other paths and methods are 404", async () => {

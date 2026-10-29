@@ -6,11 +6,11 @@
 // ponytail: no auth/CSRF — bind 127.0.0.1 (or a tailnet address); add a token before exposing wider.
 
 import { sprints, type End, type Sprint, type Start } from "../sprint/log.ts";
-import { readSteer } from "../sprint/steer.ts";
+import { readSteer, saveSteer } from "../sprint/steer.ts";
 import { driverPanel, type Ctx, type Rel } from "./driver.ts";
 import { esc } from "./fmt.ts";
 import { applySteer } from "./steer-apply.ts";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type Run = (cmd: string[]) => Promise<string>;
@@ -113,7 +113,8 @@ export function readLog(path: string): (Start | End)[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      evs.push(JSON.parse(trimmed));
+      const e = JSON.parse(trimmed);
+      if (e && typeof e === "object" && !Array.isArray(e)) evs.push(e);
     } catch {
       // skip unparseable
     }
@@ -158,7 +159,15 @@ export async function handle(req: Request, s: Srv): Promise<Response> {
   }
 
   if (req.method === "POST" && url.pathname === "/driver/steer") {
-    const fd = await req.formData();
+    // A browser sends Origin on a cross-site form post: refuse it, so another page can't plant notes the Driver reads.
+    const origin = req.headers.get("origin");
+    if (origin && origin !== url.origin) return new Response("cross-origin post refused", { status: 403 });
+    let fd: FormData;
+    try {
+      fd = await req.formData();
+    } catch {
+      return new Response("expected a form body", { status: 400 });
+    }
     const f = {
       action: fd.get("action") ?? "",
       id: typeof fd.get("id") === "string" ? fd.get("id") : undefined,
@@ -169,7 +178,7 @@ export async function handle(req: Request, s: Srv): Promise<Response> {
     if (typeof next === "string") {
       error = next;
     } else {
-      writeFileSync(s.steer, JSON.stringify(next, null, 2));
+      saveSteer(s.steer, next);
     }
     return new Response(null, {
       status: 303,
