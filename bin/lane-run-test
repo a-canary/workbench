@@ -68,6 +68,17 @@ check "push failure goes to a human"   "$(grep -c 'label add X-1 human' "$calls"
 check "push failure keeps local branch" "$(G branch --list lane/x-1 | wc -l)" 1
 G branch -q -D lane/x-1
 check "claim lost is no progress"      "$(CLAIM_FAIL=1 go)" "rc=1 down=0"
+# wb-sn4: worker-task's --timeout counts lane queue wait, so a saturated lane fails GREENs the model never
+# ran. With LANES_URL set, a queue at LANE_MAX_WAITERS (default 4) or more defers: no ready, no claim.
+lanes() { jq -cn --argjson n "$1" '{waiting: [range($n)] | map({lane: "queue"})}' >"$tmp/lanes.json"; }
+lanes 9
+check "busy lane defers"               "$(LANES_URL=file://$tmp/lanes.json go)" "rc=1 down=0"
+check "busy lane: no ready, no claim"  "$(grep -c ' ready \|--claim' "$calls")" 0
+check "busy lane honours the knob"     "$(LANES_URL=file://$tmp/lanes.json LANE_MAX_WAITERS=10 STUB_RC=0 go)" "rc=0 down=0"
+lanes 3
+check "quiet lane dispatches"          "$(LANES_URL=file://$tmp/lanes.json STUB_RC=0 go)" "rc=0 down=0"
+check "unreadable lane probe dispatches" "$(LANES_URL=file://$tmp/missing.json STUB_RC=0 go)" "rc=0 down=0"
+check "no LANES_URL: gate off"         "$(STUB_RC=0 go)" "rc=0 down=0"
 check "bd outage is not an empty queue" "$(READY_FAIL=1 go)" "rc=1 down=1"
 check "non-JSON from bd is an outage"  "$(READY_JSON='oops' go)" "rc=1 down=1"
 check "empty queue is not an outage"   "$(READY_JSON='[]' go)" "rc=1 down=0"
