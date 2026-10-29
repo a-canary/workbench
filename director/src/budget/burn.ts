@@ -8,7 +8,7 @@ const WINDOW_MINUTES: Record<string, number> = {
 const SILO_THRESHOLDS: Record<string, number> = {
   public: 0.8,
   dev: 0.9,
-  "ndivisible-app": 1.0,
+  app: 1.0,
   trading: 1.2,
   llc: 1.2,
 };

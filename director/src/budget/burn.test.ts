@@ -13,7 +13,7 @@ const start = (ls: Limit[], silo: string) => burnGate(ls, silo, NOW).start;
 
 test("util < 0.20 allows every silo, even at the very start of the window", () => {
   const ls = [L("session", 0.19, 299)];
-  for (const s of ["public", "dev", "ndivisible-app", "trading", "llc", "critical"]) expect(start(ls, s)).toBe(true);
+  for (const s of ["public", "dev", "app", "trading", "llc", "critical"]) expect(start(ls, s)).toBe(true);
 });
 
 test("session burn 1.0 (util 0.5, half the 300-min window left): only trading/llc/critical start", () => {
@@ -21,17 +21,17 @@ test("session burn 1.0 (util 0.5, half the 300-min window left): only trading/ll
   expect(burnGate(ls, "public", NOW).burn).toBeCloseTo(1.0, 6);
   expect(start(ls, "public")).toBe(false);
   expect(start(ls, "dev")).toBe(false);
-  expect(start(ls, "ndivisible-app")).toBe(false); // burn < threshold is strict
+  expect(start(ls, "app")).toBe(false); // burn < threshold is strict
   expect(start(ls, "trading")).toBe(true);
   expect(start(ls, "llc")).toBe(true);
   expect(start(ls, "critical")).toBe(true);
 });
 
-test("burn 0.9: dev blocked at its own threshold, ndivisible-app starts", () => {
+test("burn 0.9: dev blocked at its own threshold, app starts", () => {
   const ls = [L("session", 0.45, 150)];
   expect(start(ls, "public")).toBe(false);
   expect(start(ls, "dev")).toBe(false);
-  expect(start(ls, "ndivisible-app")).toBe(true);
+  expect(start(ls, "app")).toBe(true);
 });
 
 test("weekly window is 7 days and the binding burn is the max over windows", () => {
