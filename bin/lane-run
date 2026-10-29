@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
-#   lane-run [--repo DIR]... [--label lane:v100] [--once] [--idle 600]
+#   lane-run [--repo DIR]... [--label lane:v100] [--lane private|public] [--once] [--idle 600]
+#   --lane public sends the worker to the 9router Worker combo; worker-sandbox refuses any repo that is
+#   neither PUBLIC nor listed in $WORKER_PREPUBLIC (e.g. --label lane:9router --lane public).
 #   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
 # The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
@@ -18,11 +20,12 @@
 set -uo pipefail
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-repos=() label=lane:v100 once= idle=600
+repos=() label=lane:v100 lane=private once= idle=600
 while [ $# -gt 0 ]; do
   case $1 in
     --repo) repos+=("$(readlink -f "$2")"); shift 2 ;;
     --label) label=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
     --once) once=1; shift ;;
     --idle) idle=$2; shift 2 ;;
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
@@ -120,7 +123,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
     # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
     # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
     WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid -w "${WORKER_TASK:-$here/worker-task}" \
-      --worktree "$wt/wt" --lane private --task "$task" --test "$test" --timeout "$tmo" --push >"$lf" 2>&1 & wpid=$!
+      --worktree "$wt/wt" --lane "$lane" --task "$task" --test "$test" --timeout "$tmo" --push >"$lf" 2>&1 & wpid=$!
     wait $wpid; rc=$?
     trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
   elif [ $rc -eq 124 ]; then
