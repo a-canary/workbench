@@ -70,7 +70,8 @@ run "worker that ran and did nothing is the model (rc 2)" 'rm ok' rc2
 run "worker timeout is the model (rc 2)" 'rm ok; exit 124' rc2
 # a test runner that crashes at startup (nd-8am: vitest EROFS on a ro node_modules) is infra, not a valid RED/GREEN
 # failure: rc 4 before the worker runs (RED), or rc 4 instead of blaming the model (GREEN)
-REDBODY='echo "Error: EROFS: read-only file system, open node_modules/.vite-temp/x.mjs" >&2; exit 1' \
+# crashes only before the worker: a missed RED check would run the worker and pass GREEN (rc 0)
+REDBODY='[ -f ok ] || { echo "Error: EROFS: read-only file system, open node_modules/.vite-temp/x.mjs" >&2; exit 1; }' \
   run "startup crash in RED is infra (rc 4)" 'true' rc4
 REDBODY='[ -f ok ] && { echo "failed to load config from /w/vitest.config.ts" >&2; exit 1; }; exit 1' \
   run "startup crash in GREEN is infra (rc 4)" 'true' rc4
