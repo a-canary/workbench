@@ -50,6 +50,20 @@ run cp "$WORKBENCH_DIR/pi/extensions/"*.ts ~/.pi/agent/extensions/
 run cp "$WORKBENCH_DIR/pi/extensions/"*.json ~/.pi/agent/extensions/ 2>/dev/null || true
 echo "  → ~/.pi/agent/extensions/"
 
+# --- QA role dependencies ---
+echo "QA dependencies:"
+chrome=${WORKER_CHROME:-$(ls -d "$HOME"/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-linux64 2>/dev/null | sort -V | tail -1 || true)}
+if [ -x "$chrome/chrome-headless-shell" ]; then
+    echo "  chrome-headless-shell: present ($chrome)"
+else
+    run npx @puppeteer/browsers install chrome-headless-shell
+fi
+if python3 -c 'import PIL, numpy' 2>/dev/null; then
+    echo "  pillow+numpy: present"
+else
+    run pip install --user pillow numpy
+fi
+
 echo ""
 echo "done."
 echo "verify: ~/repos/harness-bench/bin/bench run smoke --label verify"
