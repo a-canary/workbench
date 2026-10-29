@@ -59,12 +59,15 @@ startup_crash() {
 }
 
 log "RED: $test"
-if sbx --timeout 300 --exec sh -c "$test" >"$red_out" 2>&1; then
-  cat "$red_out" >&2
-  die "test already passes — not a RED commit"
-fi
+red_rc=0
+sbx --timeout 300 --exec sh -c "$test" >"$red_out" 2>&1 || red_rc=$?
 cat "$red_out" >&2
-if startup_crash "$red_out"; then
+if [ $red_rc -eq 0 ]; then
+  die "test already passes — not a RED commit"
+elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
+  log "RED test command not runnable in sandbox (rc $red_rc)"
+  exit 4
+elif startup_crash "$red_out"; then
   log "RED crashed at startup (infra, not a valid RED)"
   exit 4
 fi
@@ -96,15 +99,19 @@ rm -f "$names"
 green=$(mktemp -d "${TMPDIR:-/tmp}/worker-green.XXXXXX")
 g checkout-index -a --prefix="$green/"
 log "GREEN: $test"
-"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$green" --lane private --timeout 300 --exec sh -c "$test" >"$green_out" 2>&1 || {
-  cat "$green_out" >&2
-  if startup_crash "$green_out"; then
+green_rc=0
+"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$green" --lane private --timeout 300 --exec sh -c "$test" >"$green_out" 2>&1 || green_rc=$?
+cat "$green_out" >&2
+if [ $green_rc -ne 0 ]; then
+  if [ $green_rc -eq 126 ] || [ $green_rc -eq 127 ]; then
+    log "GREEN test command not runnable in sandbox (rc $green_rc)"
+    exit 4
+  elif startup_crash "$green_out"; then
     log "GREEN crashed at startup (infra)"
     exit 4
   fi
   die "test still fails after worker"
-}
-cat "$green_out" >&2
+fi
 
 # leak scan with the host's pinned config: a worker-written .gitleaks.toml would otherwise allowlist its own leak.
 # (The lane key never enters the jail: the relay adds it host-side.)
