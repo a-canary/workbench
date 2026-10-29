@@ -1,70 +1,25 @@
-export type Steer = {
-  pin: string[];
-  skip: string[];
-  notes: { ts: string; text: string }[];
-};
+// Pure dashboard steering transition: one form post → next steer-<lane>.json content, or an error string.
+export type Steer = { pin: string[]; skip: string[]; notes: { ts: string; text: string }[] };
 
 const BEAD_ID_RE = /^[a-z0-9]+-[a-z0-9.]+$/i;
+const drop = (a: string[], x: string) => a.filter((v) => v !== x);
+const add = (a: string[], x: string) => (a.includes(x) ? [...a] : [...a, x]);
 
-export function applySteer(
-  s: Steer,
-  f: { action: string; id?: string; text?: string },
-  now = new Date()
-): Steer | string {
+export function applySteer(s: Steer, f: { action: string; id?: string; text?: string }, now = new Date()): Steer | string {
   const id = (f.id ?? "").trim();
-  const text = (f.text ?? "").trim();
-
+  const notes = [...s.notes];
+  if (["pin", "skip", "unpin", "unskip"].includes(f.action) && !BEAD_ID_RE.test(id)) return "bad bead id";
   switch (f.action) {
-    case "pin":
-    case "skip":
-    case "unpin":
-    case "unskip": {
-      if (!BEAD_ID_RE.test(id)) return "bad bead id";
-
-      const pin = [...s.pin];
-      const skip = [...s.skip];
-
-      switch (f.action) {
-        case "pin": {
-          if (pin.includes(id)) return { pin, skip: [...skip], notes: [...s.notes] };
-          const i = skip.indexOf(id);
-          if (i !== -1) skip.splice(i, 1);
-          pin.push(id);
-          break;
-        }
-        case "skip": {
-          if (skip.includes(id)) return { pin: [...pin], skip, notes: [...s.notes] };
-          const i = pin.indexOf(id);
-          if (i !== -1) pin.splice(i, 1);
-          skip.push(id);
-          break;
-        }
-        case "unpin": {
-          const i = pin.indexOf(id);
-          if (i !== -1) pin.splice(i, 1);
-          break;
-        }
-        case "unskip": {
-          const i = skip.indexOf(id);
-          if (i !== -1) skip.splice(i, 1);
-          break;
-        }
-      }
-
-      return { pin, skip, notes: [...s.notes] };
-    }
-
+    case "pin": return { pin: add(s.pin, id), skip: drop(s.skip, id), notes };
+    case "skip": return { pin: drop(s.pin, id), skip: add(s.skip, id), notes };
+    case "unpin": return { pin: drop(s.pin, id), skip: [...s.skip], notes };
+    case "unskip": return { pin: [...s.pin], skip: drop(s.skip, id), notes };
     case "note": {
-      if (text.length < 1 || text.length > 2000) return "note must be 1\u20132000 chars";
-      const notes = [...s.notes, { ts: now.toISOString(), text }];
-      return { pin: [...s.pin], skip: [...s.skip], notes };
+      const text = (f.text ?? "").trim();
+      if (text.length < 1 || text.length > 2000) return "note must be 1–2000 chars";
+      return { pin: [...s.pin], skip: [...s.skip], notes: [...notes, { ts: now.toISOString(), text }] };
     }
-
-    case "clearnotes": {
-      return { pin: [...s.pin], skip: [...s.skip], notes: [] };
-    }
-
-    default:
-      return "unknown action";
+    case "clearnotes": return { pin: [...s.pin], skip: [...s.skip], notes: [] };
+    default: return "unknown action";
   }
 }
