@@ -35,9 +35,9 @@ export function rank(
 ): Row[] {
   const pinSet = new Set(steer.pin);
   const skipSet = new Set(steer.skip);
-  const labels = (b: Bead) => b.labels ?? []; // bd omits labels on an unlabelled bead
+  const labels = (b: Bead) => b.labels ?? []; // bd omits labels on an unlabelled bead (and priority on a P0: the shell sorts the empty field as 0)
   const row = (b: Bead, title: string): Row => ({
-    dir: b.dir, id: b.id, priority: b.priority, created_at: b.created_at, title, pinned: pinSet.has(b.id),
+    dir: b.dir, id: b.id, priority: b.priority ?? 0, created_at: b.created_at, title, pinned: pinSet.has(b.id),
   });
   const rows = [
     ...ready

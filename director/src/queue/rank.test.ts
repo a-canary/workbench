@@ -65,3 +65,8 @@ test("ties break on dir, id, title (the shell sort's whole-line order)", () => {
 test("line breaks in a title cannot split a TSV row", () => {
   expect(format(rank([b("a", 1, "2026-10-01", { title: "x\r\ny\nz" })], [], none, NOW))).toBe("/r\ta\tP1\tx y z");
 });
+
+test("a bead with no priority field ranks as P0", () => {
+  const p0 = { ...b("p", 0, "2026-10-09"), priority: undefined } as unknown as Bead;
+  expect(ids(rank([b("a", 1, "2026-10-01"), p0], [], none, NOW))).toEqual(["p", "a"]);
+});
