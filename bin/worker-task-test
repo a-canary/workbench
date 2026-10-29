@@ -94,8 +94,11 @@ LANE=public run "public lane GREEN runs" '' ok
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 # PR create retries a transient api.github.com refusal (2 of 5 lane runs hit one, 2026-10-29); the gh stub fails $GH_FAILS times
 mkdir "$tmp/ghflaky"
-printf '#!/usr/bin/env bash\nn=$(cat %q 2>/dev/null || echo 0); echo $((n+1)) > %q; [ "$n" -ge "$GH_FAILS" ]\n' "$tmp/ghn" "$tmp/ghn" > "$tmp/ghflaky/gh"
+# `gh pr view` answers $GH_VIEW (default 1: no open PR); `gh pr create` fails its first $GH_FAILS calls
+printf '#!/usr/bin/env bash\n[ "$2" = view ] && { [ "${GH_VIEW:-1}" = 0 ] && echo "${GH_STATE:-OPEN}"; exit "${GH_VIEW:-1}"; }\nn=$(cat %q 2>/dev/null || echo 0); echo $((n+1)) > %q; [ "$n" -ge "$GH_FAILS" ]\n' "$tmp/ghn" "$tmp/ghn" > "$tmp/ghflaky/gh"
 chmod +x "$tmp/ghflaky/gh"
 rm -f "$tmp/ghn"; GH_FAILS=2 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create retried past 2 refusals" 'true' ok
 rm -f "$tmp/ghn"; GH_FAILS=3 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create gives up after 3 (rc 3)" 'true' rc3
+rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "already-open PR counts as delivered" 'true' ok
+rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 GH_STATE=MERGED PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "merged PR is not delivery (rc 3)" 'true' rc3
 exit $fail
