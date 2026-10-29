@@ -99,6 +99,8 @@ if [ -n "$push" ]; then
   # ponytail: fixed 3 tries at 20/40 s; an existing PR for the branch also fails all three (still rc=3, harmless).
   for i in 1 2 3; do
     (cd "$wt" && gh pr create --fill --base "$base" --head "$(git branch --show-current)") && break
+    # a re-run onto a branch whose PR is already open: the push updated that PR, so GREEN is delivered (nd-ubf.1, 2026-10-29)
+    [ "$(cd "$wt" && gh pr view "$(git branch --show-current)" --json state -q .state 2>/dev/null)" = OPEN ] && { log "PR already open; push updated it"; break; }
     [ "$i" = 3 ] && { log "PR create failed; branch pushed"; exit 3; }
     sleep $((i * ${WORKER_PR_RETRY_S:-20}))
   done
