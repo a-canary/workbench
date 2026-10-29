@@ -130,7 +130,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   fi
   sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
   git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
-  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran)
+  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran, or the runner crashed at startup in RED/GREEN)
   case $rc in
     0) bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(summary "$wlog" 1)" >/dev/null \
          || { log "$id: GREEN $sha pushed but bd close failed; bead left in_progress"; down=1; }
