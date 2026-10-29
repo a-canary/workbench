@@ -28,7 +28,7 @@ run() {
   echo '{}' > "$wt/package.json"
   git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   local redf=${REDF:-t.sh}
-  echo 'test -f ok' > "$wt/$redf"
+  echo "${REDBODY:-test -f ok}" > "$wt/$redf"
   git -C "$wt" add "$redf" && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
   [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
@@ -68,6 +68,14 @@ unset WORKER_TASK_LOG
 run "worker that never ran is infra (rc 4)" 'rm ok; exit 1' rc4
 run "worker that ran and did nothing is the model (rc 2)" 'rm ok' rc2
 run "worker timeout is the model (rc 2)" 'rm ok; exit 124' rc2
+# a test runner that crashes at startup (nd-8am: vitest EROFS on a ro node_modules) is infra, not a valid RED/GREEN
+# failure: rc 4 before the worker runs (RED), or rc 4 instead of blaming the model (GREEN)
+REDBODY='echo "Error: EROFS: read-only file system, open node_modules/.vite-temp/x.mjs" >&2; exit 1' \
+  run "startup crash in RED is infra (rc 4)" 'true' rc4
+REDBODY='[ -f ok ] && { echo "failed to load config from /w/vitest.config.ts" >&2; exit 1; }; exit 1' \
+  run "startup crash in GREEN is infra (rc 4)" 'true' rc4
+REDBODY='echo "AssertionError: expected EROFS handling" >&2; test -f ok' \
+  run "an assertion that mentions EROFS is still a valid RED" 'true' ok
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok
 run "vite.config.ts refused" 'echo x > vite.config.ts' refused
 run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused
