@@ -12,8 +12,8 @@
 set -euo pipefail
 
 WORKBENCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEPLOY_STATE="/home/aaron/workbench-deploy-state.json"
-HARNESS_BENCH="/home/aaron/repos/harness-bench"
+DEPLOY_STATE="${DEPLOY_STATE:-$HOME/workbench-deploy-state.json}"
+HARNESS_BENCH="${HARNESS_BENCH:-$HOME/repos/harness-bench}"
 LOG="/tmp/workbench-deploy-$(date -u +%Y-%m-%d).log"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }

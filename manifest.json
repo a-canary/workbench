@@ -22,11 +22,6 @@
       "path": "pi/extensions",
       "dest": "~/.pi/agent/extensions"
     },
-    "health-monitor": {
-      "path": "services/health",
-      "schedule": "*/5",
-      "description": "Service health probes with Discord alerts"
-    },
     "director": {
       "path": "director",
       "vet": "own tests (bun test 135/0 at last_tested) + write-lane hook live and identical to master; not pass-rate benchable",

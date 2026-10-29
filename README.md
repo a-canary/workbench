@@ -52,7 +52,7 @@ Results in `BENCH/`. Nightly build in `nightly/`.
 1. PRs require tests + harness-bench delta + evidence of value
 2. Nightly build runs stable + all open PRs through harness-bench
 3. Auto-merge: survive 3 nightlies with no related regressions
-4. Private (aaron) uses stable + own WIP PRs
+4. The operator's private setup uses stable + own WIP PRs
 
 
 ## Daily sweep (automated)

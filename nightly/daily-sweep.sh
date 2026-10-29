@@ -13,7 +13,7 @@
 
 set -euo pipefail
 WORKBENCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HARNESS_BENCH="/home/aaron/repos/harness-bench"
+HARNESS_BENCH="${HARNESS_BENCH:-$HOME/repos/harness-bench}"
 SWEEP_LOG="$WORKBENCH_DIR/BENCH/sweep-$(date -u +%Y-%m-%d).log"
 DRY_RUN=0
 if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi

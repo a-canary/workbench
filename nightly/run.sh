@@ -6,7 +6,7 @@
 
 set -euo pipefail
 WORKBENCH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HARNESS_BENCH="/home/aaron/repos/harness-bench"
+HARNESS_BENCH="${HARNESS_BENCH:-$HOME/repos/harness-bench}"
 DATE=$(date -u +%Y-%m-%d)
 RESULT_FILE="$WORKBENCH_DIR/BENCH/nightly-$DATE.json"
 PR="${PR:-}"
