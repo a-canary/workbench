@@ -11,7 +11,7 @@ set -euo pipefail
 
 PR="${1:?usage: survival-rule.sh <pr-number>}"
 BENCH_DIR="$(cd "$(dirname "$0")/../../BENCH" && pwd)"
-REPOS="/home/aaron/repos"
+REPOS="${REPOS:-$HOME/repos}"
 
 # Find all nightly results that included this PR
 included=0
