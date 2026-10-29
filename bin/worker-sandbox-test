@@ -35,9 +35,16 @@ EOF
 )
 
 fail=0
+# probe <name> <worker-sandbox args...>: on FAIL show the jail's stderr, so a jail that never
+# started (e.g. search door down) is distinguishable from a probe that ran and failed (wb-v2k)
+err=$(mktemp)
+probe() {
+  local name=$1; shift
+  if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"
+  then echo "PASS  $name"; else echo "FAIL  $name"; tail -n 5 "$err" | sed 's/^/      /'; fail=1; fi
+}
 while IFS=$'\t' read -r name cmd; do
-  if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd" >/dev/null 2>&1
-  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+  probe "$name" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd"
 done <<< "$checks"
 
 # research profile = internet (search door only) + read-only files; never write or execute tools
@@ -50,11 +57,9 @@ research: endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/
 EOF
 )
 while IFS=$'\t' read -r name cmd; do
-  if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd" >/dev/null 2>&1
-  then echo "PASS  $name"; else echo "FAIL  $name"; fail=1; fi
+  probe "$name" --worktree "$wt" --lane private --profile research --timeout 90 --exec sh -c "$cmd"
 done <<< "$rchecks"
-if "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]' >/dev/null 2>&1
-then echo "PASS  build: no search door"; else echo "FAIL  build: no search door"; fail=1; fi
+probe "build: no search door" --worktree "$wt" --lane private --timeout 60 --exec sh -c '[ -z "${SEARCH_PORT:-}" ]'
 for t in write edit bash; do
   if "$here/worker-sandbox" --worktree "$wt" --lane private --profile research --tools "read,$t" --exec true >/dev/null 2>&1
   then echo "FAIL  research refuses $t tool"; fail=1; else echo "PASS  research refuses $t tool"; fi
@@ -199,8 +204,7 @@ unlink "$deps/marker"; rmdir "$deps"; rmdir "$wt/node_modules" 2>/dev/null
 kill $kup
 # research with an empty worktree = web-only, allowed on any repo
 empty=$(mktemp -d)
-if "$here/worker-sandbox" --worktree "$empty" --lane private --profile research --timeout 90 --exec true >/dev/null 2>&1
-then echo "PASS  research allows an empty worktree"; else echo "FAIL  research allows an empty worktree"; fail=1; fi
+probe "research allows an empty worktree" --worktree "$empty" --lane private --profile research --timeout 90 --exec true
 rmdir "$empty"
 
 # host relay replaces the jail's Authorization with RELAY_KEY (the key never enters the jail)

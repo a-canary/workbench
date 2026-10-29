@@ -80,8 +80,9 @@ test("clobber and explicit-fd redirect forms are gated too", () => {
 
 // A relative target is in-lane exactly when the cwd it resolves against is.
 // The hook runs with cwd = the worktree, so ordinary relative writes must pass.
+// cwd is pinned to the in-lane sandbox: the inherited cwd is /work in the lane-run jail (wb-xn0).
 test("Bash redirect to a relative in-lane target is allowed", () => {
-  const r = runHook({ tool_name: "Bash", tool_input: { command: "echo x > lane-hook-test-note.txt" } }, emptyDb);
+  const r = runHook({ tool_name: "Bash", tool_input: { command: "echo x > lane-hook-test-note.txt" } }, emptyDb, sandbox);
   expect(r.code).toBe(0);
 });
 
@@ -89,6 +90,7 @@ test("a relative target climbing out of the lane is blocked", () => {
   const r = runHook(
     { tool_name: "Bash", tool_input: { command: "echo x > ../../../../../../etc/lane-hook-test-a" } },
     emptyDb,
+    sandbox,
   );
   expect(r.code).toBe(2);
   expect(r.stderr).toContain("outside the write-lane allowlist");
