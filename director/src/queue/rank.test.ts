@@ -47,8 +47,8 @@ test("pinned first, skipped hidden", () => {
 });
 
 test("format: dir, id, P<pri>, [pinned] title, tab-separated; tabs in titles become spaces", () => {
-  const rows = rank([b("a", 2, "2026-10-01", { title: "x\ty", dir: "/home/u/repos" })], [], { pin: ["a"], skip: [] }, NOW);
-  expect(format(rows)).toBe("/home/u/repos\ta\tP2\t[pinned] x y");
+  const rows = rank([b("a", 2, "2026-10-01", { title: "x\ty", dir: "/home/worker/repos" })], [], { pin: ["a"], skip: [] }, NOW);
+  expect(format(rows)).toBe("/home/worker/repos\ta\tP2\t[pinned] x y");
   expect(format([])).toBe("");
 });
 

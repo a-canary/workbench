@@ -36,8 +36,8 @@ describe("driverPanel", () => {
     expect(h).not.toContain("<b>x</b>");
   });
   test("project filter scopes findings; idle when nothing live", () => {
-    const evs = [start("a", 0), end("a", 10), start("o", 20, { project: "onenation" }), end("o", 30)];
-    const h = driverPanel("claude", sprints(evs, "claude", now), ctx, noSteer, { project: "onenation", now });
+    const evs = [start("a", 0), end("a", 10), start("o", 20, { project: "app" }), end("o", 30)];
+    const h = driverPanel("claude", sprints(evs, "claude", now), ctx, noSteer, { project: "app", now });
     expect(h).toContain("Idle");
     expect(h).toContain("f o");
     expect(h).not.toContain("f a");
