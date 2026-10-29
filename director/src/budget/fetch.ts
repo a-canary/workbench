@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parseUsage, meterOf } from "./meter.ts";
+import { parseUsage, meterOf, type Limit } from "./meter.ts";
 
 const DEFAULT_TIMEOUT_MS = 3000;
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -14,11 +14,11 @@ async function defaultToken(): Promise<string | null> {
   }
 }
 
-export async function fetchMeter(deps?: {
+export async function fetchLimits(deps?: {
   token?: () => Promise<string | null>;
   fetch?: typeof fetch;
   timeoutMs?: number;
-}): Promise<{ util: number; limited: boolean } | null> {
+}): Promise<Limit[] | null> {
   try {
     const token = await (deps?.token ?? defaultToken)();
     if (!token) return null;
@@ -35,11 +35,16 @@ export async function fetchMeter(deps?: {
         signal: controller.signal,
       });
       if (!res.ok) return null;
-      return meterOf(parseUsage(await res.json()));
+      return parseUsage(await res.json());
     } finally {
       clearTimeout(timer);
     }
   } catch {
     return null;
   }
+}
+
+export async function fetchMeter(deps?: Parameters<typeof fetchLimits>[0]) {
+  const ls = await fetchLimits(deps);
+  return ls ? meterOf(ls) : null;
 }

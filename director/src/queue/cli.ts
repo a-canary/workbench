@@ -6,22 +6,28 @@
 import { readFileSync } from "node:fs";
 import { readSteer } from "../sprint/steer.ts";
 import { format, rank, type Bead, type Row } from "./rank.ts";
-import { fetchMeter } from "../budget/fetch.ts";
-import { budgetGate, type Meter } from "../budget/meter.ts";
+import { fetchLimits } from "../budget/fetch.ts";
+import { type Limit } from "../budget/meter.ts";
+import { burnGate } from "../budget/burn.ts";
 
 export type Ctx = {
   dbs: string[];
   steer: string;
   laneUrl?: string;
-  meter?: Meter | null;
+  limits?: Limit[] | null;
+  silos?: Record<string, string>;
   exec: (cmd: string[]) => string; // stdout, "" on failure
   print: (s: string) => void;
   warn: (s: string) => void;
   now: number;
 };
 
-export const readDbs = (path: string): string[] =>
-  readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+// QUEUE_DBS line: "<dir> [silo]". ponytail: whitespace splits fields, so a dir containing spaces is unsupported.
+const dbLines = (path: string): string[][] =>
+  readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/));
+export const readDbs = (path: string): string[] => dbLines(path).map((f) => f[0]!);
+export const readSilos = (path: string): Record<string, string> =>
+  Object.fromEntries(dbLines(path).filter((f) => f[1]).map((f) => [f[0]!, f[1]!]));
 
 const beads = (c: Ctx, dir: string, args: string[]): Bead[] | null => {
   try {
@@ -72,21 +78,31 @@ export function next(c: Ctx, n: number): number {
     ready.push(...(r ?? []));
     claimed.push(...(p ?? []));
   }
+  let held: { silo: string; g: { start: boolean; reason: string; burn: number | null } }[] = [];
+  if (c.limits !== undefined) {
+    const kept: Bead[] = [];
+    for (const b of ready) {
+      const silo = (b.labels ?? []).includes("critical") ? "critical" : c.silos?.[b.dir] ?? "public";
+      const g = burnGate(c.limits ?? [], silo, c.now);
+      if (g.start) kept.push(b);
+      else held.push({ silo, g });
+    }
+    ready.length = 0;
+    ready.push(...kept);
+  }
   const s = starved(c);
   if (s) ready.push(s);
   let rows = rank(ready, claimed, readSteer(c.steer), c.now);
-  if (c.meter !== undefined) {
-    const localQueued = countAcross(c, V100_READY) ?? 0;
-    const g = budgetGate(c.meter, localQueued);
-    if (!g.claude) {
-      rows = rows.filter((r) => r.title.startsWith("[stale-claim] "));
-      const util = c.meter ? ` util=${Math.round(c.meter.util * 100)}%` : "";
-      rows = [{
-        dir: "-", id: "budget-hold", priority: 0, created_at: "0000",
-        title: `[budget-hold] ${g.reason}${util}: ${localQueued} lane:v100 queued — work the local lane first`,
-        pinned: false,
-      } as Row, ...rows];
-    }
+  if (held.length > 0) {
+    const g = held[0]!.g;
+    const why = g.reason === "burn" ? `burn ${g.burn!.toFixed(2)}` : g.reason;
+    const nHeld = held.length;
+    const heldSilos = [...new Set(held.map((h) => h.silo))].join(",");
+    rows = [{
+      dir: "-", id: "budget-hold", priority: 0, created_at: "0000",
+      title: `[budget-hold] ${why}: ${nHeld} ready bead${nHeld === 1 ? "" : "s"} held (${heldSilos})`,
+      pinned: false,
+    } as Row, ...rows];
   }
   const out = format(rows.slice(0, n));
   if (out) c.print(out);
@@ -100,12 +116,13 @@ if (import.meta.main) {
     dbs: dbFile ? readDbs(dbFile) : [process.cwd()], // a configured but missing file throws: fail loud
     steer: process.env.SPRINT_STEER ?? `steer-${lane}.json`,
     laneUrl: process.env.LANE_URL,
-    meter: process.env.BUDGET_GATE === "off" ? undefined : null,
+    limits: process.env.BUDGET_GATE === "off" ? undefined : null,
+    silos: dbFile ? readSilos(dbFile) : {},
     exec: (cmd) => Bun.spawnSync(cmd, { timeout: 60_000, stderr: "pipe" }).stdout.toString(),
     print: (s) => console.log(s),
     warn: (s) => console.error(s),
     now: Date.now(),
   };
-  if (c.meter !== undefined) c.meter = await fetchMeter();
+  if (c.limits !== undefined) c.limits = await fetchLimits();
   process.exit(next(c, Number(process.argv[2] ?? 1) || 1));
 }

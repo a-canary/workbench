@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { next, readDbs, type Ctx } from "./cli.ts";
+import { next, readDbs, readSilos, type Ctx } from "./cli.ts";
 
 const bead = (id: string, priority: number, extra: object = {}) =>
   ({ id, priority, created_at: "2026-10-01", updated_at: "2026-10-01", title: `t-${id}`, labels: [], issue_type: "task", status: "open", ...extra });
@@ -97,35 +97,63 @@ test("readDbs: one dir per line, blanks and # comments ignored", () => {
   expect(readDbs(f)).toEqual(["/r/a", "/r/b"]);
 });
 
-// wb-an0.4: budget gate wired into the pick. util >= 0.9 (or meter unreachable) with lane:v100 work queued
-// → no NEW claude beads (ready rows dropped); claimed work continues; a budget-hold row heads the list.
-test("budget hold: high util + local lane queued drops ready claude beads, keeps claims, heads with budget-hold", () => {
-  const db = { "/r/a": { ready: [bead("a-1", 1)], claimed: [bead("a-9", 2, { status: "in_progress", updated_at: "2026-10-01" })], v100Ready: 2 } };
-  const { c, out } = ctx(db, { meter: { util: 0.95, limited: false } });
+// wb-an0.4 FINAL SPEC: burn-rate start gate per silo. Each ready bead is gated by burnGate on its silo
+// (label "critical" -> critical; else the QUEUE_DBS line's 2nd field; else "public"). Held beads drop out;
+// claimed work continues; a budget-hold row heads the list. limits undefined = gate off.
+const NOW = Date.parse("2026-10-29T00:00:00Z");
+const win = (util: number, resetInMin: number) =>
+  ({ kind: "k", group: "session", util, reset: new Date(NOW + resetInMin * 60_000).toISOString(), active: true, scope: null });
+
+test("burn gate: each ready bead is gated on its own silo; claims continue; budget-hold heads the list", () => {
+  const db = {
+    "/r/pub": { ready: [bead("p-1", 1)], claimed: [bead("p-9", 2, { status: "in_progress" })] },
+    "/r/trd": { ready: [bead("t-1", 2)] },
+  };
+  // util 0.5 with half the 300-min window left -> burn 1.0: public (0.8) holds, trading (1.2) starts
+  const { c, out } = ctx(db, { limits: [win(0.5, 150)], silos: { "/r/trd": "trading" } });
   expect(next(c, 5)).toBe(0);
   const rows = out[0]!.split("\n");
-  expect(rows[0]).toMatch(/^-\tbudget-hold\tP0\t\[budget-hold\] local-first util=95%: 2 lane:v100 queued/);
-  expect(rows.some((r) => r.includes("a-1"))).toBe(false);
-  expect(rows.some((r) => r.includes("a-9"))).toBe(true);
+  expect(rows[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] burn 1.00: 1 ready bead held (public)");
+  expect(rows.some((r) => r.includes("p-1"))).toBe(false);
+  expect(rows.some((r) => r.includes("t-1"))).toBe(true);
+  expect(rows.some((r) => r.includes("p-9"))).toBe(true);
 });
 
-test("budget: limited holds even with an empty local queue; unreachable meter (null) holds only while local work is queued", () => {
-  const lim = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 0 } }, { meter: { util: 1, limited: true } });
-  next(lim.c, 5);
-  expect(lim.out[0]).toMatch(/\[budget-hold\] limited util=100%/);
-  expect(lim.out[0]).not.toContain("a-1");
-  const down = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 3 } }, { meter: null });
-  next(down.c, 5);
-  expect(down.out[0]).toMatch(/\[budget-hold\] meter-unreachable: 3 lane:v100 queued/);
-  const downIdle = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 0 } }, { meter: null });
-  next(downIdle.c, 5);
-  expect(downIdle.out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
+test("burn gate: a bead labelled critical starts whatever the burn; hard cap holds every other silo", () => {
+  const db = { "/r/a": { ready: [bead("a-1", 1, { labels: ["critical"] }), bead("a-2", 1)] } };
+  const { c, out } = ctx(db, { limits: [win(0.98, 10)], silos: { "/r/a": "trading" } });
+  next(c, 5);
+  const rows = out[0]!.split("\n");
+  expect(rows[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] hard-cap: 1 ready bead held (trading)");
+  expect(rows.some((r) => r.includes("a-1"))).toBe(true);
+  expect(rows.some((r) => r.includes("a-2"))).toBe(false);
 });
 
-test("budget ok, or no meter configured (undefined): the pick is unchanged", () => {
-  for (const meter of [{ util: 0.5, limited: false }, undefined]) {
-    const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1)], v100Ready: 4 } }, { meter });
+test("burn gate: unreachable meter (null) holds every non-critical bead, naming each silo once", () => {
+  const db = { "/r/a": { ready: [bead("a-1", 1), bead("a-2", 2)] }, "/r/b": { ready: [bead("b-1", 1)] } };
+  const { c, out } = ctx(db, { limits: null, silos: { "/r/b": "dev" } });
+  next(c, 5);
+  expect(out[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] meter-unreachable: 3 ready beads held (public,dev)");
+});
+
+test("burn gate: a bead bd lists without labels is gated as public, not a crash", () => {
+  const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1, { labels: undefined })] } }, { limits: null });
+  expect(next(c, 5)).toBe(0);
+  expect(out[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] meter-unreachable: 1 ready bead held (public)");
+});
+
+test("burn gate: low util, or gate off (undefined), leaves the pick unchanged", () => {
+  for (const limits of [[win(0.1, 299)], undefined]) {
+    const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1)] } }, { limits });
     next(c, 5);
     expect(out[0]).toBe("/r/a\ta-1\tP1\tt-a-1");
   }
+});
+
+test("readSilos: optional 2nd field of a QUEUE_DBS line names the dir's silo; readDbs keeps only the dir", () => {
+  const { d } = ctx({});
+  const f = join(d, "dbs");
+  writeFileSync(f, "/r/a trading\n# /r/x dev\n  /r/b  \n/r/c\tdev\n");
+  expect(readDbs(f)).toEqual(["/r/a", "/r/b", "/r/c"]);
+  expect(readSilos(f)).toEqual({ "/r/a": "trading", "/r/c": "dev" });
 });
