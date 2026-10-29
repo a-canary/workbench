@@ -117,7 +117,10 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
   wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX") lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
   body "$desc" >"$task"
-  timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+  for try in 1 2 3; do  # a fast failure (443 refused) is usually a blip: retry before calling the branch missing (wb-o49)
+    timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
+    { [ $rc -eq 0 ] || [ $rc -eq 124 ] || [ $try -eq 3 ]; } && break; sleep 25
+  done
   if [ $rc -eq 0 ] && git -C "$repo" worktree add -q -b "$branch" "$wt/wt" FETCH_HEAD; then
     made=1  # only a branch this run created is ever deleted (another process may make one meanwhile)
     base=$(git -C "$wt/wt" rev-parse HEAD)
