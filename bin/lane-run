@@ -31,6 +31,12 @@ done
 [[ $idle =~ ^[0-9]+$ ]] || { echo "lane-run: --idle wants seconds, got '$idle'" >&2; exit 2; }
 log() { echo "lane-run: $*" >&2; }
 sprint() { [ -n "${SPRINT:-}" ] && $SPRINT "$@" >&2; return 0; }
+lanes_json() { curl -s -m 5 "${LANES_URL:-http://127.0.0.1:8099/__lanes}"; }
+saturated() {
+  local j
+  j=$(lanes_json) || return 1
+  jq -e '.waiting[] | select(.waited_s >= '"${LANE_MAX_WAIT_S:-300}"')' <<<"$j" >/dev/null 2>&1
+}
 
 # field <name> <description> — value of the first "Name: value" header line, before the --- fence
 field() { awk -v k="$1:" '/^---$/{exit} index($0,k)==1{sub(k" *","");sub(/[ \t]+$/,"");print;exit}' <<<"$2"; }
@@ -70,6 +76,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
     && id=$(jq -er '.[0].id // ""' <<<"$j") \
     || { log "$repo: bd ready failed or returned non-JSON"; down=1; return 1; }  # an outage, not an empty queue
   [ -n "$id" ] || return 1
+  if saturated; then log "$repo: laneproxy saturated, deferring pass"; down=1; return 1; fi
   desc=$(jq -r '.[0].description // ""' <<<"$j"); desc=${desc//$'\r'/}
   branch=$(field Branch "$desc") test=$(field Test "$desc")
   # a lost claim is no progress (returning 0 spun --once in a tight loop).
