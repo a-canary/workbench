@@ -1,6 +1,6 @@
 // wb-an0.4: live meter fetch — injected token + fetch, 3s timeout, null on ANY failure (never throws).
 import { expect, test } from "bun:test";
-import { fetchMeter } from "./fetch.ts";
+import { fetchLimits, fetchMeter } from "./fetch.ts";
 
 const body = { limits: [{ kind: "k", group: "session", percent: 41, is_active: true }, { kind: "k", group: "weekly", percent: 93, is_active: true }] };
 const ok = (j: unknown, status = 200) => async () => new Response(JSON.stringify(j), { status });
@@ -40,4 +40,11 @@ test("a stalled BODY is also abandoned at timeoutMs (headers arrive, body never 
     new Response(new ReadableStream({ start(c) { init?.signal?.addEventListener("abort", () => c.error(new Error("aborted"))); } }));
   expect(await fetchMeter({ token: async () => "t", fetch: stall as typeof fetch, timeoutMs: 50 })).toBeNull();
   expect(Date.now() - t0).toBeLessThan(1000);
+});
+
+test("fetchLimits: the parsed limits on success (for burnGate), null on any failure", async () => {
+  const ls = await fetchLimits({ token: async () => "t", fetch: ok(body) });
+  expect(Array.isArray(ls) && ls.length > 0 && ls.every((l) => typeof l.util === "number")).toBe(true);
+  expect(await fetchLimits({ token: async () => null, fetch: ok(body) })).toBeNull();
+  expect(await fetchLimits({ token: async () => "t", fetch: ok(body, 401) })).toBeNull();
 });
