@@ -49,7 +49,7 @@ export function rank(
   }
 
   for (const bead of inProgress) {
-    if (bead.labels.includes("human")) continue;
+    if (bead.labels.some((l) => DROP_LABELS.has(l))) continue; // a lane:v100 claim is that lane's, not stale
     if (Date.parse(bead.updated_at) >= now - STALE_MS) continue;
     const title = "[stale-claim] " + bead.title.replace(/\t/g, " ");
     rows.push({

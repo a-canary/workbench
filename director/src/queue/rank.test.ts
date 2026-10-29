@@ -30,11 +30,12 @@ test("tags decided beads", () => {
   expect(r!.title).toBe("[decided] t-d");
 });
 
-test("in-progress beads count only when untouched 48h+ and not human", () => {
+test("in-progress beads count only when untouched 48h+ and not human or another lane's", () => {
   const rows = rank([], [
     b("old", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-26T11:00:00Z" }),
     b("fresh", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-26T13:00:00Z" }),
     b("oldh", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-20T00:00:00Z", labels: ["human"] }),
+    b("oldv", 2, "2026-10-01", { status: "in_progress", updated_at: "2026-10-20T00:00:00Z", labels: ["lane:v100"] }),
   ], none, NOW);
   expect(rows.map((r) => [r.id, r.title])).toEqual([["old", "[stale-claim] t-old"]]);
 });
