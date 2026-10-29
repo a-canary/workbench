@@ -34,6 +34,14 @@ cd workbench
 
 Pulls the pinned component versions, installs config, symlinks skills.
 
+QA profile (`worker-sandbox --role qa`, headless browser + screenshot collapse; optional):
+
+```sh
+npx @puppeteer/browsers install chrome-headless-shell   # found under ~/.cache/puppeteer
+pip install --user pillow numpy                         # img-collapse
+# elsewhere? export WORKER_CHROME=/path/to/chrome-headless-shell-linux64
+```
+
 ## Quickstart: frontier model decomposes, local model implements
 
 Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, `python3`, `curl`, and any OpenAI-compatible local endpoint (llama.cpp, vLLM, Ollama).
