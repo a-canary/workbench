@@ -61,9 +61,9 @@ interrupted() {
       if [ -n "$cur" ] && [ "$cur" != "$base" ]; then keep=1; fi
     fi
     if [ "$keep" = "1" ]; then
-      fail "$id" "lane-run interrupted; kept local branch $branch (worker commits, maybe unpushed); check origin/$branch" human
+      fail "$id" "lane-run interrupted; kept local branch $branch (worker commits, maybe unpushed); check origin/$branch (log: $lf)" human
     else
-      fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN" human
+      fail "$id" "lane-run interrupted; check origin/$branch for a pushed GREEN (log: $lf)" human
     fi
   else
     log "$id: interrupted before the worker started"; bd -C "$repo" update "$id" -s open -a "" >/dev/null
