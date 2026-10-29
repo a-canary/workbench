@@ -18,8 +18,9 @@ let approvedDb: string;
 // must be outside every lane (not /tmp, not under $HOME) — string only, never created
 const approvedPrefix = `/opt/lane-hook-approved-${Date.now()}`;
 
-function runHook(payload: object, db: string): { code: number; stderr: string } {
+function runHook(payload: object, db: string, cwd?: string): { code: number; stderr: string } {
   const r = spawnSync("bash", [HOOK], {
+    cwd,
     input: JSON.stringify(payload),
     env: { ...process.env, LEDGER_DB: db },
     encoding: "utf8",
@@ -186,6 +187,12 @@ test("cp/mv -t and --target-directory= destinations are gated", () => {
     `mv -t ${bin} /tmp/a /tmp/b`,
     `cp --target-directory=${bin} /tmp/tool`,
     `cp --target-directory ${bin} /tmp/tool`,
+    `cp -rt ${bin} /tmp/tool`,
+    `cp -at ${bin} /tmp/tool`,
+    `cp -t${bin} /tmp/tool`,
+    `ln -sft${bin} /tmp/tool`,
+    `cp --target-dir=${bin} /tmp/tool`,
+    `mv --t ${bin} /tmp/tool`,
   ]) {
     expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code }).toEqual({ command, code: 2 });
   }
@@ -199,6 +206,17 @@ test("a quoted write-verb destination is gated", () => {
 test("a trailing stderr redirect does not mask the write-verb destination", () => {
   const command = `mv /tmp/a ${process.env.HOME}/bin/lane-hook-test-x 2>/tmp/err.log`;
   expect(runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb).code).toBe(2);
+});
+
+test("an empty quoted destination is checked against cwd", () => {
+  for (const command of [`rsync -a --old-args /tmp/src/ ""`, `cp /tmp/a ''`]) {
+    expect({ command, code: runHook({ tool_name: "Bash", tool_input: { command } }, emptyDb, "/").code }).toEqual({ command, code: 2 });
+  }
+});
+
+test("rsync -t (preserve times) is not a target-directory flag", () => {
+  const r = runHook({ tool_name: "Bash", tool_input: { command: `rsync -t ${process.env.HOME}/bin/x /tmp/b` } }, emptyDb);
+  expect(r.code).toBe(0);
 });
 
 test("cp -t into an in-lane dir passes", () => {
