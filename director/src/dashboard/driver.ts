@@ -80,7 +80,7 @@ export function driverPanel(
       hits.push(`<div><strong>Memory:</strong> ${cur.mem.map((m) => chip(m.key, m.text)).join(" ")}</div>`);
     }
     if (cur.ke.length > 0) {
-      hits.push(`<div><strong>Knowledge:</strong> ${cur.ke.map((k) => `<span class="dr-chip">${fmt(k.score)}% — ${esc(k.title)}</span>`).join(" ")}</div>`);
+      hits.push(`<div><strong>Knowledge:</strong> ${cur.ke.map((k) => `<span class="dr-chip">${Number.isFinite(k.score) ? fmt(k.score) + "%" : "—"} — ${esc(k.title)}</span>`).join(" ")}</div>`);
     }
     if (cur.steer.length > 0) {
       hits.push(`<div><strong>Steering:</strong> steering delivered: ${cur.steer.map((s) => esc(s.text)).join(", ")}</div>`);
@@ -116,6 +116,30 @@ export function driverPanel(
   }
   h += `</div>`;
 
+  // Depends on
+  if (ctx.deps.length > 0) {
+    h += `<div class="dr-section"><h3>Depends on</h3><ul>${ctx.deps.map(relLi).join("")}</ul></div>`;
+  }
+
+  // Dependents
+  if (ctx.dependents.length > 0) {
+    h += `<div class="dr-section"><h3>Dependents</h3><ul>${ctx.dependents.map(relLi).join("")}</ul></div>`;
+  }
+
+  // Queue
+  if (ctx.queue.length > 0) {
+    h += `<div class="dr-section"><h3>Queue</h3><ul>${ctx.queue.map(relLi).join("")}</ul></div>`;
+  }
+
+  // Comments
+  if (ctx.comments.length > 0) {
+    h += `<div class="dr-section"><h3>Comments</h3>`;
+    for (const c of ctx.comments) {
+      h += `<div><strong>${esc(c.author)}</strong> <span class="dr-ago">${ago(c.ts, now)}</span> ${esc(c.text)}</div>`;
+    }
+    h += `</div>`;
+  }
+
   // Pending steering
   if (steer.pin.length > 0 || steer.skip.length > 0 || steer.notes.length > 0) {
     h += `<div class="dr-section"><h3>Steering</h3>`;
@@ -130,7 +154,7 @@ export function driverPanel(
   }
 
   // History
-  const ended = sprints.filter((s) => s.end !== undefined);
+  const ended = sprints.filter((s) => s.end !== undefined).sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts)).slice(0, 15);
   if (ended.length > 0) {
     h += `<div class="dr-section"><h3>History</h3>`;
     for (const s of ended) {
