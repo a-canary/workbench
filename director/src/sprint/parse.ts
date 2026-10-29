@@ -30,7 +30,7 @@ export function parseMemories(s: string): { key: string; text: string }[] {
 
   for (const line of lines) {
     // 2-space key line: exactly 2 spaces, then one non-space token, then optional trailing whitespace
-    const keyMatch = line.match(/^  (\S+)[ \t]*$/);
+    const keyMatch = line.match(/^ {2}(\S+)\s*$/);
     if (keyMatch) {
       latest = { key: keyMatch[1], text: "" };
       entries.push(latest);
@@ -38,7 +38,7 @@ export function parseMemories(s: string): { key: string; text: string }[] {
     }
 
     // 4-space text line
-    const textMatch = line.match(/^    (.+)/);
+    const textMatch = line.match(/^ {4}(.+)$/);
     if (textMatch && latest && latest.text === "") {
       latest.text = textMatch[1].slice(0, 200);
     }
@@ -54,10 +54,10 @@ export function parseKe(s: string): { score: number; title: string; path: string
 
   for (const line of lines) {
     // Entry line: "- [<num>%] <title>"
-    const entryMatch = line.match(/^- \[([0-9.]+)%\] (.*)$/);
+    const entryMatch = line.match(/^- \[([0-9.]+)%\] (.+)$/);
     if (entryMatch) {
       latest = {
-        score: parseFloat(entryMatch[1]),
+        score: Number(entryMatch[1]),
         title: entryMatch[2].trim(),
         path: "",
       };

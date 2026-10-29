@@ -44,3 +44,9 @@ test("parseEnd: rejects a bad outcome or too few args", () => {
   expect(parseEnd(["wb-1", "finished", "f"])).toEqual({ error: "outcome: done|checkpoint|blocked" });
   expect(parseEnd(["wb-1", "done"])).toEqual({ error: "usage" });
 });
+
+test("parsers match sprint.ts on edge input: CRLF keys, empty ke title, malformed score", () => {
+  expect(parseMemories("  k1\r\n    text\r").map((m) => m.key)).toEqual(["k1"]);
+  expect(parseKe("- [5%] \n  → /p")).toEqual([]);
+  expect(Number.isNaN(parseKe("- [1.2.3%] t")[0]!.score)).toBe(true);
+});
