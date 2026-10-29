@@ -136,6 +136,12 @@ test("burn gate: unreachable meter (null) holds every non-critical bead, naming 
   expect(out[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] meter-unreachable: 3 ready beads held (public,dev)");
 });
 
+test("burn gate: a bead bd lists without labels is gated as public, not a crash", () => {
+  const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1, { labels: undefined })] } }, { limits: null });
+  expect(next(c, 5)).toBe(0);
+  expect(out[0]).toBe("-\tbudget-hold\tP0\t[budget-hold] meter-unreachable: 1 ready bead held (public)");
+});
+
 test("burn gate: low util, or gate off (undefined), leaves the pick unchanged", () => {
   for (const limits of [[win(0.1, 299)], undefined]) {
     const { c, out } = ctx({ "/r/a": { ready: [bead("a-1", 1)] } }, { limits });

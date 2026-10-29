@@ -22,22 +22,12 @@ export type Ctx = {
   now: number;
 };
 
-export const readDbs = (path: string): string[] =>
-  readFileSync(path, "utf8").split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"))
-    .map((l) => l.split(/\s+/)[0]!);
-
-export const readSilos = (path: string): Record<string, string> => {
-  const out: Record<string, string> = {};
-  for (const l of readFileSync(path, "utf8").split("\n")) {
-    const line = l.trim();
-    if (!line || line.startsWith("#")) continue;
-    const parts = line.split(/\s+/);
-    if (parts.length >= 2) out[parts[0]!] = parts[1]!;
-  }
-  return out;
-};
+// QUEUE_DBS line: "<dir> [silo]". ponytail: whitespace splits fields, so a dir containing spaces is unsupported.
+const dbLines = (path: string): string[][] =>
+  readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/));
+export const readDbs = (path: string): string[] => dbLines(path).map((f) => f[0]!);
+export const readSilos = (path: string): Record<string, string> =>
+  Object.fromEntries(dbLines(path).filter((f) => f[1]).map((f) => [f[0]!, f[1]!]));
 
 const beads = (c: Ctx, dir: string, args: string[]): Bead[] | null => {
   try {
@@ -92,7 +82,7 @@ export function next(c: Ctx, n: number): number {
   if (c.limits !== undefined) {
     const kept: Bead[] = [];
     for (const b of ready) {
-      const silo = b.labels.includes("critical") ? "critical" : c.silos?.[b.dir] ?? "public";
+      const silo = (b.labels ?? []).includes("critical") ? "critical" : c.silos?.[b.dir] ?? "public";
       const g = burnGate(c.limits ?? [], silo, c.now);
       if (g.start) kept.push(b);
       else held.push({ silo, g });
