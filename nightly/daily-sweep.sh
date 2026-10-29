@@ -25,6 +25,25 @@ qualified() {
     [[ $DRY_RUN -eq 1 ]] || { grep -q 'passed [0-9]*/' <<<"$1" && ! grep -q 'passed 0/' <<<"$1"; }
 }
 
+# inert_only <repo> <from> <to>: 0 iff every changed path is inert (docs/beads/CI/LICENSE/.md);
+# non-zero for code changes, SKILL/AGENTS/CLAUDE.md, empty diff, or git errors.
+inert_only() {
+    local repo="$1" from="$2" to="$3"
+    local paths
+    paths=$(git -C "$repo" diff --name-only "$from" "$to" 2>/dev/null) || return 1
+    [[ -n "$paths" ]] || return 1
+    while IFS= read -r p; do
+        case "$p" in
+            */SKILL.md|SKILL.md|*/AGENTS.md|AGENTS.md|*/CLAUDE.md|CLAUDE.md) return 1 ;;
+            docs/*|.beads/*|.github/*) continue ;;
+            LICENSE*) continue ;;
+            *.md) continue ;;
+            *) return 1 ;;
+        esac
+    done <<< "$paths"
+    return 0
+}
+
 run() {
     if [[ $DRY_RUN -eq 1 ]]; then
         echo "[dry-run] would run: $*"
@@ -97,22 +116,25 @@ if [[ "$CURRENT_REF" == "main" ]]; then
     if [[ "$LAST_TESTED" == "$LATEST" ]]; then
         log "$COMPONENT: no new commits since last sweep, skipping"
     else
-        # New commits found — test with harness-bench
-        log "$COMPONENT: new commits found, running harness-bench"
+        if inert_only "$COMPONENT_DIR" "$LAST_TESTED" "$LATEST"; then
+            log "$COMPONENT: inert-only commits (docs/beads/CI), skipping re-bench"
+        else
+            # New commits found — test with harness-bench
+            log "$COMPONENT: new commits found, running harness-bench"
 
-        cd "$HARNESS_BENCH"
-        LABEL="sweep-$COMPONENT-$(date -u +%Y%m%d)"
+            cd "$HARNESS_BENCH"
+            LABEL="sweep-$COMPONENT-$(date -u +%Y%m%d)"
 
-        # Run benchmark (use the component's latest)
-        # bench exits 1 only on an infra fault, so a 0/N run would otherwise qualify and auto-deploy (wb-qiy).
-        # ponytail: floor at >=1 pass; compare against the last qualified run's Wilson CI if regressions slip through.
-        if out=$(run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG") && qualified "$out"; then
-            # Tests passed — update manifest
-            log "$COMPONENT: tests passed, updating manifest"
+            # Run benchmark (use the component's latest)
+            # bench exits 1 only on an infra fault, so a 0/N run would otherwise qualify and auto-deploy (wb-qiy).
+            # ponytail: floor at >=1 pass; compare against the last qualified run's Wilson CI if regressions slip through.
+            if out=$(run bin/bench run core --model "local-llm/local" --label "$LABEL" 2>&1 | tee -a "$SWEEP_LOG") && qualified "$out"; then
+                # Tests passed — update manifest
+                log "$COMPONENT: tests passed, updating manifest"
 
-            if [[ $DRY_RUN -eq 0 ]]; then
-                # Update manifest.json with new last_tested
-                python3 -c "
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    # Update manifest.json with new last_tested
+                    python3 -c "
 import json
 with open('$WORKBENCH_DIR/manifest.json') as f:
     m = json.load(f)
@@ -122,18 +144,19 @@ with open('$WORKBENCH_DIR/manifest.json', 'w') as f:
     json.dump(m, f, indent=2)
 "
 
-                # Commit and push
-                run git -C "$WORKBENCH_DIR" add manifest.json
-                run git -C "$WORKBENCH_DIR" commit -m "sweep: $COMPONENT qualified at $LATEST"
-                run git -C "$WORKBENCH_DIR" push
-                log "$COMPONENT: published"
+                    # Commit and push
+                    run git -C "$WORKBENCH_DIR" add manifest.json
+                    run git -C "$WORKBENCH_DIR" commit -m "sweep: $COMPONENT qualified at $LATEST"
+                    run git -C "$WORKBENCH_DIR" push
+                    log "$COMPONENT: published"
 
-                # Auto-deploy qualified manifest to live workspace
-                apply_manifest
+                    # Auto-deploy qualified manifest to live workspace
+                    apply_manifest
+                fi
+            else
+                log "$COMPONENT: tests FAILED, not updating manifest"
+                exit 1
             fi
-        else
-            log "$COMPONENT: tests FAILED, not updating manifest"
-            exit 1
         fi
     fi
 fi
