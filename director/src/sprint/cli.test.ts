@@ -14,10 +14,10 @@ function ctx(over: Partial<Ctx> = {}) {
     lane: "claude",
     log: join(d, "sprints.jsonl"),
     steer: join(d, "steer.json"),
-    dirs: ["/x/none", "/x/repo"],
+    dirs: ["/x/none", "/x/repo/"],
     exec: (cmd) => {
       calls.push(cmd);
-      if (cmd[3] === "show") return cmd[2] === "/x/repo" ? BEAD : "";
+      if (cmd[3] === "show") return cmd[2]?.startsWith("/x/repo") ? BEAD : "";
       if (cmd[3] === "memories") return cmd[4] === "sprint" ? "  mem-a\n    remember A\n" : "";
       if (cmd[0] === "ke") return "- [46.8%] Note\n  → ke/x.md\n";
       return "";
@@ -70,7 +70,7 @@ test("end: after a start, logs metrics + mission without a bead lookup", () => {
 test("end: without a start, carries the bead identity from the first dir that has it", () => {
   const t = ctx();
   expect(end(t.c, ["wb-1", "blocked", "waiting"])).toBe(0);
-  expect(t.events()[0]).toMatchObject({ ev: "end", dir: "/x/repo", project: "repo", title: "port sprint steering file", nostart: true });
+  expect(t.events()[0]).toMatchObject({ ev: "end", dir: "/x/repo/", project: "repo", title: "port sprint steering file", nostart: true });
 });
 
 test("end: bad outcome exits 2", () => {

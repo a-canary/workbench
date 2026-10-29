@@ -67,7 +67,7 @@ export function end(c: Ctx, args: string[]): number {
   if (!started)
     for (const dir of c.dirs) {
       const b = showBead(c, dir, e.id, 15_000);
-      if (b) { who = { dir, project: dir.split("/").pop(), title: b.title, priority: b.priority, nostart: true }; break; }
+      if (b) { who = { dir, project: dir.replace(/\/+$/, "").split("/").pop(), title: b.title, priority: b.priority, nostart: true }; break; }
     }
   append(c, { ev: "end", ...e, ...who });
   c.print(`■ ${e.id} ${e.outcome}`);
