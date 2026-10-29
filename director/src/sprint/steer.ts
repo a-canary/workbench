@@ -26,3 +26,8 @@ export function consumeSteer(path: string, id: string): Steer["notes"] {
   writeFileSync(path, JSON.stringify({ ...raw, ...s, pin: s.pin.filter((p) => p !== id), notes: [] }, null, 2));
   return s.notes;
 }
+
+/** Write `s` over the file's pin/skip/notes, keeping any other keys (as consumeSteer does). */
+export function saveSteer(path: string, s: Steer): void {
+  writeFileSync(path, JSON.stringify({ ...readRaw(path), ...s }, null, 2));
+}
