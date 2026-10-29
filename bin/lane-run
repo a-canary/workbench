@@ -64,8 +64,15 @@ interrupted() {
 }
 
 down=
+lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout before the model runs
+  [ -n "${LANES_URL:-}" ] || return 1
+  local n; n=$(curl -s -m 5 "$LANES_URL" | jq -er '.waiting | length' 2>/dev/null) || return 1
+  [ "$n" -ge "${LANE_MAX_WAITERS:-4}" ] || return 1
+  log "lane busy ($n waiting); deferring"
+}
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
   local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig=
+  lane_busy && return 1
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
     && id=$(jq -er '.[0].id // ""' <<<"$j") \
