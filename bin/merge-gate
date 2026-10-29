@@ -16,6 +16,7 @@ run clean-tree         test -z "$(git status --porcelain)"  # every check below 
 run lane-run-test      bin/lane-run-test
 run worker-task-test   bin/worker-task-test
 run worker-sandbox-test bin/worker-sandbox-test
+run v100-spool-sync-test bin/v100-spool-sync-test
 run director-tests     bun test director/
 run oss-scrub-check    bin/oss-scrub-check
 run gitleaks           gitleaks detect --no-banner --redact --config bin/gitleaks.toml --source . --log-opts=HEAD

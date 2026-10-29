@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# v100-spool-sync — one tick of the public-agent -> GPU-host job spool. Run from cron under flock.
+#   bin/v100-spool-sync       submit ready/<name> jobs, then collect finished results; exit 0 unless setup is broken
+# Trust boundary: the spool is written by an untrusted public agent. Jobs are copied out as that agent,
+# VALIDATED ON THE STAGED COPY (the agent can mutate its spool dir mid-tick), and only then streamed to the
+# GPU host, where they are extracted as an unprivileged job user. The job name passes a strict regex before
+# it reaches any path or remote command. Every external boundary is overridable by env (hermetic tests):
+#   PUB_RUN        run-as-public-agent prefix        (default: sudo -n -u agent-pub)
+#   SPOOL          spool root with ready|done|failed (default: <agent-pub home>/v100-spool)
+#   REMOTE         remote exec prefix, 1 arg = shell string (default: ssh -o BatchMode=yes $V100_HOST)
+#   V100JOB_RUN    remote-side run-as-job-user prefix (default: sudo -n -u v100job)
+#   V100_Q         remote queue dir                  (default: remote ~/v100-jobs)
+#   V100_WORK      remote job payload dir            (default: /var/lib/v100job/work)
+#   V100_ARCHIVE   remote finished-payload dir       (default: /var/lib/v100job/archive)
+# Layout: spool ready/<name>/run.sh -> remote $V100_WORK/3-rnd-<name>/ + queue token $V100_Q/ready/3-rnd-<name>/.
+# The 3-rnd- priority prefix is forced here, never chosen by the agent. Tools: GNU tar/find/du, base64.
+set -euo pipefail
+export LC_ALL=C
+
+log() { echo "v100-spool-sync: $*" >&2; }
+die() { log "$*"; exit 2; }
+
+PUB_RUN=${PUB_RUN:-sudo -n -u agent-pub}
+V100JOB_RUN=${V100JOB_RUN:-sudo -n -u v100job}
+REMOTE=${REMOTE:-ssh -o BatchMode=yes ${V100_HOST:?set V100_HOST (or REMOTE)}}
+V100_Q=${V100_Q:-}
+V100_WORK=${V100_WORK:-/var/lib/v100job/work}
+V100_ARCHIVE=${V100_ARCHIVE:-/var/lib/v100job/archive}
+if [ -z "${SPOOL:-}" ]; then
+  h=$(getent passwd agent-pub | cut -d: -f6) || true
+  [ -n "${h:-}" ] || die "SPOOL unset and no agent-pub home"
+  SPOOL=$h/v100-spool
+fi
+
+NAME_RE='^[a-z0-9][a-z0-9-]{0,40}$'
+MAXB=52428800                 # 50 MB staged job
+CAPB=$((MAXB + 10485760))     # archive read cap: job + tar overhead, bounds the staging disk use
+
+pub() { $PUB_RUN "$@"; }      # intentional word-splitting: PUB_RUN is a command prefix
+# rsh SCRIPT ARGS...: run SCRIPT on the remote as `bash -c`. The script travels base64 and every arg is
+# %q-quoted, so no value is ever spliced into remote shell syntax. stdin passes through.
+rsh() {
+  local s=$1 b; shift
+  b=$(printf %s "$s" | base64 -w0)
+  $REMOTE "bash -c \"\$(echo $b | base64 -d)\" _ $(printf '%q ' "$V100JOB_RUN" "$V100_Q" "$V100_WORK" "$V100_ARCHIVE" "$@")"
+}
+
+# remote scripts: $1..$4 = RUN Q WORK ARCHIVE, then own args. Q defaults to the remote user's ~/v100-jobs.
+PRE='RUN=$1 Q=${2:-$HOME/v100-jobs} W=$3 A=$4; shift 4'
+R_DUP="$PRE"'
+n=3-rnd-$1
+# the payload dir is job-user-private: only the job user can stat it
+if $RUN test -e "$W/$n"; then exit 1; fi
+for s in ready running done failed; do [ -e "$Q/$s/$n" ] && exit 1; done
+exit 0'
+R_SUBMIT="$PRE"'
+set -e
+n=3-rnd-$1 i=$W/.incoming-$1 moved= tok=
+trap '"'"'$RUN rm -rf -- "$i"; [ -z "$moved" ] || $RUN rm -rf -- "$W/$n"; [ -z "$tok" ] || rm -rf -- "$Q/ready/.$n"'"'"' EXIT
+$RUN rm -rf -- "$i"
+$RUN mkdir -p -- "$W"
+$RUN mkdir -- "$i"
+$RUN tar -C "$i" --no-same-owner --no-same-permissions -xf -
+$RUN mv -T -- "$i" "$W/$n"; moved=1
+mkdir -p -- "$Q/ready"
+mkdir -- "$Q/ready/.$n"; tok=1
+$RUN cat -- "$W/$n/run.sh" >"$Q/ready/.$n/run.sh"
+mv -T -- "$Q/ready/.$n" "$Q/ready/$n"; moved= tok='
+R_LIST="$PRE"'
+for s in done failed; do for d in "$Q/$s"/3-rnd-*; do [ -d "$d" ] && [ ! -L "$d" ] && printf "%s %s\n" "$s" "${d##*/}"; done; done
+exit 0'
+R_PREP="$PRE"'
+w=$W/3-rnd-$2
+$RUN test -d "$w" || { echo none; exit 0; }
+sz=$($RUN du -sb -- "$w" | cut -f1)
+if [ "${sz:-999999999999}" -gt 209715200 ]; then echo big; else echo ok; fi'
+R_LOG="$PRE"'
+tail -c 52428800 "$Q/$1/3-rnd-$2/job.log" 2>/dev/null; exit 0'
+R_WORK="$PRE"'
+exec $RUN tar -C "$W/3-rnd-$2" -cf - .'
+R_FINAL="$PRE"'
+set -e
+n=3-rnd-$2 t=$Q/$1/3-rnd-$2 ts=$(date +%s)
+if $RUN test -d "$W/$n"; then
+  a=$A/$n; if $RUN test -e "$a"; then a=$a.$ts; fi
+  $RUN mkdir -p -- "$A"; $RUN mv -T -- "$W/$n" "$a"
+fi
+c=$Q/collected/$n; if [ -e "$c" ]; then c=$c.$ts; fi
+mkdir -p -- "$Q/collected"; mv -T -- "$t" "$c"'
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/v100-sync.XXXXXX")
+trap 'chmod -R u+rwX "$stage" 2>/dev/null; rm -rf "$stage"' EXIT
+
+# reject NAME WHY: move the spool entry to failed/ with a REASON file (all as the public agent)
+reject() {
+  local name=$1 why=$2 src=$SPOOL/ready/$1 dest=$SPOOL/failed/$1
+  if pub test -e "$dest"; then dest=$dest.$(date +%s); fi
+  {
+    if pub test -d "$src" && ! pub test -L "$src"; then pub mv -T -- "$src" "$dest"
+    else pub mkdir -- "$dest" && pub mv -- "$src" "$dest/entry"; fi &&
+    printf '%s\n' "$why" | pub tee -- "$dest/REASON" >/dev/null
+  } || { log "reject of $(printf %q "$name") failed"; return 0; }
+  log "rejected $(printf %q "$name"): $why"
+}
+
+submit_one() {
+  local name=$1 j d bad sz rc=0 names types aside
+  [[ $name =~ $NAME_RE ]] || { reject "$name" "name must match $NAME_RE"; return 0; }
+  j=$(mktemp -d "$stage/j.XXXXXX") || return 1
+  d=$j/x/$name; mkdir "$j/x" || return 1
+  # copy out as the agent into the operator-owned stage; from here on only the stage is trusted-for-checks
+  pub tar -C "$SPOOL/ready" -cf - -- "$name" | head -c $((CAPB + 1)) >"$j/in.tar" || rc=$?
+  if [ "$(stat -c %s "$j/in.tar")" -gt "$CAPB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
+  [ "$rc" = 0 ] || { log "copy of $name failed (rc $rc), retry next tick"; return 0; }
+  # inspect the archive before extracting: no traversal, and only regular files/dirs (no links, devices, fifos)
+  names=$(tar -tf "$j/in.tar") && types=$(tar -tvf "$j/in.tar" | cut -c1) || { reject "$name" "unreadable archive"; return 0; }
+  if grep -qE '(^|/)\.\.(/|$)|^/' <<<"$names"; then reject "$name" "unsafe path in job"; return 0; fi
+  if grep -qv '^[-d]$' <<<"$types"; then reject "$name" "symlink, device or fifo in job"; return 0; fi
+  tar -C "$j/x" --no-same-owner --no-same-permissions -xf "$j/in.tar" || { reject "$name" "extract failed"; return 0; }
+  chmod -R u+rwX "$j/x"
+  # validate the STAGED copy
+  bad=$(find "$d" ! -type f ! -type d -print -quit) || true
+  if [ -n "$bad" ]; then reject "$name" "symlink, device or fifo in job"; return 0; fi
+  [ -d "$d" ] || { reject "$name" "not a directory"; return 0; }
+  [ -f "$d/run.sh" ] || { reject "$name" "run.sh missing"; return 0; }
+  sz=$(du -sb -- "$d" | cut -f1) || { reject "$name" "size check failed"; return 0; }
+  if [ "$sz" -gt "$MAXB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
+  rc=0; rsh "$R_DUP" "$name" </dev/null || rc=$?
+  if [ "$rc" = 1 ]; then reject "$name" "duplicate: 3-rnd-$name already exists on the GPU host"; return 0; fi
+  [ "$rc" = 0 ] || { log "remote check of $name failed (rc $rc), retry next tick"; return 0; }
+  if ! tar -C "$d" -cf - . | rsh "$R_SUBMIT" "$name"; then log "remote submit of $name failed, retry next tick"; return 0; fi
+  aside=$SPOOL/ready/.submitted-$name
+  if pub test -e "$aside"; then aside=$aside.$(date +%s); fi
+  pub mv -T -- "$SPOOL/ready/$name" "$aside" || log "WARN could not move $name aside"
+  log "submitted $name as 3-rnd-$name"
+}
+
+# collect STATE NAME: remote done|failed/3-rnd-NAME -> spool STATE/NAME, then retire the remote copies
+collect() {
+  local s=$1 name=$2 dest=$SPOOL/$1/$2 mode fail=
+  if pub test -e "$dest"; then dest=$dest.$(date +%s); fi
+  mode=$(rsh "$R_PREP" "$s" "$name" </dev/null) || { log "remote size check of $name failed"; return 1; }
+  pub mkdir -- "$dest" || return 1
+  case $mode in
+    ok) rsh "$R_WORK" "$s" "$name" </dev/null | pub tar -C "$dest" --no-same-owner --no-same-permissions -xf - || fail=work ;;
+    big) printf 'work dir over 200 MB: only job.log returned\n' | pub tee -- "$dest/TRUNCATED" >/dev/null || fail=note ;;
+  esac
+  if [ -z "$fail" ]; then rsh "$R_LOG" "$s" "$name" </dev/null | pub tee -- "$dest/job.log" >/dev/null || fail=log; fi
+  if [ -n "$fail" ]; then pub rm -rf -- "$dest"; log "collect of $name failed ($fail), retry next tick"; return 1; fi
+  rsh "$R_FINAL" "$s" "$name" </dev/null || { log "remote retire of $name failed"; return 1; }
+  log "collected $s/$name ($mode)"
+}
+
+pub mkdir -p -- "$SPOOL/ready" "$SPOOL/done" "$SPOOL/failed" || die "cannot prepare spool"
+
+pub find "$SPOOL/ready" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' >"$stage/names" || die "cannot list spool"
+while IFS= read -r -d '' -u 3 name; do submit_one "$name" || log "submit of $(printf %q "$name") aborted"; done 3<"$stage/names"
+
+rsh "$R_LIST" </dev/null >"$stage/results" || { log "remote result list failed"; exit 0; }
+while read -r -u 3 s n; do
+  [[ $s == done || $s == failed ]] && [[ $n =~ ^3-rnd-([a-z0-9][a-z0-9-]{0,40})$ ]] || { log "ignoring result row"; continue; }
+  collect "$s" "${BASH_REMATCH[1]}" || true
+done 3<"$stage/results"

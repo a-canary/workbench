@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# v100-spool-sync-test — hermetic: the public-agent user, the spool, the GPU host and the job user are
+# all local stubs (plain `env`, a bash -c "remote", temp dirs). No sudo, no ssh, no network.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+sync=$here/v100-spool-sync
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/v100-sync-test.XXXXXX"); trap 'chmod -R u+rwX "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+yn() { if "$@" 2>/dev/null; then echo y; else echo n; fi; }
+exists() { yn test -e "$1"; }
+isfile() { yn test -f "$1" -a ! -L "$1"; }
+reason() { cat "$1/REASON" 2>/dev/null | head -c 200; }
+
+spool=$tmp/spool q=$tmp/q work=$tmp/work arch=$tmp/arch
+mkdir -p "$spool"/{ready,done,failed} "$q"/{ready,running,done,failed} "$work"
+
+# stubs: the "remote" logs the command string it is handed, the job-user prefix logs its argv
+printf '#!/bin/sh\necho "$1" >>"$REM_LOG"\nexec bash -c "$1"\n' >"$tmp/remstub"
+printf '#!/bin/sh\necho "$*" >>"$STUB_LOG"\nexec "$@"\n' >"$tmp/jobrun"
+# after the agent-side tar finishes, mutate the spool dir the way a hostile agent would
+cat >"$tmp/pubtoctou" <<'EOF'
+#!/bin/sh
+"$@"; rc=$?
+if [ "$1" = tar ]; then
+  for a; do last=$a; done
+  d=$SPOOL/ready/$last
+  if [ -f "$d/run.sh" ] && [ ! -L "$d/run.sh" ]; then ln -sf /etc/passwd "$d/run.sh.n" && mv -f "$d/run.sh.n" "$d/run.sh"; ln -s /etc/passwd "$d/evil"; fi
+  if [ -L "$d/planted" ]; then unlink "$d/planted"; fi
+fi
+exit $rc
+EOF
+chmod +x "$tmp/remstub" "$tmp/jobrun" "$tmp/pubtoctou"
+
+tick() {  # tick [PUB_RUN]; runs in $tmp so an injected `touch PWNED` would land there
+  cd "$tmp" && env PUB_RUN="${1:-env}" SPOOL="$spool" REMOTE="$tmp/remstub" V100JOB_RUN="$tmp/jobrun" V100_Q="$q" \
+    V100_WORK="$work" V100_ARCHIVE="$arch" STUB_LOG="$tmp/job.log" REM_LOG="$tmp/rem.log" "$sync" 2>"$tmp/err"
+  echo $?
+}
+mkjob() { mkdir -p "$spool/ready/$1"; printf '#!/bin/sh\necho hi\n' >"$spool/ready/$1/run.sh"; }
+
+# ---- tick 1: one good job plus every kind of bad one
+mkjob good; echo data >"$spool/ready/good/in.txt"; mkdir "$spool/ready/good/sub"; echo deep >"$spool/ready/good/sub/f"
+long=$(printf 'a%.0s' $(seq 42))
+for n in A a_b -x "a b" "$long" 'x;touch PWNED' 'y$(touch PWNED2)'; do mkjob "$n"; done
+mkjob .hidden
+mkjob sym; ln -s /etc/passwd "$spool/ready/sym/link"
+mkjob fifo; mkfifo "$spool/ready/fifo/pipe"
+mkjob big; truncate -s 51M "$spool/ready/big/blob"
+mkjob huge; truncate -s 70M "$spool/ready/huge/blob"
+mkdir "$spool/ready/norun"; echo x >"$spool/ready/norun/readme"
+mkjob dup; mkdir -p "$work/3-rnd-dup"; echo mine >"$work/3-rnd-dup/marker"
+mkdir "$tmp/elsewhere"; ln -s "$tmp/elsewhere" "$spool/ready/lnk"   # a top-level symlink entry, not a dir
+check "tick 1 exit" "$(tick)" 0
+
+check "good: work dir has run.sh"      "$(isfile "$work/3-rnd-good/run.sh")" y
+check "good: work dir has input"       "$(cat "$work/3-rnd-good/in.txt" 2>/dev/null)" data
+check "good: work dir nested file"     "$(cat "$work/3-rnd-good/sub/f" 2>/dev/null)" deep
+check "good: queue token exists"       "$(isfile "$q/ready/3-rnd-good/run.sh")" y
+check "good: token run.sh copied"      "$(cat "$q/ready/3-rnd-good/run.sh" 2>/dev/null | tail -n1)" "echo hi"
+check "good: no hidden token left"     "$(exists "$q/ready/.3-rnd-good")" n
+check "good: no incoming dir left"     "$(exists "$work/.incoming-good")" n
+check "good: moved out of ready"       "$(exists "$spool/ready/good")" n
+check "good: moved aside, not lost"    "$(exists "$spool/ready/.submitted-good/run.sh")" y
+check "good: job-user prefix used"     "$(grep -c -e '--no-same-owner --no-same-permissions' "$tmp/job.log")" 1
+check "good: extract ran under prefix" "$(grep -c 'tar -C .*incoming-good' "$tmp/job.log")" 1
+
+for n in A a_b -x "a b" "$long"; do
+  check "bad name rejected: ${n:0:12}" "$(reason "$spool/failed/$n" | grep -c 'name must match')" 1
+  check "bad name not submitted: ${n:0:12}" "$(exists "$work/3-rnd-$n")" n
+done
+check "injection name (;) rejected"    "$(reason "$spool/failed/x;touch PWNED" | grep -c 'name must match')" 1
+check "injection name (\$()) rejected" "$(reason "$spool/failed/y\$(touch PWNED2)" | grep -c 'name must match')" 1
+check "injection never ran"            "$(exists "$tmp/PWNED")$(exists "$tmp/PWNED2")" nn
+check "bad name never reached remote"  "$(grep -c PWNED "$tmp/rem.log")" 0
+check "dot-name ignored"               "$(isfile "$spool/ready/.hidden/run.sh")" y
+check "dot-name not submitted"         "$(exists "$work/3-rnd-.hidden")$(exists "$work/3-rnd-hidden")" nn
+check "symlink in job -> failed"       "$(reason "$spool/failed/sym" | grep -c 'symlink')" 1
+check "fifo in job -> failed"          "$(reason "$spool/failed/fifo" | grep -c 'fifo')" 1
+check ">50MB -> failed"                "$(reason "$spool/failed/big" | grep -c '50 MB')" 1
+check ">50MB+overhead -> failed"       "$(reason "$spool/failed/huge" | grep -c '50 MB')" 1
+check "no run.sh -> failed"            "$(reason "$spool/failed/norun" | grep -c 'run.sh missing')" 1
+check "top-level symlink -> failed"    "$(reason "$spool/failed/lnk" | grep -c 'name must match\|not a directory\|symlink')" 1
+check "top-level symlink not followed" "$(ls "$tmp/elsewhere" | wc -l)" 0
+check "duplicate -> failed"            "$(reason "$spool/failed/dup" | grep -c 'duplicate')" 1
+check "duplicate: existing work kept"  "$(cat "$work/3-rnd-dup/marker")" mine
+check "duplicate: no token made"       "$(exists "$q/ready/3-rnd-dup")" n
+for n in sym fifo big huge norun dup; do check "rejected not submitted: $n" "$(exists "$work/3-rnd-$n")$(exists "$q/ready/3-rnd-$n")" "$([ $n = dup ] && echo yn || echo nn)"; done
+check "rejected left ready"            "$(ls -A "$spool/ready" | grep -v '^\.' | wc -l)" 0
+
+# ---- tick 2: nothing resubmits
+cp -a "$work" "$tmp/work.snap"; : >"$tmp/rem.log"
+check "tick 2 exit" "$(tick)" 0
+check "tick 2 submits nothing"         "$(grep -c submitted "$tmp/err")" 0
+check "tick 2 remote untouched"        "$(diff -r "$work" "$tmp/work.snap" >/dev/null && echo same)" same
+check "tick 2 no remote submit call"   "$(grep -c 'incoming' "$tmp/rem.log")" 0
+
+# ---- tick 3: validation reads the STAGED copy, not the spool the agent can still mutate
+mkjob race1                                   # valid when copied; spool turned hostile right after
+mkjob race2; ln -s /etc/passwd "$spool/ready/race2/planted"   # hostile when copied; spool cleaned right after
+check "tick 3 exit" "$(tick "$tmp/pubtoctou")" 0
+check "toctou: valid-at-copy accepted"  "$(isfile "$work/3-rnd-race1/run.sh")" y
+check "toctou: shipped the staged bytes" "$(tail -n1 "$work/3-rnd-race1/run.sh" 2>/dev/null)" "echo hi"
+check "toctou: later mutation not shipped" "$(exists "$work/3-rnd-race1/evil")" n
+check "toctou: token is staged bytes"   "$(tail -n1 "$q/ready/3-rnd-race1/run.sh" 2>/dev/null)" "echo hi"
+check "toctou: hostile-at-copy rejected" "$(reason "$spool/failed/race2" | grep -c 'symlink')" 1
+check "toctou: hostile-at-copy not shipped" "$(exists "$work/3-rnd-race2")" n
+
+# ---- tick 4: results. good ran (runner moved its token to done/), plus a failed job and an oversized one
+mv "$q/ready/3-rnd-good" "$q/done/3-rnd-good"; echo token-log >"$q/done/3-rnd-good/job.log"
+echo result >"$work/3-rnd-good/out.txt"
+mkdir -p "$q/failed/3-rnd-r2" "$work/3-rnd-r2"; echo token-log >"$q/failed/3-rnd-r2/job.log"; echo work-log >"$work/3-rnd-r2/job.log"; echo x >"$work/3-rnd-r2/ck.pt"
+mkdir -p "$q/done/3-rnd-r3" "$work/3-rnd-r3"; echo biglog >"$q/done/3-rnd-r3/job.log"; truncate -s 201M "$work/3-rnd-r3/big.bin"; echo x >"$work/3-rnd-r3/small"
+mkdir -p "$q/done/3-rnd-BAD"; echo x >"$q/done/3-rnd-BAD/job.log"
+mkdir -p "$q/ready/3-rnd-pending"                         # not finished: must not be touched
+check "tick 4 exit" "$(tick)" 0
+check "result: output back in spool"   "$(cat "$spool/done/good/out.txt" 2>/dev/null)" result
+check "result: work files back"        "$(isfile "$spool/done/good/in.txt")" y
+check "result: job.log is the token log" "$(cat "$spool/done/good/job.log" 2>/dev/null)" token-log
+check "result: failed state mirrored"  "$(cat "$spool/failed/r2/job.log" 2>/dev/null)" token-log
+check "result: failed work files back" "$(isfile "$spool/failed/r2/ck.pt")" y
+check "result: token to collected"     "$(isfile "$q/collected/3-rnd-good/job.log")" y
+check "result: token left done/"       "$(exists "$q/done/3-rnd-good")" n
+check "result: work to archive"        "$(cat "$arch/3-rnd-good/out.txt" 2>/dev/null)" result
+check "result: work left work/"        "$(exists "$work/3-rnd-good")" n
+check "result: failed token collected" "$(exists "$q/collected/3-rnd-r2/job.log")$(exists "$q/failed/3-rnd-r2")" yn
+check ">200MB: log only"               "$(cat "$spool/done/r3/job.log" 2>/dev/null)" biglog
+check ">200MB: TRUNCATED note"         "$(grep -c '200 MB' "$spool/done/r3/TRUNCATED" 2>/dev/null)" 1
+check ">200MB: big file not copied"    "$(exists "$spool/done/r3/big.bin")$(exists "$spool/done/r3/small")" nn
+check ">200MB: still retired"          "$(exists "$arch/3-rnd-r3/big.bin")$(exists "$q/collected/3-rnd-r3")" yy
+check "bad result name ignored"        "$(exists "$q/done/3-rnd-BAD")$(exists "$spool/done/BAD")" yn
+check "unfinished token untouched"     "$(exists "$q/ready/3-rnd-pending")" y
+
+# ---- tick 5: nothing is collected twice
+find "$spool" "$q" "$arch" | sort >"$tmp/tree1"
+check "tick 5 exit" "$(tick)" 0
+find "$spool" "$q" "$arch" | sort >"$tmp/tree2"
+check "tick 5 collects nothing"        "$(grep -c collected "$tmp/err")" 0
+check "tick 5 tree unchanged"          "$(cmp -s "$tmp/tree1" "$tmp/tree2" && echo same)" same
+check "no duplicate result dirs"       "$(ls "$spool/done" "$spool/failed" | grep -c '\.[0-9]\{6,\}$')" 0
+
+exit $fails
