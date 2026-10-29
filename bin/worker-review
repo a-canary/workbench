@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# worker-review — default reviewer for worker-task --review. stdin: task, blank line, staged diff.
+# stdout: first line PASS, or FAIL: <reason>. Non-zero exit on any transport/parse failure.
+set -euo pipefail
+in=$(cat)
+sys='You review a worker'"'"'s diff against its task. Reply PASS if the diff does only what the task asks; otherwise reply FAIL: <reason>. First line is the verdict.'
+body=$(jq -n --arg m "${WORKER_PRIVATE_MODEL:-queue}" --arg s "$sys" --arg u "$in" \
+  '{model:$m,messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
+curl -sS --fail --max-time 300 -H 'Content-Type: application/json' -d "$body" \
+  "http://127.0.0.1:${WORKER_PRIVATE_PORT:-8099}/v1/chat/completions" | jq -er '.choices[0].message.content'
