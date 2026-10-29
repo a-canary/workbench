@@ -88,7 +88,7 @@ LANE=public run "public lane GREEN runs" '' ok
 
 # repos-ecu.15 --review: WORKER_REVIEW_CMD gets the task + staged diff on stdin; first stdout line
 # must be exactly PASS or the commit is refused (fail closed). Without --review it never runs.
-printf '#!/bin/sh\nin=$(cat); case $in in *"make ok exist"*"+++ b/ok"*) echo PASS ;; *) echo "FAIL: no task/diff on stdin" ;; esac\n' > "$tmp/rv-pass"
+printf '#!/bin/sh\nin=$(cat); case $in in *"make ok exist"*"diff --git a/ok b/ok"*) echo PASS ;; *) echo "FAIL: no task/diff on stdin" ;; esac\n' > "$tmp/rv-pass"
 printf '#!/bin/sh\ncat >/dev/null; echo "FAIL: off-task edit"\n' > "$tmp/rv-fail"
 printf '#!/bin/sh\ncat >/dev/null; echo LGTM\n' > "$tmp/rv-vague"
 printf '#!/bin/sh\ncat >/dev/null; echo PASS; exit 1\n' > "$tmp/rv-crash"

@@ -84,12 +84,9 @@ log "GREEN: $test"
 (cd "$wt" && gitleaks protect --staged --redact --no-banner --config "$here/gitleaks.toml" >&2) || die "gitleaks flagged the diff"
 
 # optional independent review (fail closed): reviewer reads task + staged diff, first line must be exactly PASS.
-# git prints no ---/+++ headers for an empty new file, so emit them: the reviewer must see every added path.
 if [ -n "$review" ]; then
-  verdict=$({ cat "$task"; echo; g -c diff.noprefix=false diff --cached --src-prefix=a/ --dst-prefix=b/
-    g diff --cached --numstat -z --diff-filter=A | while IFS=$'\t' read -r -d '' a d f; do
-      [ "$a/$d" = 0/0 ] && printf -- '--- /dev/null\n+++ b/%s\n' "$f"; done; } \
-    | "${WORKER_REVIEW_CMD:-$here/worker-review}") || die "review FAIL: reviewer error"
+  verdict=$({ cat "$task"; echo; g diff --cached; } | "${WORKER_REVIEW_CMD:-$here/worker-review}") \
+    || die "review FAIL: reviewer error"
   first=$(head -n1 <<<"$verdict")
   [ "$first" = PASS ] || die "review FAIL: ${first:0:200}"
   log "review PASS"
