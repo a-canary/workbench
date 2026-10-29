@@ -23,6 +23,6 @@ export const readSteer = (path: string): Steer => norm(readRaw(path));
 export function consumeSteer(path: string, id: string): Steer["notes"] {
   const raw = readRaw(path);
   const s = norm(raw);
-  writeFileSync(path, JSON.stringify({ ...raw, pin: s.pin.filter((p) => p !== id), notes: [] }, null, 2));
+  writeFileSync(path, JSON.stringify({ ...raw, ...s, pin: s.pin.filter((p) => p !== id), notes: [] }, null, 2));
   return s.notes;
 }

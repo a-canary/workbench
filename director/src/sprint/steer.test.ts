@@ -33,7 +33,10 @@ test("consumeSteer: returns notes once, drops the started pin, keeps the rest", 
 test("consumeSteer: missing file writes empty steering", () => {
   const p = tmp();
   expect(consumeSteer(p, "a")).toEqual([]);
-  expect(readSteer(p)).toEqual({ pin: [], skip: [], notes: [] });
+  expect(JSON.parse(readFileSync(p, "utf8"))).toEqual({ pin: [], skip: [], notes: [] });
+  writeFileSync(p, JSON.stringify({ pin: ["a"], skip: "bad" }));
+  consumeSteer(p, "a");
+  expect(JSON.parse(readFileSync(p, "utf8"))).toEqual({ pin: [], skip: [], notes: [] });
 });
 
 test("non-object JSON (null, array) is empty steering, and the empty result is not shared", () => {
