@@ -26,7 +26,7 @@ fi
 # (1) clean export of --head (tracked files only — no .env, no .git)
 worktree=$(mktemp -d)
 trap 'rm -rf "$worktree"' EXIT
-git -C "$repo" archive "$head" | tar -x -C "$worktree"
+git -C "$repo" archive "$head" | tar -x -C "$worktree" || { echo "sandbox-review: cannot export $head" >&2; exit 2; }
 
 # (2) task file: spec, blank line, diff base..head
 task=$worktree/.task
