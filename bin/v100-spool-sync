@@ -200,7 +200,8 @@ submit_job() {
     # an unreadable path inside the job is the job's fault and never heals: reject now. Any other copy
     # failure (stage disk full, sudo flapping) is infra: retry uncounted, so it can never reject a good job.
     bad=$(pub find "$SPOOL/ready/$name" ! -readable -print -quit 2>/dev/null) || true
-    if [ -n "$bad" ]; then reject "$name" "unreadable by the agent: ${bad#"$SPOOL/ready/"}"; return 0; fi
+    # the path is agent-chosen: strip non-printables so it cannot forge lines in the operator's log
+    if [ -n "$bad" ]; then bad=${bad#"$SPOOL/ready/"}; reject "$name" "unreadable by the agent: ${bad//[^[:print:]]/?}"; return 0; fi
     fail "copy of $name failed (rc $rc), retry next tick"; return 0
   fi
   # inspect the archive before extracting: no traversal, and only regular files/dirs (no links, devices, fifos)

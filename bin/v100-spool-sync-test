@@ -406,12 +406,13 @@ mkjob stf; printf deadbeef >"$spool/ready/stf/.v100-submit-sha"
 check "stamp-name file: rejected too" "$(tick)$(reason "$spool/failed/stf" | grep -c 'v100-submit-sha')$(exists "$work/3-rnd-stf")" 01n
 
 # ---- wb-4gf item 1: a job with a file the agent cannot read is rejected on the first failed copy, not re-copied every tick
-# ponytail: chmod 000 is no barrier for uid 0; run the harness as a normal user.
-mkjob unr; echo secret >"$spool/ready/unr/locked"; chmod 000 "$spool/ready/unr/locked"
-check "unreadable file: tick exits clean after rejecting" "$(tick)" 0
-check "unreadable file: rejected with a REASON naming the file" "$(exists "$spool/ready/unr")$(reason "$spool/failed/unr" | grep -c 'unreadable by the agent: unr/locked')" n1
-check "unreadable file: never shipped" "$(exists "$work/3-rnd-unr")$(exists "$q/ready/3-rnd-unr")" nn
-chmod -R u+rwX "$spool/failed/unr" 2>/dev/null
+if [ "$(id -u)" = 0 ]; then echo "SKIP  unreadable file: chmod 000 is no barrier for uid 0"; else
+  mkjob unr; echo secret >"$spool/ready/unr/locked"; chmod 000 "$spool/ready/unr/locked"
+  check "unreadable file: tick exits clean after rejecting" "$(tick)" 0
+  check "unreadable file: rejected with a REASON naming the file" "$(exists "$spool/ready/unr")$(reason "$spool/failed/unr" | grep -c 'unreadable by the agent: unr/locked')" n1
+  check "unreadable file: never shipped" "$(exists "$work/3-rnd-unr")$(exists "$q/ready/3-rnd-unr")" nn
+  chmod -R u+rwX "$spool/failed/unr" 2>/dev/null
+fi
 
 # ---- wb-4gf review: a copy failure with nothing unreadable (stage disk full, sudo flapping) is infra: retried, never rejected
 mkdir -p "$tmp/faketar"; printf '#!/bin/sh
