@@ -46,3 +46,24 @@ test("ignores unrelated commands and non-Bash tools", () => {
   expect(run("echo claude -p", "Read")).toBe(0);
   expect(run("bun test pipeline.test.ts")).toBe(0);
 });
+
+// PR #67 review: bypasses of the first-word check (all must block)
+test("blocks agent runs behind wrappers, nested shells and substitutions", () => {
+  for (const c of [
+    "timeout 600 claude -p x", "exec claude -p x", "command claude -p x", "sudo claude -p x", "nice -n 5 pi -p x",
+    "stdbuf -o0 claude -p x", "xargs claude -p", "ls | xargs -I{} pi -p {}", 'bash -c "claude -p x"', "sh -lc 'a; claude -p x'",
+    "eval claude -p x", "x=$(claude -p x)", 'echo "$(pi -p x)"', "echo `claude -p x`", "( claude -p x )", "{ claude -p x; }",
+    "claude -pq x", 'FOO="a b" claude -p x', "cd x&&claude -p x", "ls\nclaude -p x",
+    'claude --allowedTools "" --allowedTools Bash -p x', "claude -p 'x --allowedTools \"\" y'",
+    'claude -p --allowedTools "" --dangerously-skip-permissions x', 'claude -p --allowedTools "" --mcp-config m.json x',
+    'claude -p "unbalanced',
+  ]) expect([c, run(c)]).toEqual([c, 2]);
+});
+
+test("quoted text mentioning claude -p is data, not a run", () => {
+  for (const c of [
+    'echo "a | claude -p foo"', 'git commit -m "x; claude -p y"', 'echo "use claude -p; pi -p ok"', "echo claude -p",
+    "git log --author claude -p", "claude --version", "pi --help",
+  ]) expect([c, run(c)]).toEqual([c, 0]);
+  expect(run('claude -p --allowedTools= "q"')).toBe(0);
+});
