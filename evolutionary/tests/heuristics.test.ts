@@ -112,16 +112,15 @@ describe('countTypeHintCoverage', () => {
     expect(countTypeHintCoverage(code)).toBe(1);
   });
 
-  it('returns 0.5 for untyped function', () => {
+  it('returns 0 for untyped function', () => {
     const code = 'function add(a, b) { return a + b; }';
-    expect(countTypeHintCoverage(code)).toBe(0.5);
+    expect(countTypeHintCoverage(code)).toBe(0);
   });
 
   it('returns partial for partially typed params', () => {
     const code = 'function add(a: number, b) { return a; }';
-    const cov = countTypeHintCoverage(code);
-    expect(cov).toBeGreaterThan(0.3);
-    expect(cov).toBeLessThan(1);
+    // (1 typed / 2 params + 0 return) / 2 = 0.25
+    expect(countTypeHintCoverage(code)).toBe(0.25);
   });
 
   it('returns partial when return is untyped', () => {
@@ -326,9 +325,11 @@ describe('evaluateCyclomaticComplexity', () => {
   });
 
   it('returns fitness = 0 for max complexity', () => {
-    const body = 'if (a) { if (b) { if (c) { if (d) { if (e) { if (f) {} } } } } }';
-    const code = `function deep(a, b, c, d, e, f) { ${body} }`;
+    // CC = 1 + 19 decision points = 20 = MAX_CC_FITNESS → fitness 0
+    const body = Array.from({ length: 19 }, (_, i) => `if (a${i}) {}`).join(' ');
+    const code = `function deep(a) { ${body} }`;
     const result = evaluateCyclomaticComplexity(codeInd(code));
+    expect(result.metrics.maxComplexity).toBe(20);
     expect(result.fitness).toBe(0);
   });
 
