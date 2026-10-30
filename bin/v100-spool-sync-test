@@ -378,6 +378,51 @@ check "symlink job.log: work still delivered, retired" "$(cat "$spool/done/lk/wo
 finished done lkd; unlink "$q/done/3-rnd-lkd/job.log"; mkdir "$q/done/3-rnd-lkd/job.log"   # not a regular file either
 check "dir job.log: tick exit, empty log, noted" "$(tick)$(wc -c <"$spool/done/lkd/job.log")$(grep -c 'not a regular file' "$spool/done/lkd/TRUNCATED")" 001
 
+# ---- review 3, item 1: infra faults (job-user sudo down: the probe prints nothing) are never counted against the job
+finished done inf
+for k in 1 2 3 4 5; do
+  check "infra fault: tick $k exits nonzero, nothing delivered, nothing counted" "$(tick JOB_PROBE_FAIL=empty)$(exists "$spool/done/inf")$(exists "$tmp/state/done.inf")" 1nn
+done
+check "infra fault: recovery delivers the work, not log-only" "$(tick)$(cat "$spool/done/inf/work/out.txt")$(exists "$spool/done/inf/TRUNCATED")" 0out-infn
+finished done inf2
+check "infra fault: ssh lost on the probe is not counted either" "$(tick REM_FAIL_TAG=prep REM_FAIL_MODE=before)$(exists "$tmp/state/done.inf2")" 1n
+check "infra fault: and the retry delivers the work" "$(tick)$(cat "$spool/done/inf2/work/out.txt")" 0out-inf2
+
+# ---- review 3, item 2: a partial extract that leaves a 0500 dir cannot wedge the result dir; every failure is counted
+printf '#!/bin/sh\ncase " $* " in *" -xf "*) "$@"; exit 2 ;; esac\nexec "$@"\n' >"$tmp/pubpart"; chmod +x "$tmp/pubpart"
+finished done pw; mkdir "$work/3-rnd-pw/d"; echo x >"$work/3-rnd-pw/d/f"; chmod 500 "$work/3-rnd-pw/d"
+for k in 1 2; do
+  check "partial extract: tick $k counted, no wedge, no temp left" "$(tick PUB_RUN="$tmp/pubpart")$(cat "$tmp/state/done.pw")$(ls -A "$spool/done" | grep -c '^\.dest-tmp-pw')" "1${k}0"
+done
+check "partial extract: tick 3 degrades to log only" "$(tick PUB_RUN="$tmp/pubpart")$(cat "$spool/done/pw/job.log")$(exists "$spool/done/pw/work")$(ls -A "$spool/done" | grep -c '^\.dest-tmp-pw')" 1log-pwn0
+chmod -R u+rwX "$work" 2>/dev/null
+
+# ---- review 3, item 3: a job that ships the reserved stamp name (here a directory) is rejected, not retried forever
+mkjob stp; mkdir "$spool/ready/stp/.v100-submit-sha"; echo x >"$spool/ready/stp/.v100-submit-sha/f"
+check "stamp-name dir: tick exits clean" "$(tick)" 0
+check "stamp-name dir: rejected with a reason" "$(reason "$spool/failed/stp" | grep -c 'v100-submit-sha')" 1
+check "stamp-name dir: not shipped, not left in ready" "$(exists "$work/3-rnd-stp")$(exists "$work/.incoming-stp")$(exists "$spool/ready/stp")" nnn
+mkjob stf; printf deadbeef >"$spool/ready/stf/.v100-submit-sha"
+check "stamp-name file: rejected too" "$(tick)$(reason "$spool/failed/stf" | grep -c 'v100-submit-sha')$(exists "$work/3-rnd-stf")" 01n
+
+# ---- review 3, item 4: an unreadable job.log is a read error (retried, then the 10x give-up), not a silent empty log
+mkdir -p "$tmp/faketail"; printf '#!/bin/sh\necho "tail: cannot open job.log: Permission denied" >&2\nexit 1\n' >"$tmp/faketail/tail"; chmod +x "$tmp/faketail/tail"
+finished done ul
+check "unreadable log: tick 1 exits nonzero, not delivered" "$(tick PATH="$tmp/faketail:$PATH")$(exists "$spool/done/ul")$(cat "$tmp/state/done.ul")" 1n1
+for k in 2 3 4 5 6 7 8 9; do tick PATH="$tmp/faketail:$PATH" >/dev/null; done
+check "unreadable log: tick 10 gives up with an empty log + note" "$(tick PATH="$tmp/faketail:$PATH")$(wc -c <"$spool/done/ul/job.log")$(grep -c 'collect failed 10x' "$spool/done/ul/TRUNCATED")" 101
+finished done ml; unlink "$q/done/3-rnd-ml/job.log"
+check "missing log: still an empty log, clean" "$(tick)$(wc -c <"$spool/done/ml/job.log")" 00
+
+# ---- review 3, item 5: a counter that cannot be written fails the tick loudly; sha-less tokens get distinct markers
+finished done cw; mkdir -p "$tmp/state/done.cw"
+check "counter write fails: loud, nothing delivered" "$(tick JOB_DU_EMPTY=1)$(grep -c 'cannot write attempt counter' "$tmp/err")$(exists "$spool/done/cw")$(ls -A "$spool/done" | grep -c '^\.dest-tmp-cw')" 11n0
+rmdir "$tmp/state/done.cw"
+finished done ns1; finished done ns2
+check "sha-less tokens: tick exit" "$(tick)" 0
+m1=$(cat "$spool/done/ns1/.v100-delivered"); m2=$(cat "$spool/done/ns2/.v100-delivered")
+check "sha-less tokens: markers distinct, 64 hex" "$([ "$m1" != "$m2" ] && echo d)$(printf %s "$m1$m2" | grep -c '^[0-9a-f]\{128\}$')" d1
+
 # ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
 mkdir -p "$tmp/bin" "$tmp/emptyspool"
 printf '#!/bin/sh\necho "$*" >>"$SSH_LOG"\nexit 255\n' >"$tmp/bin/ssh"; chmod +x "$tmp/bin/ssh"

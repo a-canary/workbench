@@ -26,6 +26,7 @@
 # sit at, or redirect a write at, the top level the operator writes (job.log, TRUNCATED, marker).
 # Poison results degrade instead of retrying forever: the 3rd failed collect delivers job.log only, the 10th gives
 # up on the log too (empty job.log + note) and retires, one loud line each. Counters live in $V100_STATE.
+# Only job-specific faults count. An infra fault (unreadable probe, job-user sudo down, ssh lost) retries uncounted.
 set -euo pipefail
 export LC_ALL=C
 
@@ -117,13 +118,15 @@ R_LIST="$(pre list)"'
 for s in done failed; do for d in "$Q/$s"/3-rnd-*; do
   [ -d "$d" ] && [ ! -L "$d" ] || continue
   x=; if [ -f "$d/.sha" ] && [ ! -L "$d/.sha" ]; then x=$(head -c 64 "$d/.sha" | tr -dc 0-9a-f); fi
+  # no usable sha: a stable per-token id (inode+mtime), so a retry recognises its own delivery and two tokens never share one
+  [ "${#x}" = 64 ] || x=$(stat -c %i-%Y "$d" | sha256sum | cut -c1-64)
   printf "%s %s %s\n" "$s" "${d##*/}" "$x"
 done; done
 exit 0'
 R_PREP="$(pre prep)"'
 w=$W/3-rnd-$2 max=$3
 p=$('"$PROBE"' "$w")
-case $p in no) echo none; exit 0 ;; yes) ;; *) exit 9 ;; esac
+case $p in no) echo none; exit 0 ;; yes) ;; *) echo infra; exit 0 ;; esac
 sz=$($RUN du -sb -- "$w") || exit 9
 sz=${sz%%[!0-9]*}
 [ -n "$sz" ] || exit 9
@@ -131,7 +134,9 @@ if [ "$sz" -gt "$max" ]; then echo big; else echo ok; fi'
 R_LOG="$(pre log)"'
 f=$Q/$1/3-rnd-$2/job.log
 if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then exit 4; fi
-tail -c 52428800 "$f" 2>/dev/null; exit 0'
+[ -e "$f" ] || exit 0
+tail -c 52428800 "$f" || exit 5
+exit 0'
 R_WORK="$(pre work)"'
 exec $RUN tar -C "$W/3-rnd-$2" -cf - .'
 R_FINAL="$(pre final)"'
@@ -199,6 +204,8 @@ submit_job() {
   if [ -n "$bad" ]; then reject "$name" "symlink, device or fifo in job"; return 0; fi
   [ -d "$d" ] || { reject "$name" "not a directory"; return 0; }
   [ -f "$d/run.sh" ] || { reject "$name" "run.sh missing"; return 0; }
+  # the submit stamp is ours: a job shipping that name (a dir would fail the stamp write on every tick) is refused
+  if [ -e "$d/.v100-submit-sha" ] || [ -L "$d/.v100-submit-sha" ]; then reject "$name" "reserved name .v100-submit-sha in job"; return 0; fi
   sz=$(du -sb -- "$d" | cut -f1) || { reject "$name" "size check failed"; return 0; }
   if [ "$sz" -gt "$MAXB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
   # the shipped bytes are the staged tar; its sha256 is the job's content id
@@ -224,14 +231,19 @@ submit_one() {
   return $rc
 }
 
+# wipe PATH: best-effort delete as the agent. A partial extract can leave 0500 dirs that rm cannot enter, so chmod first.
+wipe() { pub chmod -R u+rwX -- "$1" 2>/dev/null || true; pub rm -rf -- "$1"; }
+# bump: count one failed attempt in collect's att/sf (bash dynamic scope); nonzero if the counter cannot be persisted
+bump() { att=$((att + 1)); printf %s "$att" >"$sf"; }
+
 # collect STATE NAME SHA: remote done|failed/3-rnd-NAME -> spool STATE/NAME/{job.log,work/} (via a hidden temp dir +
 # rename), then retire the remote copies. SHA (the token's) is written into the marker: a dest whose marker holds
 # another sha is some other job's, so we take the next .N. A delivered result is only retired, never redelivered.
 # Failures are counted in $STATE (never in the agent's spool): attempt 3 falls back to job.log only, attempt 10
 # gives up on the log too (empty job.log) and retires.
 collect() {
-  local s=$1 name=$2 jsha=$3 tmpd=$SPOOL/$1/.dest-tmp-$2 sf=$STATE/$1.$2 dest= delivered= cand i mode wf= notes= cnt rc att=0
-  [[ $jsha =~ ^[0-9a-f]{64}$ ]] || jsha=nosha
+  local s=$1 name=$2 jsha=$3 tmpd=$SPOOL/$1/.dest-tmp-$2.$$ sf=$STATE/$1.$2 dest= delivered= cand i mode wf= inf= notes= cnt rc prc att=0
+  [[ $jsha =~ ^[0-9a-f]{64}$ ]] || jsha=nosha-$(date +%s%N)-$$   # unique: two sha-less jobs never share a marker
   for i in "" .2 .3 .4 .5 .6 .7 .8 .9; do
     cand=$SPOOL/$s/$name$i
     if ! pub test -e "$cand"; then dest=$cand; break; fi
@@ -241,16 +253,21 @@ collect() {
   if [ -z "$delivered" ]; then
     if [ -r "$sf" ]; then att=$(<"$sf"); fi
     [[ $att =~ ^[0-9]+$ ]] || att=0
-    pub rm -rf -- "$tmpd"
+    # sweep dead earlier attempts; each attempt has its own dir, so one stuck dir can never wedge the next tick
+    pub find "$SPOOL/$s" -mindepth 1 -maxdepth 1 \( -name ".dest-tmp-$name" -o -name ".dest-tmp-$name.*" \) \
+      -exec chmod -R u+rwX {} + -exec rm -rf {} + 2>/dev/null || true
     pub mkdir -- "$tmpd" || { fail "cannot create result dir for $name"; return 1; }
     if [ "$att" -ge "$WORKTRIES" ]; then notes="work collect failed ${WORKTRIES}x: only job.log returned"
     else
-      mode=$(rsh "$R_PREP" "$s" "$name" "$OUTMAX" </dev/null) || mode=
+      prc=0; mode=$(rsh "$R_PREP" "$s" "$name" "$OUTMAX" </dev/null) || prc=$?
+      # an unreadable probe (sudo/ssh down) is the infrastructure's fault, not the job's: retry, never count it
+      if [ "$mode" = infra ] || [ "$prc" = 255 ]; then inf="remote probe failed (rc $prc, '$mode')"; mode=none; fi
       case $mode in
         none) ;;
         big) notes="work dir over 200 MB: only job.log returned" ;;
         ok) rc=0; rsh "$R_WORK" "$s" "$name" </dev/null | head -c $((STREAMCAP + 1)) >"$stage/res.tar" || rc=$?
             if [ "$(stat -c %s "$stage/res.tar")" -gt "$STREAMCAP" ]; then notes="work stream over the size cap: only job.log returned"
+            elif [ "$rc" = 255 ]; then inf="work stream lost (ssh rc 255)"
             elif [ "$rc" != 0 ]; then wf="work stream failed (rc $rc)"
             elif ! cnt=$(tar -tf "$stage/res.tar" | wc -l); then wf="work stream unreadable"
             elif [ "$cnt" -gt "$MAXFILES" ]; then notes="work dir over $MAXFILES files: only job.log returned"
@@ -260,10 +277,11 @@ collect() {
         *) wf="size check gave '$mode'" ;;
       esac
     fi
+    if [ -n "$inf" ]; then wipe "$tmpd"; fail "collect of $name failed ($inf), retry next tick (not counted)"; return 1; fi
     if [ -n "$wf" ]; then
-      att=$((att + 1)); printf %s "$att" >"$sf"
-      pub rm -rf -- "$tmpd/work"
-      if [ "$att" -lt "$WORKTRIES" ]; then pub rm -rf -- "$tmpd"; fail "collect of $name failed ($wf), attempt $att/$WORKTRIES, retry next tick"; return 1; fi
+      bump || { wipe "$tmpd"; fail "collect of $name: cannot write attempt counter $sf"; return 1; }
+      wipe "$tmpd/work"
+      if [ "$att" -lt "$WORKTRIES" ]; then wipe "$tmpd"; fail "collect of $name failed ($wf), attempt $att/$WORKTRIES, retry next tick"; return 1; fi
       notes="work collect failed ${WORKTRIES}x: only job.log returned"
       fail "collect of $name: work failed $WORKTRIES times ($wf), delivering job.log only"
     fi
@@ -271,15 +289,15 @@ collect() {
     case $rc in
       0) ;;
       4) : >"$stage/log"; notes+="${notes:+$'\n'}job.log is not a regular file: empty job.log returned" ;;
-      *) att=$((att + 1)); printf %s "$att" >"$sf"
-         if [ "$att" -lt "$LOGTRIES" ]; then pub rm -rf -- "$tmpd"; fail "collect of $name failed (log), attempt $att/$LOGTRIES, retry next tick"; return 1; fi
+      *) bump || { wipe "$tmpd"; fail "collect of $name: cannot write attempt counter $sf"; return 1; }
+         if [ "$att" -lt "$LOGTRIES" ]; then wipe "$tmpd"; fail "collect of $name failed (log), attempt $att/$LOGTRIES, retry next tick"; return 1; fi
          : >"$stage/log"; notes+="${notes:+$'\n'}job.log collect failed ${LOGTRIES}x: empty job.log returned"
          fail "collect of $name: log failed $LOGTRIES times, delivering an empty job.log and retiring" ;;
     esac
     if { [ -z "$notes" ] || printf '%s\n' "$notes" | pub tee -- "$tmpd/TRUNCATED" >/dev/null; } &&
        pub tee -- "$tmpd/job.log" >/dev/null <"$stage/log" &&
        printf %s "$jsha" | pub tee -- "$tmpd/$MARK" >/dev/null && pub mv -T -- "$tmpd" "$dest"; then :
-    else pub rm -rf -- "$tmpd"; fail "collect of $name failed (finish), retry next tick"; return 1; fi
+    else wipe "$tmpd"; fail "collect of $name failed (finish), retry next tick"; return 1; fi
   fi
   rsh "$R_FINAL" "$s" "$name" </dev/null || { fail "remote retire of $name failed, retry next tick"; return 1; }
   rm -f -- "$sf"
