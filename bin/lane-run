@@ -78,6 +78,10 @@ interrupted() {
 }
 
 down=
+endpoint_up() {
+  local port=${WORKER_PRIVATE_PORT:-8099}; [ "$lane" != public ] || port=${WORKER_PUBLIC_PORT:-20128}
+  curl -sf -m 5 -o /dev/null "http://127.0.0.1:$port/v1/models" || { log "model endpoint :$port down; not claiming"; return 1; }
+}
 lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout before the model runs
   [ -n "${LANES_URL:-}" ] || return 1
   local n; n=$(curl -s -m 5 "$LANES_URL" | jq -er '.waiting | length' 2>/dev/null) || return 1
@@ -86,6 +90,7 @@ lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout bef
 }
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
   local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
+  endpoint_up || { down=1; return 1; }
   [ "$lane" = public ] || ! lane_busy || return 1  # the 9router lane does not queue on laneproxy
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
