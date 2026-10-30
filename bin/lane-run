@@ -161,6 +161,10 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
        sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;
   esac
+  # a failed branch's commits survive on origin as <branch>-failed-<epoch> before we drop the local copy
+  if [ -n "$made" ] && [ $rc -ne 0 ] && [ $rc -ne 3 ] && [ "$(git -C "$repo" rev-parse -q --verify "refs/heads/$branch")" != "$base" ]; then
+    git -C "$repo" push -q origin "refs/heads/$branch:refs/heads/$branch-failed-$(date +%s)" 2>/dev/null || log "$id: could not push $branch-failed-*"
+  fi
   # pushed or failed, the local branch is ours to drop; after rc=3 it holds the only copy of GREEN
   [ -z "$made" ] || [ $rc -eq 3 ] || git -C "$repo" branch -q -D -- "$branch" 2>/dev/null
   rm -f "$wlog"; trap - INT TERM HUP; [ -z "$sig" ] || exit 130
