@@ -405,6 +405,25 @@ check "stamp-name dir: not shipped, not left in ready" "$(exists "$work/3-rnd-st
 mkjob stf; printf deadbeef >"$spool/ready/stf/.v100-submit-sha"
 check "stamp-name file: rejected too" "$(tick)$(reason "$spool/failed/stf" | grep -c 'v100-submit-sha')$(exists "$work/3-rnd-stf")" 01n
 
+# ---- wb-4gf item 1: a job with a file the agent cannot read is rejected on the first failed copy, not re-copied every tick
+if [ "$(id -u)" = 0 ]; then echo "SKIP  unreadable file: chmod 000 is no barrier for uid 0"; else
+  mkjob unr; echo secret >"$spool/ready/unr/locked"; chmod 000 "$spool/ready/unr/locked"
+  check "unreadable file: tick exits clean after rejecting" "$(tick)" 0
+  check "unreadable file: rejected with a REASON naming the file" "$(exists "$spool/ready/unr")$(reason "$spool/failed/unr" | grep -c 'unreadable by the agent: unr/locked')" n1
+  check "unreadable file: never shipped" "$(exists "$work/3-rnd-unr")$(exists "$q/ready/3-rnd-unr")" nn
+  chmod -R u+rwX "$spool/failed/unr" 2>/dev/null
+fi
+
+# ---- wb-4gf review: a copy failure with nothing unreadable (stage disk full, sudo flapping) is infra: retried, never rejected
+mkdir -p "$tmp/faketar"; printf '#!/bin/sh
+case "$*" in *"-cf - --"*) echo "tar: write error: No space left on device" >&2; exit 2 ;; esac
+exec %s "$@"
+' "$(command -v tar)" >"$tmp/faketar/tar"; chmod +x "$tmp/faketar/tar"
+mkjob cpf
+for k in 1 2 3 4; do tick PATH="$tmp/faketar:$PATH" >/dev/null; done
+check "infra copy failure: still in ready after 4 failed ticks, no reject" "$(exists "$spool/ready/cpf/run.sh")$(exists "$spool/failed/cpf")" yn
+check "infra copy failure: ships once the copy works" "$(tick)$(exists "$spool/ready/cpf")" 0n
+
 # ---- review 3, item 4: an unreadable job.log is a read error (retried, then the 10x give-up), not a silent empty log
 mkdir -p "$tmp/faketail"; printf '#!/bin/sh\necho "tail: cannot open job.log: Permission denied" >&2\nexit 1\n' >"$tmp/faketail/tail"; chmod +x "$tmp/faketail/tail"
 finished done ul
