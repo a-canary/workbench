@@ -6,12 +6,13 @@
                                      # path must be in RELAY_PATHS, Authorization is replaced
                                      # with RELAY_KEY (so the key never enters the sandbox),
                                      # and a POST body's "model" is forced to RELAY_MODEL if set
+  relay.py unix2https SOCK HOST:PORT # unix2http to a TLS upstream (system CAs, SNI); Host forced to HOST
   relay.py tcp2unix HOST:PORT SOCK   # sandbox side: listen on HOST:PORT, dial SOCK
 
 The sandbox has no network namespace route out; this pair is the only door,
 and it opens onto exactly one upstream endpoint.
 """
-import json, os, re, socket, sys, threading, time
+import json, os, re, socket, ssl, sys, threading, time
 
 def pipe(a, b):
     try:
@@ -99,6 +100,8 @@ def http_one(c, dial):
         body = json.dumps(req).encode(); length = len(body)
         keep = [h for h in keep if h.partition(b":")[0].lower() != b"content-length"] + [b"Content-Length: %d" % length]
     keep.append(b"Connection: close")
+    if os.environ.get("RELAY_HOST"):  # a remote upstream routes on Host; the jail's says 127.0.0.1
+        keep = [h for h in keep if h.partition(b":")[0].lower() != b"host"] + [b"Host: " + os.environ["RELAY_HOST"].encode()]
     if os.environ.get("RELAY_KEY"): keep.append(b"Authorization: Bearer " + os.environ["RELAY_KEY"].encode())
     with dial() as u:  # dial only once the head passed
         u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
@@ -143,10 +146,15 @@ def hostport(s):
 
 if __name__ == "__main__":
     mode, a, b = sys.argv[1:4]
-    if mode in ("unix2tcp", "unix2http"):
+    if mode in ("unix2tcp", "unix2http", "unix2https"):
         if os.path.exists(a): os.unlink(a)
         l = socket.socket(socket.AF_UNIX); l.bind(a); l.listen(64)
         dial = lambda: socket.create_connection(hostport(b))
+        if mode == "unix2https":
+            host, ctx = hostport(b)[0], ssl.create_default_context()  # verifies the cert chain and hostname
+            os.environ["RELAY_HOST"] = host
+            dial = lambda: ctx.wrap_socket(socket.create_connection(hostport(b)), server_hostname=host)
+            mode = "unix2http"
         if mode == "unix2tcp": serve(l, dial)
         while True:
             c, _ = l.accept()
