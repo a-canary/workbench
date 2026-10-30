@@ -112,19 +112,22 @@ def http_one(c, dial):
         respond(u, c)
 
 def respond(u, c):
-    """Pass the response through with Connection: close in its head, so a keep-alive client opens a
+    """Pass the response through with Connection: close in every head, so a keep-alive client opens a
     new connection for its next request instead of waiting on this one (whose 2nd request is dropped).
-    ponytail: only the first head is rewritten; after a 1xx (Expect: 100-continue) the final head passes
-    as-is. Loop over 1xx heads if a client in the jail ever sends Expect."""
+    A 1xx interim head (Expect: 100-continue) is rewritten too, then the next head is read."""
     buf = b""
-    while b"\r\n\r\n" not in buf:
-        d = u.recv(65536)
-        if not d or len(buf) > 65536: c.sendall(buf); return  # no head: pass through, then close
-        buf += d
-    head, rest = buf.split(b"\r\n\r\n", 1)
-    line, *hdrs = head.split(b"\r\n")
-    hdrs = [h for h in hdrs if h.partition(b":")[0].strip().lower() not in (b"connection", b"keep-alive")]
-    c.sendall(b"\r\n".join([line, *hdrs, b"Connection: close"]) + b"\r\n\r\n" + rest)
+    while True:
+        while b"\r\n\r\n" not in buf:
+            d = u.recv(65536)
+            if not d or len(buf) > 65536: c.sendall(buf); return  # no head: pass through, then close
+            buf += d
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        line, *hdrs = head.split(b"\r\n")
+        hdrs = [h for h in hdrs if h.partition(b":")[0].strip().lower() not in (b"connection", b"keep-alive")]
+        status = line.split(b" ")[1:2]
+        c.sendall(b"\r\n".join([line, *hdrs, b"Connection: close"]) + b"\r\n\r\n")
+        if not (status and status[0][:1] == b"1" and status[0] != b"101"): break  # 101 switches protocols: final
+    c.sendall(buf)
     pipe(u, c)
 
 def drain(c, u):

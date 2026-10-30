@@ -141,6 +141,13 @@ ok=1; for _ in 1 2; do WORKER_DEPS=$deps "$here/worker-sandbox" --worktree "$wt"
 if [ -n "$ok" ]; then echo "PASS  deps bound read-only, every run"; else echo "FAIL  deps bound read-only, every run"; fail=1; fi
 rm -r "$deps"; rmdir "$wt/node_modules" 2>/dev/null
 
+# WORKER_VENV: a python repo's .venv, same deal (GREEN's fresh checkout has none; python repos failed GREEN)
+venv=$(mktemp -d); touch "$venv/marker"
+ok=1; for _ in 1 2; do WORKER_VENV=$venv "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  '[ -e /work/.venv/marker ] && ! touch /work/.venv/probe' >/dev/null 2>&1 || ok=; done
+if [ -n "$ok" ]; then echo "PASS  venv bound read-only, every run"; else echo "FAIL  venv bound read-only, every run"; fail=1; fi
+unlink "$venv/marker"; rmdir "$venv"; rmdir "$wt/.venv" 2>/dev/null
+
 # fail-closed: no systemd user scope -> refuse to run unlimited, unless explicitly opted out
 if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
 then echo "FAIL  no cgroup scope refused"; fail=1; else echo "PASS  no cgroup scope refused"; fi
@@ -287,6 +294,29 @@ except socket.timeout: sys.exit(1)
 PY
 then echo "PASS  relay closes client when upstream dies mid-head"; else echo "FAIL  relay closes client when upstream dies mid-head"; fail=1; fi
 kill $dup $drl
+# a 1xx interim head (Expect: 100-continue) and the final head each get Connection: close; no keep-alive reaches the client
+iport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+python3 -c '
+import socket, sys
+l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); l.bind(("127.0.0.1", int(sys.argv[1]))); l.listen(4)
+while True:
+    c, _ = l.accept(); c.recv(65536)
+    c.sendall(b"HTTP/1.1 100 Continue\r\nConnection: keep-alive\r\n\r\nHTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nContent-Length: 2\r\n\r\n{}"); c.close()' "$iport" & iup=$!
+python3 "$here/relay.py" unix2http "$rt/i" "127.0.0.1:$iport" & irl=$!
+for _ in $(seq 30); do [ -S "$rt/i" ] && break; sleep 0.1; done
+if python3 - "$rt/i" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+out = b""
+try:
+    while (d := s.recv(65536)): out += d
+except socket.timeout: sys.exit(1)
+low = out.lower()
+sys.exit(0 if low.count(b"connection: close") == 2 and b"keep-alive" not in low and out.endswith(b"{}") else 1)
+PY
+then echo "PASS  relay rewrites every head after a 1xx"; else echo "FAIL  relay rewrites every head after a 1xx"; fail=1; fi
+kill $iup $irl
 # a client trickling its request one byte at a time is closed at the request deadline, not held forever
 RELAY_TIMEOUT=2 python3 "$here/relay.py" unix2http "$rt/k" "127.0.0.1:1" & krl=$!
 for _ in $(seq 30); do [ -S "$rt/k" ] && break; sleep 0.1; done

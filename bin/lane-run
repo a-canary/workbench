@@ -132,7 +132,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
     # own session, in the background: a signal to lane-run alone runs the trap now (bash defers traps
     # while a foreground child runs) and the trap kills the whole worker tree. -w: if setsid ever forks,
     # wait still sees the worker's rc (the group kill then misses; job control is off, so it doesn't)
-    WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" setsid -w "${WORKER_TASK:-$here/worker-task}" \
+    WORKER_TASK_LOG="$wlog" WORKER_DEPS="$repo/node_modules" WORKER_VENV="$repo/.venv" setsid -w "${WORKER_TASK:-$here/worker-task}" \
       --worktree "$wt/wt" --lane "$lane" --task "$task" --test "$test" --timeout "$tmo" --push >"$lf" 2>&1 & wpid=$!
     wait $wpid; rc=$?
     trap 'sig=1' INT TERM HUP  # the worker is done: finish recording its outcome, then exit
