@@ -45,6 +45,17 @@ echo "RED: t" >>"$WORKER_TASK_LOG"; echo "test still fails after worker" >>"$WOR
 exit "${STUB_RC:-0}"
 EOF
 chmod +x "$tmp/wt-stub"; export WORKER_TASK=$tmp/wt-stub
+# wb-68n2: the model endpoint (worker-sandbox's private/public port) answers GET /v1/models; this stub stands in for it
+cat >"$tmp/models-stub.py" <<'EOF'
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b'{"data":[]}')
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
+EOF
+python3 "$tmp/models-stub.py" >"$tmp/models-port" & mpid=$!; trap 'kill $mpid 2>/dev/null; rm -rf "$tmp"' EXIT
+for _ in $(seq 50); do [ -s "$tmp/models-port" ] && break; sleep 0.1; done
+export WORKER_PRIVATE_PORT=$(cat "$tmp/models-port") WORKER_PUBLIC_PORT=$(cat "$tmp/models-port")
 bead() { READY_JSON=$(jq -cn --arg d "$1" '[{id:"X-1",description:$d}]'); }
 go() { : >"$calls"; down=; repo=$tmp/r label=lane:v100 run_one 2>/dev/null; echo "rc=$? down=${down:-0}"; }
 good=$'Branch: lane/x-1\r\nTest: true\r\n---\r\ndo it'
@@ -80,6 +91,9 @@ lanes 3
 check "quiet lane dispatches"          "$(LANES_URL=file://$tmp/lanes.json STUB_RC=0 go)" "rc=0 down=0"
 check "unreadable lane probe dispatches" "$(LANES_URL=file://$tmp/missing.json STUB_RC=0 go)" "rc=0 down=0"
 check "no LANES_URL: gate off"         "$(STUB_RC=0 go)" "rc=0 down=0"
+# wb-68n2.2: a dead model endpoint idles the pass before any claim, so the bead stays open and unlabelled
+dead=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+check "dead endpoint: idle, no claim"  "$(WORKER_PRIVATE_PORT=$dead STUB_RC=0 go; grep -c -- '--claim\|label add\|note ' "$calls")" $'rc=1 down=1\n0'
 check "bd outage is not an empty queue" "$(READY_FAIL=1 go)" "rc=1 down=1"
 check "non-JSON from bd is an outage"  "$(READY_JSON='oops' go)" "rc=1 down=1"
 check "empty queue is not an outage"   "$(READY_JSON='[]' go)" "rc=1 down=0"
