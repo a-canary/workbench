@@ -25,7 +25,8 @@
 # only after the staged result tar passed the same safety check as a submit, so nothing a result tar carries can
 # sit at, or redirect a write at, the top level the operator writes (job.log, TRUNCATED, marker).
 # Poison results degrade instead of retrying forever: the 3rd failed collect delivers job.log only, the 10th gives
-# up on the log too (empty job.log + note) and retires, one loud line each. Counters live in $V100_STATE.
+# up on the log too (empty job.log + note) and retires, one loud line each; a job that fails to copy 3 times is
+# rejected outright. Counters live in $V100_STATE.
 # Only job-specific faults count. An infra fault (unreadable probe, job-user sudo down, ssh lost) retries uncounted, up to $V100_INFRATRIES (default 30)
 # per job; the next one then counts as a job fault, so the degrade/retire path is always reachable (a job can induce one).
 set -euo pipefail
@@ -45,7 +46,7 @@ V100_ARCHIVE=${V100_ARCHIVE:-/var/lib/v100job/archive}
 OUTMAX=${V100_OUTMAX:-209715200}
 MAXFILES=${V100_MAXFILES:-10000}
 STATE=${V100_STATE:-${XDG_STATE_HOME:-${HOME:?set V100_STATE or HOME}/.local/state}/v100-spool-sync}
-WORKTRIES=3 LOGTRIES=10 INFRATRIES=${V100_INFRATRIES:-30}
+WORKTRIES=3 LOGTRIES=10 COPYTRIES=3 INFRATRIES=${V100_INFRATRIES:-30}
 if [ -z "${SPOOL:-}" ]; then
   h=$(getent passwd agent-pub | cut -d: -f6) || true
   [ -n "${h:-}" ] || die "SPOOL unset and no agent-pub home"
@@ -195,7 +196,16 @@ submit_job() {
   # copy out as the agent into the operator-owned stage; from here on only the stage is trusted-for-checks
   pub tar -C "$SPOOL/ready" -cf - -- "$name" | head -c $((CAPB + 1)) >"$J/in.tar" || rc=$?
   if [ "$(stat -c %s "$J/in.tar")" -gt "$CAPB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
-  [ "$rc" = 0 ] || { fail "copy of $name failed (rc $rc), retry next tick"; return 0; }
+  local cf=$STATE/copy.$name ccnt=0
+  if [ "$rc" != 0 ]; then
+    if [ -r "$cf" ]; then ccnt=$(<"$cf"); fi
+    [[ $ccnt =~ ^[0-9]+$ ]] || ccnt=0
+    ccnt=$((ccnt + 1))
+    if [ "$ccnt" -ge "$COPYTRIES" ]; then unlink "$cf" 2>/dev/null || true; reject "$name" "copy failed $ccnt times (tar rc $rc, unreadable file?)"; return 0; fi
+    printf %s "$ccnt" >"$cf" || { fail "copy of $name failed (rc $rc), cannot write copy counter $cf"; return 0; }
+    fail "copy of $name failed (rc $rc), attempt $ccnt/$COPYTRIES, retry next tick"; return 0
+  fi
+  unlink "$cf" 2>/dev/null || true
   # inspect the archive before extracting: no traversal, and only regular files/dirs (no links, devices, fifos)
   tar_safe "$J/in.tar" || { reject "$name" "$TWHY in job"; return 0; }
   tar -C "$J/x" --no-same-owner --no-same-permissions -xf "$J/in.tar" || { reject "$name" "extract failed"; return 0; }
