@@ -57,6 +57,10 @@ test("blocks agent runs behind wrappers, nested shells and substitutions", () =>
     'claude --allowedTools "" --allowedTools Bash -p x', "claude -p 'x --allowedTools \"\" y'",
     'claude -p --allowedTools "" --dangerously-skip-permissions x', 'claude -p --allowedTools "" --mcp-config m.json x',
     'claude -p "unbalanced',
+    // round 2: '#' truncation, shell -c behind wrappers, parens inside $(...), --agents
+    "echo a#b; claude -p hi", 'sudo bash -c "claude -p x"', "timeout 5 bash -c 'claude -p x'", "env FOO=1 sh -c 'pi -p x'",
+    "nohup bash -c 'claude -p x' &", "xargs -I{} sh -c 'claude -p {}'", 'echo "$(claude -p "(x)")"',
+    'claude -p --allowedTools "" --agents a.json x',
   ]) expect([c, run(c)]).toEqual([c, 2]);
 });
 
@@ -64,6 +68,7 @@ test("quoted text mentioning claude -p is data, not a run", () => {
   for (const c of [
     'echo "a | claude -p foo"', 'git commit -m "x; claude -p y"', 'echo "use claude -p; pi -p ok"', "echo claude -p",
     "git log --author claude -p", "claude --version", "pi --help",
+    "git commit -m 'use `claude -p` here'", "echo 'x $(claude -p y)'", "FOO=1 grep pi -p file",
   ]) expect([c, run(c)]).toEqual([c, 0]);
   expect(run('claude -p --allowedTools= "q"')).toBe(0);
 });

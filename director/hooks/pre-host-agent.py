@@ -14,9 +14,39 @@ WRAPPERS = {"nohup", "env", "time", "timeout", "nice", "ionice", "sudo", "doas",
             "builtin", "xargs", "stdbuf", "setsid", "chrt", "taskset", "unbuffer", "flock", "watch"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 CONTROL = {";", ";;", "|", "||", "&", "&&", "|&", "(", ")", "\n"}
-DANGER = ("--dangerously", "--mcp-config", "--permission-mode", "--settings", "--plugin-dir", "--add-dir", "--tools")
-SUBST = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+DANGER = ("--dangerously", "--mcp-config", "--permission-mode", "--settings", "--plugin-dir", "--add-dir", "--tools",
+          "--agents")
 RAW = re.compile(r"(^|[\s;|&(`$])(\S*/)?(claude|pi)(\s[^\n]*)?\s(-[A-Za-z]*p[A-Za-z]*|--print)(\s|$)")
+
+
+def substs(cmd):
+    """Bodies of $(...) / `...` outside single quotes (bash leaves '...' literal). Unterminated = rest."""
+    i, n, dq = 0, len(cmd), False
+    while i < n:
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'" and not dq:
+            j = cmd.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            dq = not dq
+        elif c == "`":
+            j = cmd.find("`", i + 1)
+            yield cmd[i + 1:] if j < 0 else cmd[i + 1:j]
+            i = n if j < 0 else j + 1
+            continue
+        elif cmd.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(cmd[j], 0)
+                j += 1
+            yield cmd[i + 2:j - 1] if depth == 0 else cmd[i + 2:]
+            i = j
+            continue
+        i += 1
 
 
 def base(tok):
@@ -56,12 +86,12 @@ def blocked_cmd(words):
         return False
     if w0 == "eval":
         return blocked(" ".join(words[1:]))
-    if w0 in WRAPPERS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-        hits = [i for i, t in enumerate(words) if base(t) in AGENTS]
-        if not hits:
-            return False
-        words = words[hits[0]:]
-        w0 = base(words[0])
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=1 claude -p
+        return blocked_cmd(words[1:])
+    if w0 in WRAPPERS:  # wrapper args vary (timeout 600, sudo -u x): jump to the first runnable we care about
+        # ponytail: `time grep pi -p` false-positives; per-wrapper arg parsing if it bites
+        hits = [i for i, t in enumerate(words[1:], 1) if base(t) in AGENTS | SHELLS or t == "eval"]
+        return bool(hits) and blocked_cmd(words[hits[0]:])
     if w0 not in AGENTS:
         return False
     args = words[1:]
@@ -73,12 +103,12 @@ def blocked_cmd(words):
 def blocked(cmd, depth=0):
     if depth > 4:
         return True
-    for m in SUBST.finditer(cmd):
-        if blocked(m.group(1) if m.group(1) is not None else m.group(2), depth + 1):
-            return True
+    if any(blocked(sub, depth + 1) for sub in substs(cmd)):
+        return True
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
         lex.whitespace = " \t\r"
+        lex.commenters = ""  # bash: a#b is one word; '#' only comments at word start (rare in agent cmds)
         lex.whitespace_split = True
         toks = list(lex)
     except ValueError:  # unbalanced quotes: fail closed on anything that looks like an agent run
