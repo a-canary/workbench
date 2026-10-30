@@ -405,6 +405,15 @@ check "stamp-name dir: not shipped, not left in ready" "$(exists "$work/3-rnd-st
 mkjob stf; printf deadbeef >"$spool/ready/stf/.v100-submit-sha"
 check "stamp-name file: rejected too" "$(tick)$(reason "$spool/failed/stf" | grep -c 'v100-submit-sha')$(exists "$work/3-rnd-stf")" 01n
 
+# ---- wb-4gf item 1: a job with a file the agent cannot read is rejected after 3 failed copies, not re-copied on every tick
+mkjob unr; echo secret >"$spool/ready/unr/locked"; chmod 000 "$spool/ready/unr/locked"
+for k in 1 2; do tick >/dev/null; done
+check "unreadable file: copy failures 1-2 retry (still in ready, no reason)" "$(exists "$spool/ready/unr/run.sh")$(exists "$spool/failed/unr")" yn
+check "unreadable file: tick 3 exits clean after rejecting" "$(tick)" 0
+check "unreadable file: rejected with a REASON after 3 failed copies" "$(exists "$spool/ready/unr")$(reason "$spool/failed/unr" | grep -c 'copy failed 3 times')" n1
+check "unreadable file: never shipped" "$(exists "$work/3-rnd-unr")$(exists "$q/ready/3-rnd-unr")" nn
+chmod -R u+rwX "$spool/failed/unr" "$spool/ready/unr" 2>/dev/null; mv "$spool/ready/unr" "$tmp/unr.left" 2>/dev/null   # a still-stuck job must not fail later cases
+
 # ---- review 3, item 4: an unreadable job.log is a read error (retried, then the 10x give-up), not a silent empty log
 mkdir -p "$tmp/faketail"; printf '#!/bin/sh\necho "tail: cannot open job.log: Permission denied" >&2\nexit 1\n' >"$tmp/faketail/tail"; chmod +x "$tmp/faketail/tail"
 finished done ul
