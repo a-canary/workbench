@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# sandbox-review — director-oot option 2: run a jailed reviewer (worker-sandbox --role reviewer)
+# against the diff between --base and --head.
+#
+# Usage: sandbox-review --repo DIR --base REF --head REF --spec FILE [--lane private|ollama]
+set -uo pipefail
+
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+repo="" base="" head="" spec="" lane="private"
+while [ $# -gt 0 ]; do
+  case $1 in
+    --repo) repo=$2; shift 2 ;;
+    --base) base=$2; shift 2 ;;
+    --head) head=$2; shift 2 ;;
+    --spec) spec=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+if [ -z "$repo" ] || [ -z "$base" ] || [ -z "$head" ] || [ -z "$spec" ]; then
+  echo "usage: $0 --repo DIR --base REF --head REF --spec FILE [--lane private|ollama]" >&2
+  exit 2
+fi
+
+# (1) clean export of --head (tracked files only — no .env, no .git)
+worktree=$(mktemp -d)
+trap 'rm -rf "$worktree"' EXIT
+git -C "$repo" archive "$head" | tar -x -C "$worktree"
+
+# (2) task file: spec, blank line, diff base..head
+task=$worktree/.task
+{
+  cat "$spec"
+  echo
+  git -C "$repo" diff "$base" "$head"
+} > "$task"
+
+# (3) run the jailed reviewer
+out=$("${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$worktree" --lane "$lane" --role reviewer --task "$task" 2>&1)
+rc=$?
+
+# (4) print stdout; find verdict (last line matching ^(CLEAR|BLOCK))
+echo "$out"
+verdict=$(printf '%s\n' "$out" | grep -E '^(CLEAR|BLOCK)' | tail -n1)
+case "$verdict" in
+  CLEAR*) exit 0 ;;
+  BLOCK*) exit 1 ;;
+  *)      exit 3 ;;
+esac
