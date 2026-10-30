@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# sandbox-review-test — director-oot option 2: the Driver's reviewers run jailed (worker-sandbox --role reviewer),
+# not as unsandboxed host subagents. A stub replaces worker-sandbox; no LLM needed.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+# a repo with base -> head
+r=$tmp/repo; git init -q "$r"; g() { git -C "$r" -c user.name=t -c user.email=t@t "$@"; }
+echo one > "$r/a.txt"; g add a.txt; g commit -qm base; base=$(g rev-parse HEAD)
+echo two > "$r/a.txt"; echo secret > "$r/.env"; g add a.txt; g commit -qm head; head=$(g rev-parse HEAD)
+printf 'Make a.txt say two.\n' > "$tmp/spec.md"
+
+# stub: records args, checks the jail input, prints $VERDICT as the reviewer's last line
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_LOG"
+while [ $# -gt 0 ]; do case $1 in --worktree) wt=$2 ;; --task) task=$2 ;; esac; shift; done
+cp "$task" "$STUB_TASK"; cat "$wt/a.txt" > "$STUB_WT"; [ -e "$wt/.env" ] && echo leaked >> "$STUB_WT"
+printf 'looked at a.txt:1\n%s\n' "$VERDICT"
+[ -n "${STUB_ERR:-}" ] && echo "$STUB_ERR" >&2
+exit "${STUB_RC:-0}"
+EOF
+chmod +x "$tmp/stub"
+
+run() { # $1 verdict line -> prints rc
+  env WORKER_SANDBOX="$tmp/stub" STUB_LOG="$tmp/log" STUB_TASK="$tmp/task" STUB_WT="$tmp/wt" VERDICT="$1" \
+    "$here/sandbox-review" --repo "$r" --base "$base" --head "$head" --spec "$tmp/spec.md" >"$tmp/out" 2>"$tmp/err"
+  echo $?
+}
+check() { [ "$2" = "$3" ] || { echo "FAIL: $1 (got '$2' want '$3')"; fail=1; }; }
+
+check "CLEAR exits 0" "$(run CLEAR)" 0
+check "verdict printed" "$(tail -n1 "$tmp/out")" CLEAR
+check "runs the reviewer role" "$(grep -cx -- --role "$tmp/log")" 1
+check "role is reviewer" "$(grep -A1 -x -- --role "$tmp/log" | tail -n1)" reviewer
+check "default lane private" "$(grep -A1 -x -- --lane "$tmp/log" | tail -n1)" private
+check "worktree is head" "$(head -n1 "$tmp/wt")" two
+check "untracked .env not copied" "$(grep -c leaked "$tmp/wt")" 0
+check "task carries spec" "$(grep -c 'Make a.txt say two' "$tmp/task")" 1
+check "task carries diff" "$(grep -c '^+two' "$tmp/task")" 1
+check "BLOCK exits 1" "$(run 'BLOCK: wrong file')" 1
+check "no verdict exits 3" "$(run 'I think it is fine')" 3
+check "--lane ollama passes through" "$(env WORKER_SANDBOX="$tmp/stub" STUB_LOG="$tmp/log" STUB_TASK="$tmp/task" STUB_WT="$tmp/wt" VERDICT=CLEAR \
+  "$here/sandbox-review" --repo "$r" --base "$base" --head "$head" --spec "$tmp/spec.md" --lane ollama >/dev/null 2>&1; grep -A1 -x -- --lane "$tmp/log" | tail -n1)" ollama
+
+# PR #66 review findings: none of these may exit 0
+check "reviewer crash + CLEAR text exits 3" "$(STUB_RC=1 run CLEAR)" 3
+check "CLEAR on stderr only exits 3" "$(STUB_ERR=CLEAR run 'thinking...')" 3
+check "CLEARLY is not CLEAR" "$(run 'CLEARLY fine')" 3
+check "bad --base exits 2" "$(env WORKER_SANDBOX="$tmp/stub" STUB_LOG="$tmp/log" STUB_TASK="$tmp/task" STUB_WT="$tmp/wt" VERDICT=CLEAR \
+  "$here/sandbox-review" --repo "$r" --base nosuchref --head "$head" --spec "$tmp/spec.md" >/dev/null 2>&1; echo $?)" 2
+# a tracked .task symlink and export-ignore must not redirect the task write or hide files
+echo keep > "$tmp/victim"; ln -s "$tmp/victim" "$r/.task"; echo 'a.txt export-ignore' > "$r/.gitattributes"
+g add .task .gitattributes && g commit -qm evil && head2=$(g rev-parse HEAD)
+env WORKER_SANDBOX="$tmp/stub" STUB_LOG="$tmp/log" STUB_TASK="$tmp/task" STUB_WT="$tmp/wt" VERDICT=CLEAR \
+  "$here/sandbox-review" --repo "$r" --base "$base" --head "$head2" --spec "$tmp/spec.md" >/dev/null 2>&1
+check "tracked .task symlink not written through" "$(cat "$tmp/victim")" keep
+check "export-ignore does not hide files" "$(head -n1 "$tmp/wt")" two
+
+[ $fail -eq 0 ] && echo PASS
+exit $fail
