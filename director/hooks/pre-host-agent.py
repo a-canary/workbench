@@ -88,10 +88,10 @@ def blocked_cmd(words):
         return blocked(" ".join(words[1:]))
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):  # FOO=1 claude -p
         return blocked_cmd(words[1:])
-    if w0 in WRAPPERS:  # wrapper args vary (timeout 600, sudo -u x): jump to the first runnable we care about
+    if w0 in WRAPPERS:  # wrapper args vary (timeout 600, sudo -u x): try each runnable we care about
         # ponytail: `time grep pi -p` false-positives; per-wrapper arg parsing if it bites
-        hits = [i for i, t in enumerate(words[1:], 1) if base(t) in AGENTS | SHELLS or t == "eval"]
-        return bool(hits) and blocked_cmd(words[hits[0]:])
+        # every candidate, not the first: `sudo -u pi bash -c ...` names an agent as a wrapper arg
+        return any(blocked_cmd(words[i:]) for i, t in enumerate(words[1:], 1) if base(t) in AGENTS | SHELLS or t == "eval")
     if w0 not in AGENTS:
         return False
     args = words[1:]

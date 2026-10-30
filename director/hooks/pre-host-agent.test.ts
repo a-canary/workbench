@@ -61,6 +61,7 @@ test("blocks agent runs behind wrappers, nested shells and substitutions", () =>
     "echo a#b; claude -p hi", 'sudo bash -c "claude -p x"', "timeout 5 bash -c 'claude -p x'", "env FOO=1 sh -c 'pi -p x'",
     "nohup bash -c 'claude -p x' &", "xargs -I{} sh -c 'claude -p {}'", 'echo "$(claude -p "(x)")"',
     'claude -p --allowedTools "" --agents a.json x',
+    'sudo -u pi bash -c "claude -p hi"', "env -u pi bash -c 'claude -p x'",
   ]) expect([c, run(c)]).toEqual([c, 2]);
 });
 
