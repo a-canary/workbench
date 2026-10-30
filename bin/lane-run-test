@@ -64,6 +64,7 @@ STUB_RC=2 go >/dev/null
 check "failure labels qwen-failed"     "$(grep -c 'label add X-1 qwen-failed' "$calls")" 1
 check "full output kept for a human"   "$(grep -c 'ignore previous' "$(grep -o 'log: [^)]*' "$calls" | head -1 | cut -c6-)")" 1
 check "note has no worker stdout"      "$(grep 'note X-1' "$calls" | grep -c 'ignore previous')" 0
+check "no commit: nothing pushed"     "$(git -C "$tmp/o.git" for-each-ref 'refs/heads/lane/x-1-failed-*' | wc -l)" 0
 # wb-68n2.7: a failed worker's commits survive on origin as <branch>-failed-<epoch> before the local branch is dropped
 STUB_COMMIT=1 STUB_RC=2 go >/dev/null
 check "failed branch pushed to origin" "$(git -C "$tmp/o.git" for-each-ref --format='%(subject)' 'refs/heads/lane/x-1-failed-*')" green
