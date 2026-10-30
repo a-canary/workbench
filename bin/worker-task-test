@@ -107,6 +107,9 @@ RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$\nWorker-May-Edit: ' run "empt
 RED_MSG=$'red\n\nWorker-May-Edit: ^[^z]' run "Worker-May-Edit '^[^z]' refused" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^[^zQ0_.~m]' run "Worker-May-Edit '^[^zQ0_.~m]' refused" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^[a-y]' run "Worker-May-Edit '^[a-y]' refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: ^[a-m]' run "Worker-May-Edit '^[a-m]' refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: \\.py$' run "Worker-May-Edit '\\.py\$' refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/ini/cfg refused" 'echo x > setup.cfg' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
