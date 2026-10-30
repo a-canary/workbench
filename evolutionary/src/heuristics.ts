@@ -366,7 +366,7 @@ export function evaluateCyclomaticComplexity(
 
   return {
     fitness: Math.round(fitness * 1000) / 1000,
-    metrics: { maxCC, complexityCount: bodies.length, complexities: bodies },
+    metrics: { maxComplexity: maxCC, complexityCount: bodies.length, complexities: bodies },
     judgeOutput:
       bodies.length > 0
         ? `max=${maxCC} fns=${bodies.length} ${JSON.stringify(bodies.map(b => `${b.name}:${b.complexity}`))}`
@@ -404,6 +404,14 @@ export function evaluateDocstringCoverage(ind: Individual): FitnessResult {
  */
 export function evaluateCodeQuality(ind: Individual): FitnessResult {
   const src = extractCode(ind);
+  if (!src) {
+    // No code to score: neutral fitness, consistent with evaluateTypeHintCoverage.
+    return {
+      fitness: 0.5,
+      metrics: {},
+      judgeOutput: 'no code in genome',
+    };
+  }
   const bodies = src ? allFunctionBodies(src) : [];
   const maxCC = bodies.length > 0 ? Math.max(...bodies.map(b => b.complexity)) : 0;
   const ccFitness = Math.max(0, 1 - maxCC / MAX_CC_FITNESS);
@@ -421,7 +429,7 @@ export function evaluateCodeQuality(ind: Individual): FitnessResult {
       complexityFitness: ccFitness,
       typeHintCoverage,
       docstringCoverage: docCoverage,
-      maxCC,
+      maxComplexity: maxCC,
       typeHintPct: Math.round(typeHintCoverage * 100),
       docstringPct: Math.round(docCoverage * 100),
     },
