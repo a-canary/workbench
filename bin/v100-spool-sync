@@ -15,11 +15,17 @@
 #   V100_WORK      remote job payload dir            (default: /var/lib/v100job/work)
 #   V100_ARCHIVE   remote finished-payload dir       (default: /var/lib/v100job/archive)
 #   V100_OUTMAX    result payload cap, bytes         (default: 200 MB)    V100_MAXFILES  result file cap (default 10000)
+#   V100_STATE     per-job attempt counters          (default: ${XDG_STATE_HOME:-~/.local/state}/v100-spool-sync)
 # Layout: spool ready/<name>/run.sh -> remote $V100_WORK/3-rnd-<name>/ + queue token $V100_Q/ready/3-rnd-<name>/.
 # The 3-rnd- priority prefix is forced here, never chosen by the agent. Tools: GNU tar/find/du, base64, sha256sum.
 # Idempotency: a submit is identified by the sha256 of the staged tar, stored in the token dir as .sha, so a lost
 # ack is recognised next tick instead of being rejected as a duplicate. A result is delivered into a hidden
-# temp dir and renamed into place with a marker, so a retry after a failed retire never delivers twice.
+# temp dir and renamed into place with a marker holding the job's sha, so a retry after a failed retire never
+# delivers twice. Result layout: <state>/<name>/{job.log,TRUNCATED,work/...}: the payload is extracted into work/
+# only after the staged result tar passed the same safety check as a submit, so nothing a result tar carries can
+# sit at, or redirect a write at, the top level the operator writes (job.log, TRUNCATED, marker).
+# Poison results degrade instead of retrying forever: the 3rd failed collect delivers job.log only, the 10th gives
+# up on the log too (empty job.log + note) and retires, one loud line each. Counters live in $V100_STATE.
 set -euo pipefail
 export LC_ALL=C
 
@@ -36,6 +42,8 @@ V100_WORK=${V100_WORK:-/var/lib/v100job/work}
 V100_ARCHIVE=${V100_ARCHIVE:-/var/lib/v100job/archive}
 OUTMAX=${V100_OUTMAX:-209715200}
 MAXFILES=${V100_MAXFILES:-10000}
+STATE=${V100_STATE:-${XDG_STATE_HOME:-${HOME:?set V100_STATE or HOME}/.local/state}/v100-spool-sync}
+WORKTRIES=3 LOGTRIES=10
 if [ -z "${SPOOL:-}" ]; then
   h=$(getent passwd agent-pub | cut -d: -f6) || true
   [ -n "${h:-}" ] || die "SPOOL unset and no agent-pub home"
@@ -73,7 +81,18 @@ for s in ready running done failed collected; do
   fi
 done
 p=$('"$PROBE"' "$W/$n")
-case $p in no) exit 0 ;; yes) exit 1 ;; *) exit 9 ;; esac'
+case $p in
+  no) exit 0 ;;
+  yes) # a work dir with no token anywhere: ours if it carries this sha (killed between the move and the token,
+       # so nothing ran): drop it and let the submit start fresh; anything else is a real duplicate
+       o=$($RUN sh -c '"'"'if [ -f "$1" ] && [ ! -L "$1" ]; then echo "s:$(cat "$1")"; else echo none; fi'"'"' _ "$W/$n/.v100-submit-sha")
+       case $o in
+         "s:$sha") $RUN rm -rf -- "$W/$n" || exit 9; exit 0 ;;
+         none | s:*) exit 1 ;;
+         *) exit 9 ;;
+       esac ;;
+  *) exit 9 ;;
+esac'
 R_SUBMIT="$(pre submit)"'
 set -e
 n=3-rnd-$1 sha=$2 i=$W/.incoming-$1 f=$W/.incoming-$1.tar moved= tok=
@@ -87,6 +106,7 @@ got=$($RUN sha256sum -- "$f"); got=${got%% *}
 $RUN mkdir -- "$i"
 $RUN tar -C "$i" --no-same-owner --no-same-permissions -xf "$f"
 $RUN rm -f -- "$f"
+$RUN sh -c '"'"'printf %s "$1" >"$2"'"'"' _ "$sha" "$i/.v100-submit-sha"
 $RUN mv -T -- "$i" "$W/$n"; moved=1
 mkdir -p -- "$Q/ready"
 mkdir -- "$Q/ready/.$n"; tok=1
@@ -94,7 +114,11 @@ printf "%s\n" "$3" >"$Q/ready/.$n/run.sh"
 printf %s "$sha" >"$Q/ready/.$n/.sha"
 mv -T -- "$Q/ready/.$n" "$Q/ready/$n"; moved= tok='
 R_LIST="$(pre list)"'
-for s in done failed; do for d in "$Q/$s"/3-rnd-*; do [ -d "$d" ] && [ ! -L "$d" ] && printf "%s %s\n" "$s" "${d##*/}"; done; done
+for s in done failed; do for d in "$Q/$s"/3-rnd-*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  x=; if [ -f "$d/.sha" ] && [ ! -L "$d/.sha" ]; then x=$(head -c 64 "$d/.sha" | tr -dc 0-9a-f); fi
+  printf "%s %s %s\n" "$s" "${d##*/}" "$x"
+done; done
 exit 0'
 R_PREP="$(pre prep)"'
 w=$W/3-rnd-$2 max=$3
@@ -105,7 +129,9 @@ sz=${sz%%[!0-9]*}
 [ -n "$sz" ] || exit 9
 if [ "$sz" -gt "$max" ]; then echo big; else echo ok; fi'
 R_LOG="$(pre log)"'
-tail -c 52428800 "$Q/$1/3-rnd-$2/job.log" 2>/dev/null; exit 0'
+f=$Q/$1/3-rnd-$2/job.log
+if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then exit 4; fi
+tail -c 52428800 "$f" 2>/dev/null; exit 0'
 R_WORK="$(pre work)"'
 exec $RUN tar -C "$W/3-rnd-$2" -cf - .'
 R_FINAL="$(pre final)"'
@@ -122,8 +148,18 @@ esac
 c=$Q/collected/$n; if [ -e "$c" ]; then c=$c.$(date +%s); fi
 mkdir -p -- "$Q/collected"; mv -T -- "$t" "$c"'
 
+mkdir -p -- "$STATE" || die "cannot create state dir"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/v100-sync.XXXXXX")
 trap 'chmod -R u+rwX "$stage" 2>/dev/null; rm -rf "$stage"' EXIT
+
+# tar_safe FILE: 0 if the archive lists only regular files and dirs, no absolute or .. paths; else 1 with TWHY set.
+# One check for both directions (agent job -> GPU host, GPU host result -> agent spool).
+tar_safe() {
+  local names types
+  names=$(tar -tf "$1") && types=$(tar -tvf "$1" | cut -c1) || { TWHY="unreadable archive"; return 1; }
+  if grep -qE '(^|/)\.\.(/|$)|^/' <<<"$names"; then TWHY="unsafe path"; return 1; fi
+  if grep -qv '^[-d]$' <<<"$types"; then TWHY="symlink, device or fifo"; return 1; fi
+}
 
 # reject NAME WHY: move the spool entry to failed/ with a REASON file (all as the public agent)
 reject() {
@@ -146,7 +182,7 @@ aside() {
 
 J=
 submit_job() {
-  local name=$1 d bad sz rc=0 names types sha
+  local name=$1 d bad sz rc=0 sha
   [[ $name =~ $NAME_RE ]] || { reject "$name" "name must match $NAME_RE"; return 0; }
   J=$(mktemp -d "$stage/j.XXXXXX") || return 1
   d=$J/x/$name; mkdir "$J/x" || return 1
@@ -155,9 +191,7 @@ submit_job() {
   if [ "$(stat -c %s "$J/in.tar")" -gt "$CAPB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
   [ "$rc" = 0 ] || { fail "copy of $name failed (rc $rc), retry next tick"; return 0; }
   # inspect the archive before extracting: no traversal, and only regular files/dirs (no links, devices, fifos)
-  names=$(tar -tf "$J/in.tar") && types=$(tar -tvf "$J/in.tar" | cut -c1) || { reject "$name" "unreadable archive"; return 0; }
-  if grep -qE '(^|/)\.\.(/|$)|^/' <<<"$names"; then reject "$name" "unsafe path in job"; return 0; fi
-  if grep -qv '^[-d]$' <<<"$types"; then reject "$name" "symlink, device or fifo in job"; return 0; fi
+  tar_safe "$J/in.tar" || { reject "$name" "$TWHY in job"; return 0; }
   tar -C "$J/x" --no-same-owner --no-same-permissions -xf "$J/in.tar" || { reject "$name" "extract failed"; return 0; }
   chmod -R u+rwX "$J/x"
   # validate the STAGED copy
@@ -190,40 +224,65 @@ submit_one() {
   return $rc
 }
 
-# collect STATE NAME: remote done|failed/3-rnd-NAME -> spool STATE/NAME (via a hidden temp dir + rename), then
-# retire the remote copies. A result already delivered (marker present) is not delivered again, only retired.
+# collect STATE NAME SHA: remote done|failed/3-rnd-NAME -> spool STATE/NAME/{job.log,work/} (via a hidden temp dir +
+# rename), then retire the remote copies. SHA (the token's) is written into the marker: a dest whose marker holds
+# another sha is some other job's, so we take the next .N. A delivered result is only retired, never redelivered.
+# Failures are counted in $STATE (never in the agent's spool): attempt 3 falls back to job.log only, attempt 10
+# gives up on the log too (empty job.log) and retires.
 collect() {
-  local s=$1 name=$2 tmpd=$SPOOL/$1/.dest-tmp-$2 dest= delivered= cand i mode note= cnt rc
+  local s=$1 name=$2 jsha=$3 tmpd=$SPOOL/$1/.dest-tmp-$2 sf=$STATE/$1.$2 dest= delivered= cand i mode wf= notes= cnt rc att=0
+  [[ $jsha =~ ^[0-9a-f]{64}$ ]] || jsha=nosha
   for i in "" .2 .3 .4 .5 .6 .7 .8 .9; do
     cand=$SPOOL/$s/$name$i
     if ! pub test -e "$cand"; then dest=$cand; break; fi
-    if pub test -e "$cand/$MARK"; then dest=$cand; delivered=1; break; fi
+    if [ "$(pub cat -- "$cand/$MARK" 2>/dev/null)" = "$jsha" ]; then dest=$cand; delivered=1; break; fi
   done
   [ -n "$dest" ] || { fail "no free result name for $name"; return 1; }
   if [ -z "$delivered" ]; then
-    mode=$(rsh "$R_PREP" "$s" "$name" "$OUTMAX" </dev/null) || { fail "remote size check of $name failed, retry next tick"; return 1; }
-    case $mode in ok | big | none) ;; *) fail "remote size check of $name gave '$mode', retry next tick"; return 1 ;; esac
+    if [ -r "$sf" ]; then att=$(<"$sf"); fi
+    [[ $att =~ ^[0-9]+$ ]] || att=0
     pub rm -rf -- "$tmpd"
     pub mkdir -- "$tmpd" || { fail "cannot create result dir for $name"; return 1; }
-    [ "$mode" != big ] || note="work dir over 200 MB: only job.log returned"
-    if [ "$mode" = ok ]; then
-      rc=0; rsh "$R_WORK" "$s" "$name" </dev/null | head -c $((STREAMCAP + 1)) >"$stage/res.tar" || rc=$?
-      if [ "$(stat -c %s "$stage/res.tar")" -gt "$STREAMCAP" ]; then note="work stream over the size cap: only job.log returned"
-      elif [ "$rc" != 0 ]; then note=ERR
-      elif ! cnt=$(tar -tf "$stage/res.tar" | wc -l); then note=ERR
-      elif [ "$cnt" -gt "$MAXFILES" ]; then note="work dir over $MAXFILES files: only job.log returned"
-      else pub tar -C "$tmpd" --no-same-owner --no-same-permissions -xf - <"$stage/res.tar" || note=ERR; fi
-      unlink "$stage/res.tar"
+    if [ "$att" -ge "$WORKTRIES" ]; then notes="work collect failed ${WORKTRIES}x: only job.log returned"
+    else
+      mode=$(rsh "$R_PREP" "$s" "$name" "$OUTMAX" </dev/null) || mode=
+      case $mode in
+        none) ;;
+        big) notes="work dir over 200 MB: only job.log returned" ;;
+        ok) rc=0; rsh "$R_WORK" "$s" "$name" </dev/null | head -c $((STREAMCAP + 1)) >"$stage/res.tar" || rc=$?
+            if [ "$(stat -c %s "$stage/res.tar")" -gt "$STREAMCAP" ]; then notes="work stream over the size cap: only job.log returned"
+            elif [ "$rc" != 0 ]; then wf="work stream failed (rc $rc)"
+            elif ! cnt=$(tar -tf "$stage/res.tar" | wc -l); then wf="work stream unreadable"
+            elif [ "$cnt" -gt "$MAXFILES" ]; then notes="work dir over $MAXFILES files: only job.log returned"
+            elif ! tar_safe "$stage/res.tar"; then notes="work stream rejected ($TWHY): only job.log returned"
+            elif ! { pub mkdir -- "$tmpd/work" && pub tar -C "$tmpd/work" --no-same-owner --no-same-permissions -xf - <"$stage/res.tar"; }; then wf="work extract failed"; fi
+            unlink "$stage/res.tar" ;;
+        *) wf="size check gave '$mode'" ;;
+      esac
     fi
-    if [ "$note" = ERR ]; then
-      note=; pub rm -rf -- "$tmpd"; fail "collect of $name failed (work), retry next tick"; return 1
+    if [ -n "$wf" ]; then
+      att=$((att + 1)); printf %s "$att" >"$sf"
+      pub rm -rf -- "$tmpd/work"
+      if [ "$att" -lt "$WORKTRIES" ]; then pub rm -rf -- "$tmpd"; fail "collect of $name failed ($wf), attempt $att/$WORKTRIES, retry next tick"; return 1; fi
+      notes="work collect failed ${WORKTRIES}x: only job.log returned"
+      fail "collect of $name: work failed $WORKTRIES times ($wf), delivering job.log only"
     fi
-    if { [ -z "$note" ] || printf '%s\n' "$note" | pub tee -- "$tmpd/TRUNCATED" >/dev/null; } &&
-       rsh "$R_LOG" "$s" "$name" </dev/null | pub tee -- "$tmpd/job.log" >/dev/null &&
-       pub touch -- "$tmpd/$MARK" && pub mv -T -- "$tmpd" "$dest"; then :
+    rc=0; rsh "$R_LOG" "$s" "$name" </dev/null >"$stage/log" || rc=$?
+    case $rc in
+      0) ;;
+      4) : >"$stage/log"; notes+="${notes:+$'\n'}job.log is not a regular file: empty job.log returned" ;;
+      *) att=$((att + 1)); printf %s "$att" >"$sf"
+         if [ "$att" -lt "$LOGTRIES" ]; then pub rm -rf -- "$tmpd"; fail "collect of $name failed (log), attempt $att/$LOGTRIES, retry next tick"; return 1; fi
+         : >"$stage/log"; notes+="${notes:+$'\n'}job.log collect failed ${LOGTRIES}x: empty job.log returned"
+         fail "collect of $name: log failed $LOGTRIES times, delivering an empty job.log and retiring" ;;
+    esac
+    if { [ -z "$notes" ] || printf '%s\n' "$notes" | pub tee -- "$tmpd/TRUNCATED" >/dev/null; } &&
+       pub tee -- "$tmpd/job.log" >/dev/null <"$stage/log" &&
+       printf %s "$jsha" | pub tee -- "$tmpd/$MARK" >/dev/null && pub mv -T -- "$tmpd" "$dest"; then :
     else pub rm -rf -- "$tmpd"; fail "collect of $name failed (finish), retry next tick"; return 1; fi
   fi
   rsh "$R_FINAL" "$s" "$name" </dev/null || { fail "remote retire of $name failed, retry next tick"; return 1; }
+  rm -f -- "$sf"
   log "collected $s/$name"
 }
 
@@ -233,8 +292,8 @@ pub find "$SPOOL/ready" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' >"$s
 while IFS= read -r -d '' -u 3 name; do submit_one "$name" || fail "submit of $(printf %q "$name") aborted"; done 3<"$stage/names"
 
 rsh "$R_LIST" </dev/null >"$stage/results" || { fail "remote result list failed"; exit 1; }
-while read -r -u 3 s n; do
+while read -r -u 3 s n sha; do
   [[ $s == done || $s == failed ]] && [[ $n =~ ^3-rnd-([a-z0-9][a-z0-9-]{0,40})$ ]] || { log "ignoring result row"; continue; }
-  collect "$s" "${BASH_REMATCH[1]}" || true
+  collect "$s" "${BASH_REMATCH[1]}" "$sha" || true
 done 3<"$stage/results"
 exit $errs

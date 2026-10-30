@@ -19,7 +19,9 @@ mkdir -p "$spool"/{ready,done,failed} "$q"/{ready,running,done,failed} "$work"
 # and can fail like a broken sudo. Fault knobs (env): REM_FAIL_TAG + REM_FAIL_MODE=before|after (exit 255; after
 # = "lost ack"), REM_TRUNC_TAG + REM_TRUNC_BYTES (cut the stdin stream), REM_OUT_TAG + REM_OUT_VAL (fake stdout),
 # REM_TEE=file (record the result stream the remote managed to emit before the caller hung up),
-# JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies).
+# REM_CAT_TAG + REM_CAT_FILE (replace that script's stdout with a crafted file), JOB_KILL_AFTER_MV (SIGKILL the remote
+# script right after it moved the incoming dir into place: no trap runs, like a real kill),
+# JOB_STAMP_FAIL (the stamp read prints nothing, like a failed sudo), JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies).
 cat >"$tmp/remstub" <<'EOF'
 #!/bin/bash
 b=$(printf %s "$1" | sed -n 's/.*echo \([A-Za-z0-9+\/=]*\) | base64 -d.*/\1/p')
@@ -27,6 +29,7 @@ tag=$(printf %s "$b" | base64 -d | sed -n '1s/^#//p')
 echo "$tag $1" >>"$REM_LOG"
 echo $(ls -d "$TMPDIR"/v100-sync.*/j.* 2>/dev/null | wc -l) >>"$J_LOG"
 if [ "$tag" = "${REM_OUT_TAG:-}" ]; then echo "$REM_OUT_VAL"; exit 0; fi
+if [ "$tag" = "${REM_CAT_TAG:-}" ]; then cat "$REM_CAT_FILE"; exit 0; fi
 if [ "$tag" = "${REM_FAIL_TAG:-}" ] && [ "${REM_FAIL_MODE:-}" = before ]; then exit 255; fi
 if [ "$tag" = "${REM_TRUNC_TAG:-}" ]; then head -c "$REM_TRUNC_BYTES" | bash -c "$1"; exit $?; fi
 if [ "$tag" = work ] && [ -n "${REM_TEE:-}" ]; then bash -c "$1" | tee "$REM_TEE"; exit 0; fi
@@ -39,6 +42,8 @@ cat >"$tmp/jobrun" <<'EOF'
 echo "$*" >>"$STUB_LOG"
 [ -z "${JOB_SUDO_FAIL:-}" ] || exit 1
 if [ -n "${JOB_PROBE_FAIL:-}" ] && [ "$1" = sh ]; then case "${3:-}" in "[ -e"*) [ "$JOB_PROBE_FAIL" = empty ] && exit 0; exit 1 ;; esac; fi
+if [ "$1" = mv ] && [ -n "${JOB_KILL_AFTER_MV:-}" ]; then case "$*" in *.incoming-*) "$@"; kill -9 $PPID; exit 137 ;; esac; fi
+if [ "$1" = sh ] && [ -n "${JOB_STAMP_FAIL:-}" ]; then case "${3:-}" in "if [ -f"*) exit 0 ;; esac; fi
 if [ "$1" = du ] && [ -n "${JOB_DU_EMPTY:-}" ]; then exit 0; fi
 if [ "$1" = du ] && [ -n "${DU_LIE:-}" ]; then for a; do :; done; printf '1\t%s\n' "$a"; exit 0; fi
 if [ "$1" = tar ] && [ -n "${JOB_FAIL_TAR:-}" ]; then case " $* " in *" -xf "*) "$@"; exit 137 ;; esac; fi
@@ -56,14 +61,16 @@ if [ "$1" = tar ]; then
 fi
 exit $rc
 EOF
-chmod +x "$tmp/remstub" "$tmp/jobrun" "$tmp/pubtoctou"
+# the agent-side extract of a result dies (a result that can never be delivered)
+printf '#!/bin/sh\ncase " $* " in *" -xf "*) exit 2 ;; esac\nexec "$@"\n' >"$tmp/pubfailx"
+chmod +x "$tmp/remstub" "$tmp/jobrun" "$tmp/pubtoctou" "$tmp/pubfailx"
 
 # tick [VAR=val ...]: one sync tick, prints its exit code; runs in $tmp so an injected `touch PWNED` lands there
 tick() {
   mkdir -p "$tmp/st"
   cd "$tmp" && env PUB_RUN=env SPOOL="$spool" REMOTE="$tmp/remstub" V100JOB_RUN="$tmp/jobrun" V100_Q="$q" \
     V100_WORK="$work" V100_ARCHIVE="$arch" STUB_LOG="$tmp/job.log" REM_LOG="$tmp/rem.log" J_LOG="$tmp/jcount.log" \
-    TMPDIR="$tmp/st" "$@" "$sync" 2>"$tmp/err"
+    TMPDIR="$tmp/st" V100_STATE="$tmp/state" "$@" "$sync" 2>"$tmp/err"
   echo $?
 }
 remcalls() { grep -c "^$1 " "$tmp/rem.log"; }
@@ -150,11 +157,12 @@ mkdir -p "$q/done/3-rnd-r3" "$work/3-rnd-r3"; echo biglog >"$q/done/3-rnd-r3/job
 mkdir -p "$q/done/3-rnd-BAD"; echo x >"$q/done/3-rnd-BAD/job.log"
 mkdir -p "$q/ready/3-rnd-pending"                         # not finished: must not be touched
 check "tick 4 exit" "$(tick)" 0
-check "result: output back in spool"   "$(cat "$spool/done/good/out.txt" 2>/dev/null)" result
-check "result: work files back"        "$(isfile "$spool/done/good/in.txt")" y
+check "result: output back in spool"   "$(cat "$spool/done/good/work/out.txt" 2>/dev/null)" result
+check "result: work files back"        "$(isfile "$spool/done/good/work/in.txt")" y
+check "result: top level is only ours" "$(ls -A "$spool/done/good" | LC_ALL=C sort | tr '\n' ' ')" ".v100-delivered job.log work "
 check "result: job.log is the token log" "$(cat "$spool/done/good/job.log" 2>/dev/null)" token-log
 check "result: failed state mirrored"  "$(cat "$spool/failed/r2/job.log" 2>/dev/null)" token-log
-check "result: failed work files back" "$(isfile "$spool/failed/r2/ck.pt")" y
+check "result: failed work files back" "$(isfile "$spool/failed/r2/work/ck.pt")" y
 check "result: token to collected"     "$(isfile "$q/collected/3-rnd-good/job.log")" y
 check "result: token left done/"       "$(exists "$q/done/3-rnd-good")" n
 check "result: work to archive"        "$(cat "$arch/3-rnd-good/out.txt" 2>/dev/null)" result
@@ -162,7 +170,7 @@ check "result: work left work/"        "$(exists "$work/3-rnd-good")" n
 check "result: failed token collected" "$(exists "$q/collected/3-rnd-r2/job.log")$(exists "$q/failed/3-rnd-r2")" yn
 check ">200MB: log only"               "$(cat "$spool/done/r3/job.log" 2>/dev/null)" biglog
 check ">200MB: TRUNCATED note"         "$(grep -c '200 MB' "$spool/done/r3/TRUNCATED" 2>/dev/null)" 1
-check ">200MB: big file not copied"    "$(exists "$spool/done/r3/big.bin")$(exists "$spool/done/r3/small")" nn
+check ">200MB: big file not copied"    "$(exists "$spool/done/r3/work/big.bin")$(exists "$spool/done/r3/work/small")$(exists "$spool/done/r3/work")" nnn
 check ">200MB: still retired"          "$(exists "$arch/3-rnd-r3/big.bin")$(exists "$q/collected/3-rnd-r3")" yy
 check "bad result name ignored"        "$(exists "$q/done/3-rnd-BAD")$(exists "$spool/done/BAD")" yn
 check "unfinished token untouched"     "$(exists "$q/ready/3-rnd-pending")" y
@@ -257,13 +265,13 @@ check "unknown size mode: tick exits nonzero" "$(tick REM_OUT_TAG=prep REM_OUT_V
 check "unknown size mode: never retired" "$(exists "$spool/done/um")$(exists "$q/done/3-rnd-um")$(exists "$work/3-rnd-um")" nyy
 check "recovery: tick exit"            "$(tick)" 0
 check "recovery: submit happened"      "$(isfile "$q/ready/3-rnd-sf/.sha")" y
-check "recovery: results delivered"    "$(cat "$spool/done/sfr/out.txt")$(cat "$spool/done/duq/out.txt")$(cat "$spool/done/um/out.txt")" out-sfrout-duqout-um
+check "recovery: results delivered"    "$(cat "$spool/done/sfr/work/out.txt")$(cat "$spool/done/duq/work/out.txt")$(cat "$spool/done/um/work/out.txt")" out-sfrout-duqout-um
 check "recovery: results retired"      "$(exists "$q/collected/3-rnd-sfr")$(exists "$q/collected/3-rnd-duq")$(exists "$q/collected/3-rnd-um")" yyy
 
 # ---- delivery is idempotent and atomic; never timestamped copies
 finished done fin
 check "retire fails: tick exits nonzero" "$(tick REM_FAIL_TAG=final REM_FAIL_MODE=before)" 1
-check "retire fails: result delivered with marker" "$(cat "$spool/done/fin/out.txt")$(exists "$spool/done/fin/.v100-delivered")" out-finy
+check "retire fails: result delivered with marker" "$(cat "$spool/done/fin/work/out.txt")$(exists "$spool/done/fin/.v100-delivered")" out-finy
 check "retire fails: token still queued" "$(exists "$q/done/3-rnd-fin")" y
 check "retire retry: tick exit"        "$(tick)" 0
 check "retire retry: no second copy"   "$(ls "$spool/done" | grep -c '^fin')" 1
@@ -271,7 +279,7 @@ check "retire retry: retired"          "$(exists "$q/done/3-rnd-fin")$(exists "$
 mkdir -p "$spool/done/.dest-tmp-y"; echo junk >"$spool/done/.dest-tmp-y/junk"   # a dead earlier delivery
 finished done y
 check "stale temp dir: tick exit"      "$(tick)" 0
-check "stale temp dir: clean delivery" "$(cat "$spool/done/y/out.txt")$(exists "$spool/done/y/junk")$(exists "$spool/done/.dest-tmp-y")" out-ynn
+check "stale temp dir: clean delivery" "$(cat "$spool/done/y/work/out.txt")$(exists "$spool/done/y/junk")$(exists "$spool/done/.dest-tmp-y")" out-ynn
 mkdir -p "$q/failed/3-rnd-dup"; echo duplog >"$q/failed/3-rnd-dup/job.log"   # failed/dup already holds a REASON dir
 check "name collision: tick exit"      "$(tick)" 0
 check "name collision: earlier dir untouched" "$(reason "$spool/failed/dup" | grep -c duplicate)" 1
@@ -282,17 +290,98 @@ finished done cap; truncate -s 4M "$work/3-rnd-cap/big.bin"
 check "stream cap: tick exit"          "$(tick DU_LIE=1 V100_OUTMAX=1000000 REM_TEE="$tmp/tee.out")" 0
 check "stream cap: stops reading at the cap" "$([ "$(stat -c %s "$tmp/tee.out")" -lt 3000000 ] && echo y)" y
 check "stream cap: TRUNCATED"          "$(grep -c 'size cap' "$spool/done/cap/TRUNCATED" 2>/dev/null)" 1
-check "stream cap: log only"           "$(cat "$spool/done/cap/job.log")$(exists "$spool/done/cap/big.bin")$(exists "$spool/done/cap/out.txt")" log-capnn
+check "stream cap: log only"           "$(cat "$spool/done/cap/job.log")$(exists "$spool/done/cap/work/big.bin")$(exists "$spool/done/cap/work/out.txt")" log-capnn
 check "stream cap: still retired"      "$(exists "$q/collected/3-rnd-cap")$(exists "$arch/3-rnd-cap/big.bin")" yy
 finished done many; for i in $(seq 20); do echo "$i" >"$work/3-rnd-many/f$i"; done
 check "file cap: tick exit"            "$(tick V100_MAXFILES=10)" 0
 check "file cap: TRUNCATED"            "$(grep -c 'files' "$spool/done/many/TRUNCATED" 2>/dev/null)" 1
-check "file cap: log only"             "$(cat "$spool/done/many/job.log")$(exists "$spool/done/many/f1")" log-manyn
+check "file cap: log only"             "$(cat "$spool/done/many/job.log")$(exists "$spool/done/many/work/f1")" log-manyn
+
+# ---- review 2, item 1: a hostile result tar cannot write outside work/ nor redirect the operator's writes
+mkdir "$tmp/vdir" "$tmp/h1" "$tmp/h2a" "$tmp/h2b/d" "$tmp/h3" "$tmp/h5"
+ln -s "$tmp/victim" "$tmp/h1/job.log"; tar -C "$tmp/h1" -cf "$tmp/h1.tar" job.log                        # symlink job.log
+ln -s "$tmp/vdir" "$tmp/h2a/d"; echo x >"$tmp/h2b/d/pwn"                                                  # symlink, then a member through it
+tar -C "$tmp/h2a" -cf "$tmp/h2.tar" d; tar -C "$tmp/h2b" -cf "$tmp/h2b.tar" d/pwn; tar -Af "$tmp/h2.tar" "$tmp/h2b.tar"
+echo x >"$tmp/h3/escape"; tar -C "$tmp/h3" -cf "$tmp/h3.tar" --transform='s,^,../,' escape                  # ../ member
+tar -C "$tmp/h3" -cPf "$tmp/h4.tar" --transform="s,^,$tmp/abs-," escape                                     # absolute member
+echo a >"$tmp/h5/a"; ln "$tmp/h5/a" "$tmp/h5/b"; tar -C "$tmp/h5" -cf "$tmp/h5.tar" a b                    # hardlink
+for h in h1 h2 h3 h4 h5; do
+  finished done $h
+  check "hostile $h: tick exit"          "$(tick REM_CAT_TAG=work REM_CAT_FILE="$tmp/$h.tar")" 0
+  check "hostile $h: nothing extracted"  "$(exists "$spool/done/$h/work")" n
+  check "hostile $h: degraded with a note" "$(grep -c 'rejected' "$spool/done/$h/TRUNCATED" 2>/dev/null)" 1
+  check "hostile $h: log still delivered" "$(cat "$spool/done/$h/job.log" 2>/dev/null)" "log-$h"
+  check "hostile $h: top level is only ours" "$(ls -A "$spool/done/$h" | LC_ALL=C sort | tr '\n' ' ')" ".v100-delivered TRUNCATED job.log "
+  check "hostile $h: retired"            "$(exists "$q/collected/3-rnd-$h")$(exists "$q/done/3-rnd-$h")" yn
+done
+check "hostile: nothing written outside" "$(exists "$tmp/victim")$(exists "$tmp/vdir/pwn")$(exists "$tmp/abs-escape")$(exists "$spool/done/h3/escape")$(exists "$spool/escape")" nnnnn
+
+# ---- item 2: a result that can never be collected degrades after 3 failed attempts; a dead log gives up after 10
+finished done px
+for k in 1 2; do
+  check "poison extract: tick $k exits nonzero" "$(tick PUB_RUN="$tmp/pubfailx")" 1
+  check "poison extract: tick $k delivers nothing, leaves no temp" "$(exists "$spool/done/px")$(exists "$spool/done/.dest-tmp-px")$(exists "$q/done/3-rnd-px")" nny
+done
+check "poison extract: tick 3 exits nonzero (loud)" "$(tick PUB_RUN="$tmp/pubfailx")" 1
+check "poison extract: tick 3 delivers job.log only" "$(cat "$spool/done/px/job.log")$(exists "$spool/done/px/work")$(grep -c '3x' "$spool/done/px/TRUNCATED")" log-pxn1
+check "poison extract: retired within 3 ticks" "$(exists "$q/collected/3-rnd-px")$(exists "$q/done/3-rnd-px")$(exists "$tmp/state/done.px")" ynn
+check "poison extract: one loud line" "$(grep -c 'delivering job.log only' "$tmp/err")" 1
+: >"$tmp/rem.log"
+check "poison extract: tick 4 quiet"   "$(tick PUB_RUN="$tmp/pubfailx")$(remcalls work)" 00
+finished failed pd
+for k in 1 2; do check "poison du: tick $k exits nonzero" "$(tick JOB_DU_EMPTY=1)$(exists "$spool/failed/pd")" 1n; done
+check "poison du: tick 3 exits nonzero (loud)" "$(tick JOB_DU_EMPTY=1)" 1
+check "poison du: log only, retired"   "$(cat "$spool/failed/pd/job.log")$(exists "$spool/failed/pd/work")$(exists "$q/collected/3-rnd-pd")" log-pdny
+finished done lg
+for k in 1 2 3 4 5 6 7 8 9; do
+  check "dead log: tick $k exits nonzero, no delivery" "$(tick REM_FAIL_TAG=log REM_FAIL_MODE=before)$(exists "$spool/done/lg")$(exists "$q/collected/3-rnd-lg")" 1nn
+done
+check "dead log: tick 10 gives up, loud"  "$(tick REM_FAIL_TAG=log REM_FAIL_MODE=before)" 1
+check "dead log: empty job.log + both notes, no work retried" "$(wc -c <"$spool/done/lg/job.log")$(grep -c "collect failed 10x" "$spool/done/lg/TRUNCATED")$(grep -c "work collect failed 3x" "$spool/done/lg/TRUNCATED")$(exists "$spool/done/lg/work")" 011n
+check "dead log: retired, counter gone"   "$(exists "$q/collected/3-rnd-lg")$(exists "$q/done/3-rnd-lg")$(exists "$tmp/state/done.lg")" ynn
+check "dead log: one loud line"           "$(grep -c 'delivering an empty job.log' "$tmp/err")" 1
+check "dead log: tick 11 quiet"           "$(tick REM_FAIL_TAG=log REM_FAIL_MODE=before)" 0
+
+# ---- item 3: killed between the work-dir move and the token: the next tick adopts the orphan instead of calling it a duplicate
+mkjob orph; echo o >"$spool/ready/orph/x"
+check "killed after move: tick exits nonzero" "$(tick JOB_KILL_AFTER_MV=1)" 1
+check "killed after move: stranded work dir, no token" "$(isfile "$work/3-rnd-orph/.v100-submit-sha")$(exists "$q/ready/3-rnd-orph")$(exists "$q/ready/.3-rnd-orph")" ynn
+check "killed after move: job kept in ready" "$(exists "$spool/ready/orph/run.sh")" y
+check "orphan: retry exits 0"          "$(tick)" 0
+check "orphan: not rejected as a duplicate" "$(exists "$spool/failed/orph")$(grep -c duplicate "$tmp/err")" n0
+check "orphan: submitted fresh"        "$(isfile "$q/ready/3-rnd-orph/.sha")$(cat "$work/3-rnd-orph/x")$(exists "$spool/ready/.submitted-orph/run.sh")" yoy
+mkjob ofor; mkdir -p "$work/3-rnd-ofor"; printf %s deadbeef >"$work/3-rnd-ofor/.v100-submit-sha"   # someone else's dir
+check "foreign stamp: still a duplicate" "$(tick)$(reason "$spool/failed/ofor" | grep -c duplicate)" 01
+check "foreign stamp: their dir untouched" "$(cat "$work/3-rnd-ofor/.v100-submit-sha")$(exists "$q/ready/3-rnd-ofor")" deadbeefn
+
+mkjob osf; mkdir -p "$work/3-rnd-osf"; echo theirs >"$work/3-rnd-osf/keep"; : >"$tmp/rem.log"
+check "stamp read fails: retried, not clobbered" "$(tick JOB_STAMP_FAIL=1)$(remcalls submit)$(exists "$spool/ready/osf/run.sh")$(exists "$spool/failed/osf")$(cat "$work/3-rnd-osf/keep")" 10yntheirs
+# ---- item 4: the delivered marker is bound to the job's sha
+S1=$(printf 'a%.0s' $(seq 64)); S2=$(printf 'b%.0s' $(seq 64))
+finished done mk; printf %s "$S1" >"$q/done/3-rnd-mk/.sha"
+mkdir -p "$spool/done/mk"; printf %s "$S2" >"$spool/done/mk/.v100-delivered"; echo theirs >"$spool/done/mk/job.log"   # another job's delivery
+check "foreign marker: tick exit"      "$(tick)" 0
+check "foreign marker: their result untouched" "$(cat "$spool/done/mk/job.log")" theirs
+check "foreign marker: ours next to it" "$(cat "$spool/done/mk.2/job.log")$(cat "$spool/done/mk.2/.v100-delivered" | head -c 3)" log-mkaaa
+check "foreign marker: retired"        "$(exists "$q/collected/3-rnd-mk")" y
+finished done mk3; printf %s "$S1" >"$q/done/3-rnd-mk3/.sha"
+check "own marker: retire fails, delivered" "$(tick REM_FAIL_TAG=final REM_FAIL_MODE=before)$(cat "$spool/done/mk3/.v100-delivered" | head -c 3)" 1aaa
+check "own marker: retry does not redeliver" "$(tick)$(ls "$spool/done" | grep -c '^mk3')$(exists "$q/collected/3-rnd-mk3")" 01y
+
+# ---- item 5: job.log that is not a regular file is never followed
+echo SECRET >"$tmp/secret"
+finished done lk; unlink "$q/done/3-rnd-lk/job.log"; ln -s "$tmp/secret" "$q/done/3-rnd-lk/job.log"
+check "symlink job.log: tick exit"     "$(tick)" 0
+check "symlink job.log: empty log, secret not read" "$(wc -c <"$spool/done/lk/job.log")$(grep -c SECRET "$spool/done/lk/job.log")" 00
+check "symlink job.log: noted"         "$(grep -c 'not a regular file' "$spool/done/lk/TRUNCATED")" 1
+check "symlink job.log: work still delivered, retired" "$(cat "$spool/done/lk/work/out.txt")$(exists "$q/collected/3-rnd-lk")" out-lky
+finished done lkd; unlink "$q/done/3-rnd-lkd/job.log"; mkdir "$q/done/3-rnd-lkd/job.log"   # not a regular file either
+check "dir job.log: tick exit, empty log, noted" "$(tick)$(wc -c <"$spool/done/lkd/job.log")$(grep -c 'not a regular file' "$spool/done/lkd/TRUNCATED")" 001
 
 # ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
 mkdir -p "$tmp/bin" "$tmp/emptyspool"
 printf '#!/bin/sh\necho "$*" >>"$SSH_LOG"\nexit 255\n' >"$tmp/bin/ssh"; chmod +x "$tmp/bin/ssh"
-rc=$(cd "$tmp" && env -u REMOTE PATH="$tmp/bin:$PATH" PUB_RUN=env SPOOL="$tmp/emptyspool" V100_HOST=gpu-host SSH_LOG="$tmp/ssh.log" "$sync" 2>"$tmp/err"; echo $?)
+rc=$(cd "$tmp" && env -u REMOTE PATH="$tmp/bin:$PATH" PUB_RUN=env SPOOL="$tmp/emptyspool" V100_STATE="$tmp/state" V100_HOST=gpu-host SSH_LOG="$tmp/ssh.log" "$sync" 2>"$tmp/err"; echo $?)
 check "unreachable remote: exit nonzero" "$rc" 1
 check "default ssh: BatchMode"         "$(grep -c 'BatchMode=yes' "$tmp/ssh.log")" 1
 check "default ssh: ConnectTimeout"    "$(grep -c 'ConnectTimeout=10' "$tmp/ssh.log")" 1
