@@ -423,6 +423,17 @@ check "sha-less tokens: tick exit" "$(tick)" 0
 m1=$(cat "$spool/done/ns1/.v100-delivered"); m2=$(cat "$spool/done/ns2/.v100-delivered")
 check "sha-less tokens: markers distinct, 64 hex" "$([ "$m1" != "$m2" ] && echo d)$(printf %s "$m1$m2" | grep -c '^[0-9a-f]\{128\}$')" d1
 
+# ---- review 4: infra retries have a ceiling (a job can induce one, e.g. by killing its own tar), after which the degrade path is reachable
+finished done ic
+for k in $(seq 30); do tick REM_FAIL_TAG=prep REM_FAIL_MODE=before >/dev/null; done
+check "infra ceiling: 30 infra ticks stay uncounted, nothing delivered" "$(cat "$tmp/state/done.ic.infra")$(exists "$tmp/state/done.ic")$(exists "$spool/done/ic")" 30nn
+check "infra ceiling: tick 31 counts as a job fault (1/3)" "$(tick REM_FAIL_TAG=prep REM_FAIL_MODE=before)$(cat "$tmp/state/done.ic")$(exists "$spool/done/ic")" 11n
+check "infra ceiling: tick 32 counts (2/3)" "$(tick REM_FAIL_TAG=prep REM_FAIL_MODE=before)$(cat "$tmp/state/done.ic")" 12
+check "infra ceiling: tick 33 degrades to log only and retires" "$(tick REM_FAIL_TAG=prep REM_FAIL_MODE=before)$(cat "$spool/done/ic/job.log")$(exists "$spool/done/ic/work")$(grep -c 'work collect failed 3x' "$spool/done/ic/TRUNCATED")$(exists "$q/collected/3-rnd-ic")$(exists "$tmp/state/done.ic.infra")$(exists "$tmp/state/done.ic")" 1log-icn1ynn
+finished done iw
+for k in 1 2 3; do tick REM_FAIL_TAG=prep REM_FAIL_MODE=before >/dev/null; done
+check "infra counter: cleared when the job is collected" "$(cat "$tmp/state/done.iw.infra")$(tick)$(exists "$tmp/state/done.iw.infra")$(cat "$spool/done/iw/work/out.txt")" 30nout-iw
+
 # ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
 mkdir -p "$tmp/bin" "$tmp/emptyspool"
 printf '#!/bin/sh\necho "$*" >>"$SSH_LOG"\nexit 255\n' >"$tmp/bin/ssh"; chmod +x "$tmp/bin/ssh"
