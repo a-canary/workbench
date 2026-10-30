@@ -218,7 +218,13 @@ elif [ -e "$wt/.git" ]; then args+=(--ro-bind /dev/null /work/.git); fi
 # No network in the jail, so a fresh worktree can't install deps: lend the host repo's, read-only.
 # Skip only a real (non-empty) node_modules: bwrap leaves an empty mountpoint dir behind after each run.
 # Private lane, build/qa only: a public or research jail can carry what it reads off the host.
-[ "$lane" = private ] && [ "$profile" != research ] && [ -n "${WORKER_DEPS:-}" ] && [ -d "$WORKER_DEPS" ] && [ -z "$(ls -A "$wt/node_modules" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$WORKER_DEPS")" /work/node_modules)
+# Same for a python repo's .venv (WORKER_VENV): bound read-only at /work/.venv, so GREEN's fresh checkout can run pytest.
+if [ "$lane" = private ] && [ "$profile" != research ]; then
+  for spec in "${WORKER_DEPS:-}:node_modules" "${WORKER_VENV:-}:.venv"; do
+    src=${spec%:*} dst=${spec##*:}
+    [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
+  done
+fi
 args+=(--bind "$tmp/agent" /home/worker/.pi/agent
   --ro-bind "$tmp/relay.py" /run/relay.py --bind "$tmp/ep.sock" /run/ep.sock
   --setenv HOME /home/worker --setenv PATH "$path" --setenv TERM dumb

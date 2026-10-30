@@ -103,6 +103,9 @@ RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|' run "Worker-May-Edit matchi
 RED_MSG=$'red\n\nWorker-May-Edit: .' run "Worker-May-Edit '.' refused" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: -e.' run "Worker-May-Edit '-e.' is a pattern, not an option" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$\nWorker-May-Edit: ' run "empty Worker-May-Edit adds nothing" 'echo x > conftest.py' refused
+# near-catch-alls that miss the one sentinel path: still a blanket pass (wb-d0d 6)
+RED_MSG=$'red\n\nWorker-May-Edit: ^[^z]' run "Worker-May-Edit '^[^z]' refused" 'echo x > conftest.py' refused
+RED_MSG=$'red\n\nWorker-May-Edit: [^/]$' run "Worker-May-Edit '[^/]\$' refused" 'echo x > conftest.py' refused
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
