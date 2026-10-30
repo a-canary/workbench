@@ -23,28 +23,33 @@ if [ -z "$repo" ] || [ -z "$base" ] || [ -z "$head" ] || [ -z "$spec" ]; then
   exit 2
 fi
 
-# (1) clean export of --head (tracked files only — no .env, no .git)
-worktree=$(mktemp -d)
-trap 'rm -rf "$worktree"' EXIT
-git -C "$repo" archive "$head" | tar -x -C "$worktree" || { echo "sandbox-review: cannot export $head" >&2; exit 2; }
+for ref in "$base" "$head"; do
+  git -C "$repo" rev-parse -q --verify "$ref^{commit}" >/dev/null || { echo "sandbox-review: bad ref $ref" >&2; exit 2; }
+done
 
-# (2) task file: spec, blank line, diff base..head
-task=$worktree/.task
-{
-  cat "$spec"
-  echo
-  git -C "$repo" diff "$base" "$head"
-} > "$task"
+# (1) clean export of --head: tracked files only (no .env, no .git). checkout-index, not git archive,
+# so the reviewed head's .gitattributes export-ignore cannot hide files from the reviewer.
+tmp=$(mktemp -d); worktree=$tmp/wt; task=$tmp/task; idx=$tmp/index
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$worktree"
+GIT_INDEX_FILE=$idx git -C "$repo" read-tree "$head" &&
+  GIT_INDEX_FILE=$idx git -C "$repo" checkout-index -a --prefix="$worktree/" ||
+  { echo "sandbox-review: cannot export $head" >&2; exit 2; }
 
-# (3) run the jailed reviewer
-out=$("${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$worktree" --lane "$lane" --role reviewer --task "$task" 2>&1)
+# (2) task file OUTSIDE the export (a tracked .task symlink would redirect the write): spec + diff
+{ cat "$spec" && echo && git -C "$repo" diff "$base" "$head"; } > "$task" ||
+  { echo "sandbox-review: cannot build task" >&2; exit 2; }
+
+# (3) run the jailed reviewer; stderr stays out of the verdict search
+out=$("${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$worktree" --lane "$lane" --role reviewer --task "$task")
 rc=$?
+printf '%s\n' "$out"
+[ $rc -eq 0 ] || { echo "sandbox-review: reviewer exited $rc" >&2; exit 3; }
 
-# (4) print stdout; find verdict (last line matching ^(CLEAR|BLOCK))
-echo "$out"
-verdict=$(printf '%s\n' "$out" | grep -E '^(CLEAR|BLOCK)' | tail -n1)
+# (4) verdict = the reviewer's LAST non-empty stdout line, exactly CLEAR or "BLOCK: ..." (roles/reviewer.md)
+verdict=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n1)
 case "$verdict" in
-  CLEAR*) exit 0 ;;
-  BLOCK*) exit 1 ;;
-  *)      exit 3 ;;
+  CLEAR) exit 0 ;;
+  "BLOCK: "*|BLOCK) exit 1 ;;
+  *) exit 3 ;;
 esac
