@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # worker-sandbox — run a pi worker agent jailed to one git worktree.
 #
-#   worker-sandbox --worktree DIR --lane private|public --task FILE \
+#   worker-sandbox --worktree DIR --lane private|ollama|public --task FILE \
 #                  [--role NAME|FILE] [--profile build|research|qa] [--tools ...] [--extensions a.ts,b.ts]
 #                  [--app-port N] [--out DIR] [--timeout 600] [--exec CMD...]
 #
@@ -24,6 +24,7 @@
 # The ONLY network path is a unix-socket relay to exactly one LLM endpoint, one request per
 # connection to its chat/models API only; any API key is added host-side and never enters the jail:
 #   private lane -> local V100 laneproxy (never leaves the box)
+#   ollama  lane -> Ollama Cloud over TLS (cloud, but operator-trusted for private repos, 2026-10-30)
 #   public  lane -> 9router Worker combo (cloud; refused unless repo is PUBLIC)
 # --exec runs CMD in the jail instead of pi (used by worker-sandbox-test).
 set -euo pipefail
@@ -108,15 +109,21 @@ need_public() {
 # repo, or nothing at all (an empty --worktree = web-only research; the caller must not write into it
 # during the run: it is checked once, at start)
 [ "$profile" != research ] || [ -z "$(ls -A "$wt")" ] || need_public "research profile"
+rmode=unix2http up=
 case $lane in
   private)
     port=${WORKER_PRIVATE_PORT:-8099} model=${WORKER_PRIVATE_MODEL:-queue} key= ;;
+  ollama)
+    # Operator 2026-10-30: Ollama Cloud is a trusted private endpoint, so no need_public. port is only the
+    # jail-side listener (a jail can't bind 443); the relay dials the TLS upstream.
+    port=11434 rmode=unix2https up=${WORKER_OLLAMA_UPSTREAM:-ollama.com:443} model=${WORKER_OLLAMA_MODEL:-glm-5.3}
+    key=$(pass show "${WORKER_OLLAMA_PASS:-api/ollamacloud/api-key}" | head -1) ;;
   public)
     need_public "public lane" prepublic  # sends the code to a cloud model
     port=${WORKER_PUBLIC_PORT:-20128} model=${WORKER_PUBLIC_MODEL:-Worker}
     # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;
-  *) die "--lane private|public required" ;;
+  *) die "--lane private|ollama|public required" ;;
 esac
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/worker-sandbox.XXXXXX")
@@ -128,8 +135,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# host side of the only door: unix socket -> 127.0.0.1:$port, one allowlisted LLM API request per connection
-RELAY_KEY=$key RELAY_MODEL=$model python3 "$here/relay.py" unix2http "$tmp/ep.sock" "127.0.0.1:$port" &
+# host side of the only door: unix socket -> the lane's endpoint, one allowlisted LLM API request per connection
+RELAY_KEY=$key RELAY_MODEL=$model python3 "$here/relay.py" "$rmode" "$tmp/ep.sock" "${up:-127.0.0.1:$port}" &
 relay_pid=$!
 for _ in $(seq 50); do [ -S "$tmp/ep.sock" ] && break; sleep 0.1; done
 [ -S "$tmp/ep.sock" ] || die "relay failed to start"
@@ -217,9 +224,9 @@ if [ -d "$wt/.git" ]; then args+=(--tmpfs /work/.git)
 elif [ -e "$wt/.git" ]; then args+=(--ro-bind /dev/null /work/.git); fi
 # No network in the jail, so a fresh worktree can't install deps: lend the host repo's, read-only.
 # Skip only a real (non-empty) node_modules: bwrap leaves an empty mountpoint dir behind after each run.
-# Private lane, build/qa only: a public or research jail can carry what it reads off the host.
+# Private or ollama lane, build/qa only: a public or research jail can carry what it reads off the host.
 # Same for a python repo's .venv (WORKER_VENV): bound read-only at /work/.venv, so GREEN's fresh checkout can run pytest.
-if [ "$lane" = private ] && [ "$profile" != research ]; then
+if [ "$lane" != public ] && [ "$profile" != research ]; then
   for spec in "${WORKER_DEPS:-}:node_modules" "${WORKER_VENV:-}:.venv"; do
     src=${spec%:*} dst=${spec##*:}
     [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
