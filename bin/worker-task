@@ -42,10 +42,13 @@ mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
 # read before the worker runs (the jail masks .git anyway)
 may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
-# a catch-all that dodges one sentinel ('^[^z]') still matches most of these: refuse when it hits two or more
+# a blanket exemption (even '^[^z]' or '^[^zQ0]', which dodge a single sentinel) matches many unrelated paths
+# and many runner-config names; a real exemption names one or two files. Refuse at three or more hits.
 if [ -n "$may_edit" ]; then
-  hits=$(printf '%s\n' zz/never.q Qq/never.q 00/never.q _x/never.q .y/never.q '~w/never.q' mm/never.q | grep -cE -- "$may_edit" || true)
-  [ "$hits" -lt 2 ] || die "Worker-May-Edit '$may_edit' matches nearly every path"
+  hits=$(printf '%s\n' zz/never.q Qq/never.q 00/never.q _x/never.q .y/never.q '~w/never.q' \
+    conftest.py package.json a/x.toml setup.cfg .env Makefile vite.config.ts pytest.py yarn.lock .eslintrc.json \
+    | { grep -cE -- "$may_edit" || true; })
+  [ "$hits" -lt 3 ] || die "Worker-May-Edit '$may_edit' matches too many paths ($hits of 16 probes)"
 fi
 # files that change how the test runs or what the leak scan sees, matched anywhere in the tree:
 # manifests/locks, *config* and rc/env dotfiles, toml/ini/cfg, make, python import hooks, compiled .pyc,
