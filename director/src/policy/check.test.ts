@@ -55,7 +55,7 @@ test("rejects other vault subtrees (vault/notes is not vault/ke or vault/directo
   expect(checkWritePath("~/vault/notes/x.md", { home }).ok).toBe(false);
 });
 
-// --- acceptance 2: all five allowed targets pass unimpeded ---
+// --- acceptance 2: all allowed targets pass unimpeded ---
 
 test("allows ~/repos/**", () => {
   expect(checkWritePath("~/repos/arc-director/src/a.ts", { home }).ok).toBe(true);
@@ -71,6 +71,13 @@ test("allows ~/vault/ke/**", () => {
 
 test("allows ~/vault/director/**", () => {
   expect(checkWritePath("~/vault/director/memory.md", { home }).ok).toBe(true);
+});
+
+test("allows ~/trash/** (arc-ypp) but not a sibling prefix", () => {
+  expect(checkWritePath("~/trash/1793400000_foo-20261031/reason.md", { home }).ok).toBe(true);
+  expect(checkWritePath("~/trash", { home }).ok).toBe(true); // `mv x ~/trash`
+  expect(checkWritePath("~/trashy/x", { home }).ok).toBe(false);
+  expect(checkWritePath("~/trash/../.bashrc", { home }).ok).toBe(false);
 });
 
 // A worker is dispatched into ~/worktrees/<repo>-<task>/ and must be able to write
