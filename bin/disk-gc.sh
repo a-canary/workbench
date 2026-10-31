@@ -34,26 +34,31 @@ while IFS= read -r item; do
     freed_kb=$((freed_kb + ${item_kb:-0}))
     log "Removed ~/trash/$item (~$((${item_kb:-0} / 1024))M), freed $((freed_kb / 1024))M so far"
 done < <(ls -1tr ~/trash 2>/dev/null)
+
+# Phase 2: if still below 5GB freed, clean our own /tmp scratch dirs older than 1 day.
+# NUL-delimited: an unquoted `for d in $dirs` split a name like 'claude-x *' and globbed
+# the `*` against the caller's cwd, rm -rf'ing the project checkout (wb#73 review).
+tmp_root=${DISK_GC_TMP:-/tmp}
+live_scratch="$tmp_root/claude-$(id -u)"  # Claude Code's per-user scratch: mtime lags while in use
+if [ "$freed_kb" -lt "$max_kb" ]; then
+    while IFS= read -r -d '' d; do
+        [ "$freed_kb" -ge "$max_kb" ] && break
+        [ "$d" = "$live_scratch" ] && continue
+        size_kb=$(du -sk -- "$d" 2>/dev/null | awk '{print $1}')
+        rm -rf -- "$d" 2>/dev/null
+        if [ -e "$d" ]; then log "SKIP $d (rm failed)"; continue; fi
+        freed_kb=$((freed_kb + ${size_kb:-0}))
+        log "Removed $d (~$((${size_kb:-0} / 1024))M), freed $((freed_kb / 1024))M so far"
+    done < <(find "$tmp_root" -mindepth 1 -maxdepth 1 -type d -user "$(id -u)" \( -name 'arc-*' -o -name 'analysis-*' -o -name 'bench-*' -o -name 'claude-*' -o -name 'gpu-*' \) -mtime +1 -print0 2>/dev/null)
+fi
+
+# Phase 3: if still below 5GB freed, dangling docker build cache only (-a wiped every
+# user's cache machine-wide, ignoring the cap)
+if [ "$freed_kb" -lt "$max_kb" ]; then
+    docker builder prune -f >> "$LOG" 2>&1
+    log "Pruned dangling docker builder cache"
+fi
 freed=$((freed_kb / 1024 / 1024))
-
-# Phase 2: if still below 5GB freed, clean /tmp scratch dirs older than 1 day
-if [ "$freed" -lt "$MAX_FREE_GB" ]; then
-    tmp_dirs=$(find /tmp -maxdepth 1 -type d \( -name 'arc-*' -o -name 'analysis-*' -o -name 'bench-*' -o -name 'claude-*' -o -name 'gpu-*' \) -mtime +1 2>/dev/null)
-    for d in $tmp_dirs; do
-        [ "$freed" -ge "$MAX_FREE_GB" ] && break
-        size_kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
-        rm -rf "$d" 2>/dev/null
-        size_gb=$(( ${size_kb:-0} / 1024 / 1024 ))
-        freed=$((freed + size_gb))
-        log "Removed $d (~${size_gb}G)"
-    done
-fi
-
-# Phase 3: if still below 5GB freed, docker builder cache
-if [ "$freed" -lt "$MAX_FREE_GB" ]; then
-    docker builder prune -af 2>/dev/null >> "$LOG" 2>&1
-    log "Pruned docker builder cache"
-fi
 
 final_gb=$(df --output=avail / | tail -1 | tr -d ' ' | awk '{print int($1/1024/1024)}')
 log "GC complete: freed ~${freed}G, now ${final_gb}G free"
