@@ -115,12 +115,10 @@ RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
-# a RED commit that also carries a source stub: the stub is the worker's to fill only when its author names it
-# in Worker-May-Edit; anything else it carries (a mock, a golden file) stays guarded (wb-e22 H3)
-stub=$'red\n\nWorker-May-Edit: ^impl\\.txt$'
-RED_MSG=$stub REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried stub named in Worker-May-Edit is editable" 'echo done > impl.txt' ok
-RED_MSG=$stub REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED test file still guarded beside a stub" 'echo true > t.test.sh' refused
-REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried file not named stays guarded" 'echo done > impl.txt' refused
+# a RED commit that also carries a source stub: every file it touched stays guarded (wb-e22 review: a
+# name-based or Worker-May-Edit stub exemption also unguarded mocks, golden files and the RED test itself)
+REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried file stays guarded" 'echo done > impl.txt' refused
+RED_MSG=$'red\n\nWorker-May-Edit: \\.sh$' REDF=t.test.sh REDBODY='test -f ok' run "Worker-May-Edit never unguards the RED test" 'echo true > t.test.sh' refused
 # a Test already red before the RED commit (whole-project tsc, a red sibling suite) is a prep fault: a GREEN
 # failure then exits rc 7, not blamed on the model (wb-e22 H4). The baseline never stops a run on its own.
 BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "Test red before the RED commit is rc 7" 'true' rc7
@@ -129,6 +127,8 @@ BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" run "Test green bef
 # Tests the stem match cannot scope: a subshell && (the split breaks the shell), a glob over new files
 TEST="(cd . && sh t.sh)" run "subshell && Test runs the worker" 'true' ok
 REDF=case.sh TEST='for f in c*.sh; do sh "$f"; done' run "Test globbing new files runs the worker" 'true' ok
+# ...and a model failure on such a Test is still the model's (rc 2), not a prep fault (rc 7)
+REDF=case.sh REDBODY='test -f never' TEST='for f in c*.sh; do sh "$f" || exit 1; done' run "unscoped Test model failure is rc 2" 'true' rc2
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 # PR create retries a transient api.github.com refusal (2 of 5 lane runs hit one, 2026-10-29); the gh stub fails $GH_FAILS times
 mkdir "$tmp/ghflaky"
