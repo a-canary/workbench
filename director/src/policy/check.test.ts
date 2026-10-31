@@ -73,6 +73,11 @@ test("allows ~/vault/director/**", () => {
   expect(checkWritePath("~/vault/director/memory.md", { home }).ok).toBe(true);
 });
 
+test("allows ~/trash/** (arc-ypp) but not a sibling prefix", () => {
+  expect(checkWritePath("~/trash/1793400000_foo-20261031/reason.md", { home }).ok).toBe(true);
+  expect(checkWritePath("~/trashy/x", { home }).ok).toBe(false);
+});
+
 // A worker is dispatched into ~/worktrees/<repo>-<task>/ and must be able to write
 // docs (ADR, SPEC, CHOICES) into its own assigned worktree. DESIGN.md §4.3 states
 // the default lane as "repo+worktree paths only" (`["<repo>/**", "<worktree>/**"]`);

@@ -36,6 +36,9 @@ const ALLOW_PREFIXES = [
   "/tmp/**",
   "~/vault/ke/**",
   "~/vault/director/**",
+  // ~/trash: the to-trash/retire destination (operator ruling arc-ypp, 2026-10-30).
+  // Move-in only by rule (GLOBAL-RULES write lane); nothing there is read back as config or code.
+  "~/trash/**",
 ];
 export const ALLOWLIST_DISPLAY = [...ALLOW_PREFIXES, "ledger-via-bookie"];
 
