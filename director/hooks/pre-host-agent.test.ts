@@ -26,7 +26,7 @@ test("blocks host pi -p, including nohup/background/pipes", () => {
   expect(run('pi -p "do task"')).toBe(2);
   expect(run('nohup pi -p "task" > log 2>&1 &')).toBe(2);
   expect(run('cat task.md | pi -p')).toBe(2);
-  expect(run('/home/aaron/.local/bin/pi -p x')).toBe(2);
+  expect(run('/home/worker/.local/bin/pi -p x')).toBe(2);
 });
 
 test("allows tool-less one-turn claude -p (ask-claude)", () => {
