@@ -70,12 +70,14 @@ trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir" "$basedir.idx"}; [ -n
 # the sandbox masks .git and has no docker or network to a local DB (wb-igh: a merge-gate Test died with
 # "not a git repository" and was taken as a valid RED). Sets $crash to the matched pattern (our own constant,
 # never test output: GREEN output is worker-controlled and WORKER_TASK_LOG reaches beads).
-crash_pats=('EROFS: read-only file system' 'failed to load config' 'Startup Error'
-  'fatal: not a git repository' 'docker: (command )?not found' 'Cannot connect to the Docker daemon'
+crash_pats=('EROFS: read-only file system' 'failed to load config' 'Startup Error')
+# RED-only: a missing git/docker/DB is fixed before any worker runs, so once RED ran clean a GREEN that
+# prints one of these is the worker's own output (or doing) and stays the model's failure, not infra.
+red_pats=('fatal: not a git repository' 'docker: (command )?not found' 'Cannot connect to the Docker daemon'
   'ECONNREFUSED 127\.0\.0\.1:5432' 'connect ECONNREFUSED .*:5432' 'This does not look like a tar archive')
 crash=
-startup_crash() {
-  local p; for p in "${crash_pats[@]}"; do grep -qE -- "$p" "$1" && { crash=$p; return 0; }; done; return 1
+startup_crash() { # $1 output file; $2=red also matches red_pats
+  local p; for p in "${crash_pats[@]}" ${2:+"${red_pats[@]}"}; do grep -qE -- "$p" "$1" && { crash=$p; return 0; }; done; return 1
 }
 
 log "RED: $test"
@@ -87,7 +89,7 @@ if [ $red_rc -eq 0 ]; then
 elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
   log "RED test command not runnable in sandbox (rc $red_rc)"
   exit 4
-elif startup_crash "$red_out"; then
+elif startup_crash "$red_out" red; then
   log "RED crashed at startup (infra, not a valid RED; pattern: $crash)"
   exit 4
 fi
@@ -116,7 +118,7 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   fi
   rm -f "$basedir.idx"
   if [ $base_rc -eq 0 ]; then :
-  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out"; then
+  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out" red; then
     log "baseline timed out or crashed at startup (rc $base_rc); not judged"
   else
     cat "$red_out" >&2  # whole: lane-run reads its failing names as the parent baseline (wb-it5)

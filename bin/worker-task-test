@@ -23,7 +23,7 @@ chmod +x "$tmp/gitfail/git"
 
 # $1 name, $2 attack (run as the worker, in the worktree), $3 expected rc class: ok|refused
 run() {
-  local wt="$tmp/wt-$RANDOM"
+  local wt; wt=$(mktemp -d "$tmp/wt-XXXXXX")
   git init -q "$wt"
   echo '{}' > "$wt/package.json"
   [ -z "${BASEF:-}" ] || echo "$BASEBODY" > "$wt/$BASEF"
@@ -93,7 +93,7 @@ for msg in 'docker: command not found' 'docker: not found' 'Cannot connect to th
   REDBODY="echo '$msg' >&2; exit 1" run "infra RED: $msg (rc 4)" 'true' rc4
 done
 REDBODY='[ -f ok ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }; exit 1' \
-  run "docker absent in GREEN is infra (rc 4)" 'true' rc4
+  run "docker message only in GREEN stays the worker's failure" 'true' refused
 REDBODY='echo "AssertionError: expected git status to mention a repository" >&2; test -f ok' \
   run "an assertion that mentions git is still a valid RED" 'true' ok
 # rc 126/127 = the test command never ran (wb-s8v: ~/.bun/bin/bun absent under the sandbox HOME): infra, not RED/GREEN
