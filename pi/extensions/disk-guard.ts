@@ -1,11 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execSync } from "child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 
 const WARN_PCT = 90;
 const GC_TRIGGER_GB = 1;   // trigger GC when free drops below this
 const GC_TARGET_GB = 5;    // free at most this much via GC
-// lane task: resolve the GC script from $PI_DISK_GC_SCRIPT, else $HOME/bin/disk-gc.sh (see bin/disk-guard-test).
-const GC_SCRIPT = "";
+export const gcScript = () => process.env.PI_DISK_GC_SCRIPT || join(homedir(), "bin/disk-gc.sh");
 
 function getDiskUsage(): { pct: number; availGb: number } {
   try {
@@ -39,9 +41,10 @@ function estimateSizeGb(toolName: string, args: any): number {
   return 0.001;
 }
 
-function runGc(): boolean {
+export function runGc(script = gcScript()): boolean {
+  if (!existsSync(script)) return false;
   try {
-    execSync(GC_SCRIPT, { timeout: 30000 });
+    execSync(script, { timeout: 30000 });
     return true;
   } catch {
     return false;
