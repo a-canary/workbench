@@ -13,7 +13,7 @@
 //
 // plan (dry-run unless --file): HARNESS -> one bug bead per new shape (key = infra-<crash pattern or rc> for jail/
 // infra crashes from any rule, else rule + normalized cause; label
-// `shape:<key>`; skipped while an open bead carries that label) in --bd-dir (default ~/repos/workbench);
+// `shape:<key>`; skipped while an open bead carries that label, or when every case was listed by an earlier bead) in --bd-dir (default ~/repos/workbench);
 // MODEL -> one line per case appended to --queue (sanitize-queue.jsonl, wb-rf4 input; dedupe id+ts); judge -> counted.
 //
 // Inputs: sprints.jsonl, `bd show <id> --json` run in the repo dir of the bead's sprint `start` row (or
@@ -158,11 +158,18 @@ export const shapeKey = (c: Case) => {
 };
 
 // What the sweep would file: new HARNESS shapes as beads, MODEL cases as sanitize-queue rows, judge as a count.
-// hasOpenShape(key) / queued("id ts") say what already exists; both are injected so tests need no bd or vault.
-export function plan(out: Out, hasOpenShape: (key: string) => boolean, queued: Set<string>) {
+// filed(key) = {open, ids} over every bead (open or closed) with that shape label; queued("id ts") = queue rows.
+// Both injected so tests need no bd or vault. A shape refiles only for case ids no earlier bead listed.
+// ponytail: dedupe is by bead id, so the same bead failing the same way after a fix stays silent; add run ts if that matters.
+export function plan(out: Out, filed: (key: string) => { open: boolean; ids: Set<string> }, queued: Set<string>) {
   const shapes = new Map<string, Case[]>();
   for (const c of out.cases.filter((c) => c.class === "HARNESS")) shapes.set(shapeKey(c), [...(shapes.get(shapeKey(c)) ?? []), c]);
-  const beads = [...shapes].filter(([key]) => !hasOpenShape(key)).map(([key, cs]) => ({
+  const fresh = [...shapes].flatMap(([key, all]) => {
+    const f = filed(key);
+    const cs = all.filter((c) => !f.ids.has(c.id));
+    return f.open || !cs.length ? [] : [[key, cs] as const];
+  });
+  const beads = fresh.map(([key, cs]) => ({
     key,
     title: `worker-failure shape ${key}: ${cs.length} case${cs.length > 1 ? "s" : ""} (e.g. ${cs.slice(0, 3).map((c) => c.id).join(", ")})`,
     description: [`shape: ${key}`, `Filed by bin/worker-failure-classify.ts --file (wb-3xh).`, "", ...cs.map((c) => `- ${c.id}: ${c.runs[c.runs.length - 1]?.note ?? ""}`)].join("\n"),
@@ -209,7 +216,12 @@ function main() {
       try { const q = JSON.parse(l); return [`${q.id} ${q.ts}`]; } catch { return []; }
     }),
   );
-  const p = plan(out, (key) => (JSON.parse(bd(["list", "--label", `shape:${key}`, "--json"]) || "[]") as unknown[]).length > 0, queued);
+  const filed = (key: string) => {
+    const bs = JSON.parse(bd(["list", "--label", `shape:${key}`, "--all", "--json"]) || "[]") as { status: string; description?: string }[];
+    const ids = new Set(bs.flatMap((b) => [...(b.description ?? "").matchAll(/^- ([^\s:]+):/gm)].map((m) => m[1])));
+    return { open: bs.some((b) => b.status !== "closed"), ids };
+  };
+  const p = plan(out, filed, queued);
   const result = a.includes("--file") ? file(p, bd, queuePath) : { dryRun: true };
   console.log(JSON.stringify({ ...out, plan: p, result }, null, 2));
 }
