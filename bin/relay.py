@@ -105,8 +105,12 @@ def http_one(c, dial):
     if os.environ.get("RELAY_KEY"): keep.append(b"Authorization: Bearer " + os.environ["RELAY_KEY"].encode())
     try: u = dial()  # dial only once the head passed
     except OSError as e:  # refused, DNS, TLS verify (ssl.SSLError is an OSError): say so, never a silent close
-        print(f"relay: upstream {e!r}", file=sys.stderr, flush=True)  # the reason stays on the host side
-        return refuse(c, b"upstream unreachable", b"502 Bad Gateway")
+        refuse(c, b"upstream unreachable", b"502 Bad Gateway")  # first, so a dead stderr can't swallow it
+        # fixed tokens only (class, errno, SSL reason): this stderr is shared with the jailed worker's, so no
+        # str(e) / repr, which can carry the upstream hostname or certificate names
+        try: print(f"relay: upstream {type(e).__name__} errno={e.errno} reason={getattr(e, 'reason', None)}", file=sys.stderr, flush=True)
+        except (OSError, ValueError): pass
+        return
     with u:
         u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
         left = length - len(body)
