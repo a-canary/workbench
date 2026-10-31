@@ -39,8 +39,9 @@ Pulls the pinned component versions, installs config, symlinks skills.
 The QA role needs chrome-headless-shell and Python image libraries.
 bootstrap.sh installs both idempotently, skipping anything already present.
 
-chrome-headless-shell: `npx @puppeteer/browsers install chrome-headless-shell`. worker-sandbox reads it from puppeteer's cache at `~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-linux64`.
-pillow and numpy: `pip install --user pillow numpy` (needed by img-collapse).
+chrome-headless-shell: `npx -y @puppeteer/browsers install chrome-headless-shell --path ~/.cache/puppeteer`. worker-sandbox reads it from puppeteer's cache at `~/.cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-linux64`.
+pillow and numpy: `python3 -m pip install --user pillow numpy` (needed by img-collapse). On Debian/Ubuntu, PEP 668 refuses this; install `python3-pil python3-numpy` with apt instead.
+A failed QA-dependency install prints a WARN and bootstrap exits 3 after installing everything else.
 Override the chrome location with `WORKER_CHROME`: a directory that contains a `chrome-headless-shell` binary.
 
 ## Qualification

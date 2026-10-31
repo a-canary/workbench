@@ -17,24 +17,69 @@ check "bootstrap parses"                 "$(bash -n "$here/bootstrap.sh" && echo
 
 # fresh user: no chrome, python lacks pillow/numpy -> both installs listed
 out=$(dry "$tmp/nopy" WORKER_CHROME=)
-check "fresh: chrome install listed"     "$(has "$out" "npx @puppeteer/browsers install chrome-headless-shell")" y
+check "fresh: chrome install listed"     "$(has "$out" "@puppeteer/browsers install chrome-headless-shell --path")" y
 check "fresh: pillow+numpy listed"       "$(has "$out" "pip install --user pillow numpy")" y
 
 # already present: WORKER_CHROME dir holds the binary, python imports succeed -> both skipped
 mkdir -p "$tmp/chrome"; printf '#!/bin/sh\n' >"$tmp/chrome/chrome-headless-shell"; chmod +x "$tmp/chrome/chrome-headless-shell"
 out=$(dry "$tmp/py" WORKER_CHROME="$tmp/chrome")
-check "present: chrome install skipped"  "$(has "$out" "npx @puppeteer/browsers install")" n
+check "present: chrome install skipped"  "$(has "$out" "@puppeteer/browsers install")" n
 check "present: pip install skipped"     "$(has "$out" "pip install")" n
 
 # chrome found in puppeteer's cache (worker-sandbox's default lookup) also counts as present
 mkdir -p "$tmp/home/.cache/puppeteer/chrome-headless-shell/linux-1/chrome-headless-shell-linux64"
 cp "$tmp/chrome/chrome-headless-shell" "$tmp/home/.cache/puppeteer/chrome-headless-shell/linux-1/chrome-headless-shell-linux64/"
 out=$(dry "$tmp/py" WORKER_CHROME=)
-check "cache: chrome install skipped"    "$(has "$out" "npx @puppeteer/browsers install")" n
+check "cache: chrome install skipped"    "$(has "$out" "@puppeteer/browsers install")" n
 
 readme=$(cat "$here/README.md")
 check "README: QA dependencies section"  "$(grep -c '^## QA role dependencies' "$here/README.md")" 1
 check "README: names chrome-headless-shell" "$(has "$readme" "chrome-headless-shell")" y
 check "README: names pillow numpy"       "$(has "$readme" "pillow numpy")" y
 check "README: names WORKER_CHROME"      "$(has "$readme" "WORKER_CHROME")" y
+
+# --- real (non-dry) runs against a fresh HOME (wb-dkq) ---
+# A copy of the workbench whose manifest points at local file:// repos; npx and python3 are stubs.
+wb="$tmp/wb"; mkdir -p "$wb" "$tmp/stub"
+cp -r "$here/bootstrap.sh" "$here/pi" "$wb/"
+for r in skills proxy; do
+  git init -q -b main "$tmp/src-$r"
+  mkdir -p "$tmp/src-$r/skills/demo"; echo "$r" >"$tmp/src-$r/skills/demo/SKILL.md"
+  git -C "$tmp/src-$r" add -A
+  git -C "$tmp/src-$r" -c user.name=t -c user.email=t@t commit -qm init
+done
+jq --arg s "file://$tmp/src-skills" --arg p "file://$tmp/src-proxy" \
+  '.components.skills.repo=$s | .components.skills.ref="main" | .components.proxy.repo=$p | .components.proxy.ref="main"' \
+  "$here/manifest.json" >"$wb/manifest.json"
+printf '#!/bin/sh\necho "$*" >>"%s/npx.args"\n' "$tmp" >"$tmp/stub/npx"
+# python3 stub: imports fail; pip exits $PIP_RC (1 = PEP 668 refusal)
+printf '#!/bin/sh\n[ "$1" = -m ] && exit "${PIP_RC:-1}"\nexit 1\n' >"$tmp/stub/python3"
+chmod +x "$tmp/stub/npx" "$tmp/stub/python3"
+real() { env HOME="$1" PATH="$tmp/stub:$PATH" WORKER_CHROME= PIP_RC="${2:-1}" "$wb/bootstrap.sh" "${@:3}" >"$tmp/out" 2>&1; echo $?; }
+
+h1="$tmp/h1"; mkdir -p "$h1"
+check "fresh: no-arg run exits 3 (pip WARN only)" "$(real "$h1" 1)" 3
+out=$(cat "$tmp/out")
+check "fresh: no unbound \$1"            "$(has "$out" "unbound variable")" n
+check "fresh: pip refusal is a WARN"     "$(has "$out" "WARN")" y
+check "fresh: skills symlink resolves"   "$(cat "$h1/.pi/skills/demo/SKILL.md" 2>&1)" skills
+check "fresh: skills not under /tmp"     "$(readlink "$h1/.pi/skills" | grep -c '^/tmp/wb-skills')" 0
+check "fresh: models.json installed"     "$(cmp -s "$wb/pi/models.json" "$h1/.pi/agent/models.json" && echo y)" y
+check "fresh: agent settings installed"  "$(cmp -s "$wb/pi/agent-settings.json" "$h1/.pi/agent/settings.json" && echo y)" y
+check "fresh: extensions installed"      "$(ls "$h1/.pi/agent/extensions" | grep -c '\.ts$')" "$(ls "$wb/pi/extensions" | grep -c '\.ts$')"
+check "fresh: proxy cloned"              "$(cat "$h1/repos/arc-llm-proxy/skills/demo/SKILL.md" 2>&1)" proxy
+check "fresh: npx has --path cache"      "$(has "$(cat "$tmp/npx.args" 2>&1)" "--path $h1/.cache/puppeteer")" y
+
+# existing user: real ~/.pi/skills dir and an edited models.json are backed up, never deleted
+h2="$tmp/h2"; mkdir -p "$h2/.pi/skills" "$h2/.pi/agent"
+echo mine >"$h2/.pi/skills/marker"; echo '{"edited":1}' >"$h2/.pi/agent/models.json"
+check "existing: run exits 0"            "$(real "$h2" 0)" 0
+check "existing: skills dir backed up"   "$(cat "$h2"/.pi/skills.bak-*/marker 2>&1)" mine
+check "existing: models.json backed up"  "$(cat "$h2"/.pi/agent/models.json.bak-* 2>&1)" '{"edited":1}'
+# rerun: clone already present is updated in place, identical files make no new backups
+echo second >"$tmp/src-skills/skills/demo/SKILL.md"
+git -C "$tmp/src-skills" -c user.name=t -c user.email=t@t commit -qam second
+check "rerun: exits 0"                   "$(real "$h2" 0)" 0
+check "rerun: skills updated to ref"     "$(cat "$h2/.pi/skills/demo/SKILL.md" 2>&1)" second
+check "rerun: no extra models backup"    "$(ls "$h2"/.pi/agent/models.json.bak-* | wc -l)" 1
 exit $fails
