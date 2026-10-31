@@ -47,6 +47,25 @@ body() { awk 'f{print} /^---$/{f=1}' <<<"$1"; }
 
 # the last N lines worker-task itself logged (WORKER_TASK_LOG); pi and test output are worker-controlled
 # text that the decomposer would read, so they never reach a bead
+# worker logs persist here (not /tmp); wb-it5. GC runs once at start: only this dir, only files older than 14 days
+logdir() { echo "${LANE_LOG_DIR:-$HOME/vault/director/worker-logs}"; }
+gc_logs() { local d; d=$(logdir); [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '*.log' -mtime +14 -delete; return 0; }
+# cause <rc> <wlog> <lf> — one-line specific reason for a failed run, from output already captured (wb-it5)
+cause() {
+  local c n t f
+  case $1 in
+    5) c="checkout failed" ;;
+    4) grep -q 'timed out' "$2" 2>/dev/null && c="timeout" ;;
+    2) f=$(cat "$2" "$3" 2>/dev/null)
+       t=$(grep -m1 '^(fail) ' <<<"$f" | sed -E 's/^\(fail\) //; s/ \[[^]]*\]$//')
+       n=$(grep -m1 -oE '^ *[0-9]+ fail' <<<"$f" | sed 's/^ *//')
+       if grep -qiE 'timed out|timeout' <<<"$f"; then c="timeout"
+       elif [ -n "$t" ]; then c="test $t${n:+ ($n)}"
+       elif f=$(grep -m1 -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$f" | sed -E 's/(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+).*//') && [ -n "$f" ]; then c="tsc $f"
+       elif [ -n "$n" ]; then c="tests ($n)"; fi ;;
+  esac
+  [ -z "${c:-}" ] || printf ': %s' "${c:0:100}"
+}
 summary() { tail -"${2:-3}" "$1" 2>/dev/null | tr '\n' ' '; }
 
 fail() { # fail <id> <why> [label] -- note, label (default qwen-failed: the decomposer re-splits it), reopen
@@ -120,7 +139,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   fi
   log "▶ $id $branch"
   wt=$(mktemp -d "${TMPDIR:-/tmp}/lane-run.XXXXXX") task=$(mktemp "${TMPDIR:-/tmp}/lane-task.XXXXXX")
-  wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX") lf=$(mktemp "${TMPDIR:-/tmp}/lane-run-$id.XXXXXX")
+  wlog=$(mktemp "${TMPDIR:-/tmp}/lane-wlog.XXXXXX")
+  mkdir -p "$(logdir)"; lf=$(logdir)/$id-$(date -u +%Y%m%dT%H%M%SZ).log; : >"$lf"
   body "$desc" >"$task"
   for try in 1 2 3; do  # a fast failure (443 refused) is usually a blip: retry before calling the branch missing (wb-o49)
     timeout 300 git -C "$repo" fetch -q origin -- "$branch"; rc=$?
@@ -153,12 +173,12 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
        rm -f "$lf" ;;
     2) fail "$id" "$(summary "$wlog") (log: $lf)"  # full worker output for a human; the bead keeps worker-task's own lines
-       sprint end "$id" blocked "worker failed" seconds=$(( $(date +%s) - t0 )) ;;
+       sprint end "$id" blocked "worker failed$(cause 2 "$wlog" "$lf")" seconds=$(( $(date +%s) - t0 )) ;;
     4) # unblamed (not qwen-failed: nothing to re-split) and stop this pass, so one outage costs one bead,
        # not the queue; lane-infra is excluded from ready, so neither a dead endpoint nor a worker that
        # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
        fail "$id" "$(summary "$wlog") (log: $lf)" lane-infra; down=1
-       sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+       sprint end "$id" blocked "infra$(cause 4 "$wlog" "$lf")" seconds=$(( $(date +%s) - t0 )) ;;
     7) # the bead's Test needs rescoping, not the model re-splitting or the queue stopping
        fail "$id" "$(summary "$wlog") (log: $lf)" human
        sprint end "$id" blocked "baseline red" seconds=$(( $(date +%s) - t0 )) ;;
@@ -168,7 +188,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        sprint end "$id" blocked "origin unreachable" seconds=$(( $(date +%s) - t0 )) ;;
     *) # 3 (GREEN commit on the local branch), 5 (branch missing on origin), anything unexpected
        fail "$id" "$(summary "$wlog") (rc=$rc${sha:+, $sha on local branch $branch}; log: $lf)" human
-       sprint end "$id" blocked "rc=$rc" seconds=$(( $(date +%s) - t0 )) ;;
+       sprint end "$id" blocked "rc=$rc$(cause "$rc" "$wlog" "$lf")" seconds=$(( $(date +%s) - t0 )) ;;
   esac
   # a failed branch's commits survive on origin as <branch>-failed-<epoch> before we drop the local copy
   if [ -n "$made" ] && [ $rc -ne 0 ] && [ $rc -ne 3 ] && [ "$(git -C "$repo" rev-parse -q --verify "refs/heads/$branch")" != "$base" ]; then
@@ -181,6 +201,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
 }
 
 [ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
+gc_logs
 while :; do
   did= down=
   for repo in "${repos[@]}"; do run_one && did=1; [ -z "$down" ] || break; done
