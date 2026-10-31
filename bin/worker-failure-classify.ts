@@ -11,7 +11,8 @@
 // (~/vault/director/worker-failures/2026-10-31-cases.md); H5 there ("worker said pass + infra string") is H2 and is
 // not a separate rule. Output: JSON {counts, cases:[{id, rule, class, runs:[...]}], plan}.
 //
-// plan (dry-run unless --file): HARNESS -> one bug bead per new shape (key = rule + normalized cause, label
+// plan (dry-run unless --file): HARNESS -> one bug bead per new shape (key = infra-<crash pattern or rc> for jail/
+// infra crashes from any rule, else rule + normalized cause; label
 // `shape:<key>`; skipped while an open bead carries that label) in --bd-dir (default ~/repos/workbench);
 // MODEL -> one line per case appended to --queue (sanitize-queue.jsonl, wb-rf4 input; dedupe id+ts); judge -> counted.
 //
@@ -56,12 +57,15 @@ export function findingLabel(finding: string): Klass | undefined {
   return undefined; // "baseline unknown", "test X", plain "worker failed": no baseline verdict
 }
 
+// jail/startup crash patterns: one shape key ("infra-<pattern>") whichever rule (H2 GREEN, H4 lane-infra) saw it
+const CRASH = /bun: not found|EROFS|Failed to resolve import|not a git repository/;
+
 export function classifyRun(note: string, log: string, finding = ""): { rule: string; klass: Klass; cause?: string } {
   const text = `${note}\n${log}`;
   const red = log.split(/^worker-task: GREEN:/m)[0];
   const greenCmd = /^worker-task: GREEN: (.*)$/m.exec(log)?.[1] ?? /GREEN: (.*?) test still fails/.exec(note)?.[1] ?? "";
   const green = after(log, /^worker-task: GREEN:/m);
-  const H = (rule: string, cause: string) => ({ rule, klass: "HARNESS" as const, cause: slug(cause) });
+  const H = (rule: string, cause: string) => ({ rule, klass: "HARNESS" as const, cause: cause.startsWith("infra-") ? cause : slug(cause) });
   const M = (rule: string) => ({ rule, klass: "MODEL" as const });
 
   // H1 prep: lane-run refused the bead/branch before any worker work.
@@ -69,16 +73,20 @@ export function classifyRun(note: string, log: string, finding = ""): { rule: st
   const prep = /bead lacks Branch:|Branch: must be lane\/|already exists|could not check out/.exec(note)?.[0] ?? /^could not check out /m.exec(log)?.[0];
   if (prep) return H("H1", prep);
   // H2 sandbox: jail infra error in the GREEN phase.
-  const jail = /bun: not found|EROFS|Failed to resolve import|not a git repository/.exec(green)?.[0];
-  if (jail) return H("H2", jail);
+  const jail = CRASH.exec(green)?.[0];
+  if (jail) return H("H2", `infra-${slug(jail)}`);
   // H3 guard misfire: RED commit empty, or the "protected" list holds a non-test path.
   if (/HEAD \(RED commit\) touches no files/.test(text)) return H("H3", "empty red commit");
   const prot = /modified protected test files: (.*)/.exec(text)?.[1];
   if (prot && prot.split(/\s+/).filter(Boolean).some((p) => !isTestPath(p))) return H("H3", "protected non test");
   // H4 baseline diff from lane-run's labels: infra/lane-infra and baseline-red-only -> HARNESS; any
   // worker-introduced or target-still-failing failure -> MODEL (M4), even beside a baseline-red one.
-  const infra = /^infra\b/.test(finding) ? finding : /^lane-infra:/.test(note) ? `infra ${note.replace(/^lane-infra:|\(log:.*$/g, "")}` : "";
-  if (infra) return H("H4", infra);
+  // shape = the crash pattern (same key as H2's), else the note's worker rc, else the finding text
+  if (/^infra\b/.test(finding) || /^lane-infra:/.test(note)) {
+    const crash = CRASH.exec(text)?.[0];
+    const rc = /\brc=(\d+)/.exec(note)?.[1];
+    return H("H4", crash ? `infra-${slug(crash)}` : rc ? `infra-rc${rc}` : `infra-${slug(finding.replace(/^infra:?/, ""))}`);
+  }
   const lab = findingLabel(finding);
   if (lab === "HARNESS") return H("H4", "baseline red");
   if (lab === "MODEL") return M("M4");
@@ -144,7 +152,10 @@ export function classify(sprints: string, opts: { from?: string; to?: string; no
 }
 
 type Out = ReturnType<typeof classify>;
-export const shapeKey = (c: Case) => `${c.rule}-${c.runs[c.runs.length - 1]?.cause ?? "unknown"}`.toLowerCase();
+export const shapeKey = (c: Case) => {
+  const cause = c.runs[c.runs.length - 1]?.cause ?? "unknown";
+  return (cause.startsWith("infra-") ? cause : `${c.rule}-${cause}`).toLowerCase();
+};
 
 // What the sweep would file: new HARNESS shapes as beads, MODEL cases as sanitize-queue rows, judge as a count.
 // hasOpenShape(key) / queued("id ts") say what already exists; both are injected so tests need no bd or vault.

@@ -105,9 +105,9 @@ test("plan: one bead per new HARNESS shape, MODEL rows to queue deduped, judge c
   const sprints = ids.flatMap((i) => [start(i), end(i)]).join("\n");
   const out = classify(sprints, { notes, log });
   const keys = Object.fromEntries(out.cases.filter((c) => c.class === "HARNESS").map((c) => [c.id, shapeKey(c)]));
-  expect(keys).toEqual({ h1: "h1-already-exists", h2: "h2-erofs", h3a: "h3-empty-red-commit", h3b: "h3-protected-non-test", h4: "h4-whole-project-tsc" });
-  // h2-erofs already has an open bead; m1 already queued
-  const p = plan(out, (k) => k === "h2-erofs", new Set(["m1 2026-10-29T10:00:00Z"]));
+  expect(keys).toEqual({ h1: "h1-already-exists", h2: "infra-erofs", h3a: "h3-empty-red-commit", h3b: "h3-protected-non-test", h4: "h4-whole-project-tsc" });
+  // infra-erofs already has an open bead; m1 already queued
+  const p = plan(out, (k) => k === "infra-erofs", new Set(["m1 2026-10-29T10:00:00Z"]));
   expect(p.beads.map((b) => b.key)).toEqual(["h1-already-exists", "h3-empty-red-commit", "h3-protected-non-test", "h4-whole-project-tsc"]);
   expect(p.beads[0].title).toBe("worker-failure shape h1-already-exists: 1 case (e.g. h1)");
   expect(p.beads[0].description).toMatch(/^shape: h1-already-exists\n/);
@@ -132,4 +132,22 @@ test("file: bd create per bead with shape label; queue rows appended as jsonl", 
   expect(calls[0]).toEqual(["create", "--title", "t", "-d", "d", "-t", "bug", "-p", "2", "-l", "shape:h2-erofs", "--silent"]);
   file({ ...p, beads: [] }, bd, q);
   expect(readFileSync(q, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).id)).toEqual(["m2", "m2"]);
+});
+
+test("shape key: an EROFS crash keys the same from H2 and H4; distinct worker rc codes key apart", () => {
+  const infraEnd = (id: string) => JSON.stringify({ ts: "2026-10-30T10:00:00Z", lane: "v100", ev: "end", id, outcome: "blocked", finding: "infra" });
+  const ins = ["crash", "rc1", "rc127"];
+  const sprints = [start("h2"), end("h2"), ...ins.flatMap((i) => [start(i), infraEnd(i)])].join("\n");
+  const infraNote: Record<string, string> = {
+    crash: "lane-infra: RED: vitest run a.test.ts RED crashed at startup (infra, not a valid RED)",
+    rc1: "lane-infra: worker rc=1 (judging by tests) worker exited rc=1 with no changes",
+    rc127: "lane-infra: worker rc=127 (judging by tests) worker exited rc=127 with no changes",
+  };
+  const out = classify(sprints, {
+    notes: (id) => (id === "h2" ? notes(id) : `${infraNote[id]}  (log: /x/lane-run-${id}.log)`),
+    log: (p) => (p.includes("lane-run-crash.") ? "Error: EROFS: read-only file system, mkdir '/r/x'\n" : p.includes("lane-run-h2.") ? log(p) : ""),
+  });
+  expect(Object.fromEntries(out.cases.map((c) => [c.id, `${c.rule} ${shapeKey(c)}`]))).toEqual({
+    h2: "H2 infra-erofs", crash: "H4 infra-erofs", rc1: "H4 infra-rc1", rc127: "H4 infra-rc127",
+  });
 });
