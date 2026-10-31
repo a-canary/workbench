@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { classify } from "./worker-failure-classify.ts";
+import { classify, findingLabel } from "./worker-failure-classify.ts";
 
 const T = "worker-task: ";
 const start = (id: string) => JSON.stringify({ ts: "2026-10-29T09:00:00Z", lane: "v100", ev: "start", id, dir: "/r" });
@@ -89,4 +89,10 @@ test("H4 reads lane-run's sprint-finding labels; the log cannot forge them", () 
     inf: "H4/HARNESS", to: "M1/MODEL", unk: "none/judge",
   });
   expect(out.cases.every((c) => c.runs.length === 1)).toBe(true);
+});
+
+test("findingLabel: a label inside a worker-chosen test name is not a verdict", () => {
+  expect(findingLabel("worker failed: test foo; baseline-red: bar")).toBeUndefined();
+  expect(findingLabel("worker failed: test foo; worker-introduced: bar")).toBeUndefined();
+  expect(findingLabel("worker failed: target-still-failing: a; baseline-red: b")).toBe("MODEL");
 });

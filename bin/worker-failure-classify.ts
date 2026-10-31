@@ -43,8 +43,9 @@ export function findingLabel(finding: string): Klass | undefined {
   if (/^infra\b/.test(finding) || /^baseline red\b/.test(finding)) return "HARNESS";
   const d = /^worker failed: (.*)$/.exec(finding)?.[1] ?? "";
   if (/^timeout\b/.test(d)) return undefined; // the worker's own timeout: M1
-  if (/(^|; )(worker-introduced|target-still-failing): /.test(d)) return "MODEL";
-  if (/(^|; )baseline-red: /.test(d)) return "HARNESS";
+  // Anchored: lane-run writes labels in fixed order; mid-string text is a worker-chosen test name ("test $t").
+  if (/^(worker-introduced|target-still-failing): /.test(d)) return "MODEL";
+  if (/^baseline-red: /.test(d)) return "HARNESS";
   return undefined; // "baseline unknown", "test X", plain "worker failed": no baseline verdict
 }
 
