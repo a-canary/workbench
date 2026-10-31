@@ -25,7 +25,7 @@
 # connection to its chat/models API only; any API key is added host-side and never enters the jail:
 #   private lane -> local V100 laneproxy (never leaves the box)
 #   ollama  lane -> Ollama Cloud over TLS (cloud, but operator-trusted for private repos, 2026-10-30)
-#   public  lane -> 9router Worker combo (cloud; refused unless repo is PUBLIC)
+#   public  lane -> a 9router Worker combo at $WORKER_PUBLIC_PORT (cloud; refused unless repo is PUBLIC; no default)
 # --exec runs CMD in the jail instead of pi (used by worker-sandbox-test).
 set -euo pipefail
 
@@ -120,7 +120,8 @@ case $lane in
     key=$(pass show "${WORKER_OLLAMA_PASS:-api/ollamacloud/api-key}" | head -1) ;;
   public)
     need_public "public lane" prepublic  # sends the code to a cloud model
-    port=${WORKER_PUBLIC_PORT:-20128} model=${WORKER_PUBLIC_MODEL:-Worker}
+    # no default endpoint: home-lab-1's local 9router is retired, it moved to ai-lab-02 (repos-mxu8 A)
+    port=${WORKER_PUBLIC_PORT:?public lane has no endpoint on this host; set WORKER_PUBLIC_PORT} model=${WORKER_PUBLIC_MODEL:-Worker}
     # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;
   *) die "--lane private|ollama|public required" ;;
