@@ -5,7 +5,8 @@
 #               [--tools read,edit,write,bash] [--timeout 600] [--push]
 #
 # Contract: the worktree's HEAD commit is the director's failing test (RED commit).
-# The worker may not touch any file that commit touched, nor test/runner config
+# The worker may not touch any file that commit touched (bar a stub its Worker-May-Edit
+# trailer names), nor test/runner config
 # (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
 # it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
@@ -40,11 +41,6 @@ sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane
 
 mapfile -d '' -t touched < <(g show -z --name-only --format= HEAD)
 [ ${#touched[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
-# guard the RED commit's test-like files; a source stub it also carries is the worker's to fill in, and guarding it
-# blocked the legitimate fix (wb-an0.12.3.1). No test-like name at all: guard everything, as before.
-# ponytail: a substring match, so latest.ts or inspect.ts stay guarded too (the old, safe direction)
-protected=(); for f in "${touched[@]}"; do [[ ${f,,} =~ test|spec|fixture|snapshot ]] && protected+=("$f"); done
-[ ${#protected[@]} -gt 0 ] || protected=("${touched[@]}")
 # read before the worker runs (the jail masks .git anyway)
 may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
 # a blanket exemption (even '^[^z]' or '^[a-m]', which dodge a single sentinel) matches many unrelated paths
@@ -59,6 +55,10 @@ if [ -n "$may_edit" ]; then
     | { grep -cE -- "$may_edit" || true; })
   [ "$hits" -lt 3 ] || die "Worker-May-Edit '$may_edit' matches too many paths ($hits probes)"
 fi
+# guard every file the RED commit touched, except a source stub its author names in Worker-May-Edit for the
+# worker to fill in (wb-an0.12.3.1); guessing stubs by name would leave mocks and golden files editable.
+protected=(); for f in "${touched[@]}"; do
+  [ -n "$may_edit" ] && grep -qE -- "$may_edit" <<<"$f" || protected+=("$f"); done
 # files that change how the test runs or what the leak scan sees, matched anywhere in the tree:
 # manifests/locks, *config* and rc/env dotfiles, toml/ini/cfg, make, python import hooks, compiled .pyc,
 # git attributes, gitleaks config. ponytail: a denylist; the upgrade is the RED commit declaring the
@@ -69,7 +69,7 @@ runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*c
 # capture test output to detect startup crashes (infra) vs real failures
 red_out=$(mktemp "${TMPDIR:-/tmp}/worker-red.XXXXXX")
 green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
-trap 'rm -rf "$red_out" "$green_out" ${base:+"$base"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
+trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
 startup_crash() {
   grep -qE 'EROFS: read-only file system|failed to load config|Startup Error' "$1"
@@ -89,10 +89,12 @@ elif startup_crash "$red_out"; then
   exit 4
 fi
 
-# Baseline: the Test minus the RED commit's own tests must already pass on the RED commit's parent, or GREEN fails
-# on errors the worker never touched (whole-project tsc, a red sibling suite; wb-e22). Each &&-segment naming a
-# RED file by stem as a whole word (foo for src/foo.test.ts) becomes `true`, so a cd or setup segment still runs.
-# ponytail: naive split on '&&' (a quoted && splits too); add a parser if a Test ever needs one
+# Baseline: the Test minus the RED commit's own tests, run on the RED commit's parent. If it already fails there,
+# a GREEN failure is errors the worker never touched (whole-project tsc, a red sibling suite; wb-e22), not the model.
+# Each &&-segment naming a RED file by stem as a whole word (foo for src/foo.test.ts) becomes `true`, so a cd or
+# setup segment still runs. Advisory only: it relabels a failed GREEN as rc 7 and never stops a run, because the
+# stem match misses Tests that pick new tests by directory or -k/-t filter (those read red on the parent).
+# ponytail: naive split on '&&'; a split that breaks the shell (a quoted or subshell &&) skips the baseline
 base_test= keep=
 while IFS= read -r seg; do
   words=" $(tr -c '[:alnum:]_-' ' ' <<<"$seg") "
@@ -100,18 +102,19 @@ while IFS= read -r seg; do
   [[ $seg =~ ^[[:space:]]*(true|cd[[:space:]].*)[[:space:]]*$ ]] || keep=1
   base_test=${base_test:+$base_test&&}$seg
 done < <(printf '%s\n' "${test//&&/$'\n'}")
-if [ -n "$keep" ] && g rev-parse -q --verify HEAD~1 >/dev/null; then
-  base=$(mktemp -d "${TMPDIR:-/tmp}/worker-base.XXXXXX")
-  g archive HEAD~1 | tar -x -C "$base"
+base_red=
+if [ -n "$keep" ] && sh -n -c "$base_test" 2>/dev/null && g rev-parse -q --verify HEAD~1 >/dev/null; then
+  basedir=$(mktemp -d "${TMPDIR:-/tmp}/worker-base.XXXXXX")
+  g archive HEAD~1 | tar -x -C "$basedir"
   log "baseline (RED's parent): $base_test"
   base_rc=0
-  "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$base" --lane private --timeout 300 --exec sh -c "$base_test" >"$red_out" 2>&1 || base_rc=$?
-  if [ $base_rc -eq 124 ]; then log "baseline timed out; not judged"
-  elif [ $base_rc -ne 0 ]; then
+  "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$basedir" --lane private --timeout 300 --exec sh -c "$base_test" >"$red_out" 2>&1 || base_rc=$?
+  if [ $base_rc -eq 0 ]; then :
+  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || startup_crash "$red_out"; then
+    log "baseline timed out or crashed at startup (rc $base_rc); not judged"
+  else
     tail -n 20 "$red_out" >&2
-    { [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || startup_crash "$red_out"; } && { log "baseline crashed at startup (infra)"; exit 4; }
-    log "baseline red: Test already fails before the RED commit (rc $base_rc); scope Test: to the new tests"
-    exit 7
+    log "baseline red: Test already fails before the RED commit (rc $base_rc)"; base_red=1
   fi
 fi
 
@@ -122,7 +125,7 @@ log "worker took $(( $(date +%s) - t0 ))s"
 
 # a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
 [ -z "$(find "$wt" -mindepth 2 -name .git -print -quit)" ] || die "worker created a nested .git"
-g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
+[ ${#protected[@]} -eq 0 ] || g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
 g diff --cached --quiet && { [ "$wrc" -eq 0 ] || [ "$wrc" -eq 124 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
@@ -153,6 +156,7 @@ if [ $green_rc -ne 0 ]; then
     log "GREEN crashed at startup (infra)"
     exit 4
   fi
+  [ -z "$base_red" ] || { log "test still fails after worker, and failed before the RED commit; scope Test: to the new tests"; exit 7; }
   die "test still fails after worker"
 fi
 

@@ -115,13 +115,20 @@ RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
-# a RED commit that also carries a source stub: the stub is the worker's to fill, its test stays guarded (wb-e22 H3)
-REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried source stub is editable" 'echo done > impl.txt' ok
-REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED test file still guarded beside a stub" 'echo true > t.test.sh' refused
-# a Test already red before the RED commit (whole-project tsc, a red sibling suite) is a prep fault:
-# caught before the worker runs (rc 7), not blamed on the model at GREEN (wb-e22 H4)
+# a RED commit that also carries a source stub: the stub is the worker's to fill only when its author names it
+# in Worker-May-Edit; anything else it carries (a mock, a golden file) stays guarded (wb-e22 H3)
+stub=$'red\n\nWorker-May-Edit: ^impl\\.txt$'
+RED_MSG=$stub REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried stub named in Worker-May-Edit is editable" 'echo done > impl.txt' ok
+RED_MSG=$stub REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED test file still guarded beside a stub" 'echo true > t.test.sh' refused
+REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried file not named stays guarded" 'echo done > impl.txt' refused
+# a Test already red before the RED commit (whole-project tsc, a red sibling suite) is a prep fault: a GREEN
+# failure then exits rc 7, not blamed on the model (wb-e22 H4). The baseline never stops a run on its own.
 BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "Test red before the RED commit is rc 7" 'true' rc7
+BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "red baseline still commits a GREEN fix" 'echo "exit 0" > lint.sh' ok
 BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" run "Test green before the RED commit runs the worker" 'true' ok
+# Tests the stem match cannot scope: a subshell && (the split breaks the shell), a glob over new files
+TEST="(cd . && sh t.sh)" run "subshell && Test runs the worker" 'true' ok
+REDF=case.sh TEST='for f in c*.sh; do sh "$f"; done' run "Test globbing new files runs the worker" 'true' ok
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 # PR create retries a transient api.github.com refusal (2 of 5 lane runs hit one, 2026-10-29); the gh stub fails $GH_FAILS times
 mkdir "$tmp/ghflaky"
@@ -130,6 +137,12 @@ printf '#!/usr/bin/env bash\n[ "$2" = view ] && { [ "${GH_VIEW:-1}" = 0 ] && ech
 chmod +x "$tmp/ghflaky/gh"
 rm -f "$tmp/ghn"; GH_FAILS=2 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create retried past 2 refusals" 'true' ok
 rm -f "$tmp/ghn"; GH_FAILS=3 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create gives up after 3 (rc 3)" 'true' rc3
+# the PR base branch name is not a temp dir: a pushed run must not delete ./main or ./master in its cwd
+mkdir -p "$tmp/cwd/main" "$tmp/cwd/master"
+rm -f "$tmp/ghn"; (cd "$tmp/cwd" && BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" GH_FAILS=0 PUSH=1 \
+  WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "pushed run with a baseline" 'true' ok)
+if [ -d "$tmp/cwd/main" ] && [ -d "$tmp/cwd/master" ]; then echo "PASS  pushed run leaves ./main and ./master"
+else echo "FAIL  pushed run leaves ./main and ./master"; fail=1; fi
 rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "already-open PR counts as delivered" 'true' ok
 rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 GH_STATE=MERGED PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "merged PR is not delivery (rc 3)" 'true' rc3
 
