@@ -55,7 +55,8 @@ cause() {
   local c n t f d
   case $1 in
     5) c="checkout failed" ;;
-    4) grep -q 'timed out' "$2" 2>/dev/null && c="timeout" ;;
+    4) if grep -q 'timed out' "$2" 2>/dev/null; then c="timeout"
+       else c=$(sed -nE 's/.*crashed at startup .*pattern: (.*)\)$/startup crash: \1/p' "$2" 2>/dev/null | head -n1); fi ;;
     7) c=$(basediff "$3") ;;
     2) f=$(cat "$2" "$3" 2>/dev/null)
        d=$(basediff "$3")
