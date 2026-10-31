@@ -12,6 +12,7 @@ if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi
 # Clones live here, not /tmp: a reboot wipes /tmp and would dangle the ~/.pi/skills symlink.
 WB_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/workbench"
 STAMP=$(date +%Y%m%d%H%M%S)
+command -v jq >/dev/null && command -v git >/dev/null || { echo "bootstrap needs jq and git on PATH" >&2; exit 1; }
 WARN=0
 
 run() {
@@ -38,13 +39,16 @@ echo "skills:"
 SKILLS_REPO=$(jq -r '.components.skills.repo' "$WORKBENCH_DIR/manifest.json")
 SKILLS_REF=$(jq -r '.components.skills.ref' "$WORKBENCH_DIR/manifest.json")
 SKILLS_DIR="$WB_DATA/arc-skills"
-if [[ -d "$SKILLS_DIR/.git" ]]; then
-    run git -C "$SKILLS_DIR" fetch -q --depth 1 origin "$SKILLS_REF"
-    run git -C "$SKILLS_DIR" checkout -q --detach FETCH_HEAD
-else
-    run git clone -q --depth 1 --branch "$SKILLS_REF" "$SKILLS_REPO" "$SKILLS_DIR"
+# Clone, then fetch+detach on the ref every run: works for a branch, tag or commit sha.
+if [[ ! -d "$SKILLS_DIR/.git" ]]; then run git clone -q --depth 1 "$SKILLS_REPO" "$SKILLS_DIR"; fi
+run git -C "$SKILLS_DIR" fetch -q --depth 1 origin "$SKILLS_REF"
+run git -C "$SKILLS_DIR" checkout -q --detach FETCH_HEAD
+if [[ -e ~/.pi/skills && ! -L ~/.pi/skills ]]; then
+    run mv ~/.pi/skills ~/.pi/skills.bak-"$STAMP"
+    echo "  existing ~/.pi/skills moved to ~/.pi/skills.bak-$STAMP"
+elif [[ -L ~/.pi/skills && "$(readlink ~/.pi/skills)" != "$SKILLS_DIR/skills" ]]; then
+    echo "  ~/.pi/skills was a link to $(readlink ~/.pi/skills); repointed"
 fi
-if [[ -e ~/.pi/skills && ! -L ~/.pi/skills ]]; then run mv ~/.pi/skills ~/.pi/skills.bak-"$STAMP"; fi
 run ln -sfn "$SKILLS_DIR/skills" ~/.pi/skills
 echo "  → ~/.pi/skills (from $SKILLS_REPO @ $SKILLS_REF)"
 

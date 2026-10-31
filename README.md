@@ -33,6 +33,8 @@ cd workbench
 ```
 
 Pulls the pinned component versions, installs config, symlinks skills.
+Skills are cloned to `${XDG_DATA_HOME:-~/.local/share}/workbench/arc-skills` and `~/.pi/skills` links there.
+An existing real `~/.pi/skills` dir and any config file that would change are kept as `*.bak-<timestamp>`; an existing `~/repos/arc-llm-proxy` is left untouched.
 
 ## QA role dependencies
 
