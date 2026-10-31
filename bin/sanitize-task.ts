@@ -1,6 +1,6 @@
 // sanitize-task — turn ONE MODEL worker-failure queue row into a synthetic harness-bench task (wb-rf4 slice 2).
 //
-//   bun bin/sanitize-task.ts [--no-sandbox] [--out DIR] '<queue-row-json>'
+//   bun bin/sanitize-task.ts [--out DIR] '<queue-row-json>'
 //
 // Row: {id, ts, rule, note} from ~/vault/director/worker-failures/sanitize-queue.jsonl.
 // 1. gather the bead description (bd show, in the repo whose .beads mentions the id), its Test: line and a short
@@ -9,12 +9,13 @@
 //    (~/vault/director/worker-failures/2026-10-31-task-draft.json) with the SAME failure shape, invented domain,
 //    plus `reference_solution` (files overlaid on setup_files);
 // 3. validate: verify must FAIL on the start state and PASS with the reference applied, each run inside
-//    bin/worker-sandbox --exec (no network; --no-sandbox = `timeout 60` in a temp dir instead);
-// 4. leak-gate the materialized task (bin/leak-gate.ts, fail closed: any non-zero exit rejects).
+//    bin/worker-sandbox --exec (no network; there is no unsandboxed mode);
+// 4. build the final object, write it to a temp file beside the destination, leak-gate THAT file (fail closed),
+//    then rename atomically.
 // Accepted -> <out>/<id>.json; rejected -> <out>/rejected/<id>.json with reason (a leak rejection keeps hits only,
 // never the task text). Exit 0 accepted, 1 rejected, 2 bad input.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
 
@@ -30,10 +31,10 @@ export type Task = {
   tags?: string[];
   source?: string;
 };
-export type Verdict = { accepted: boolean; reason: string; task?: Task; hits?: string[]; latencyMs?: number };
+export type Verdict = { accepted: boolean; reason: string; task?: Task; hits?: string[]; latencyMs?: number; path?: string };
 export type Deps = {
   callModel: (prompt: string) => Promise<string>;
-  sandbox: boolean;
+  sandboxBin?: string; // default bin/worker-sandbox (tests inject a broken one)
   leakArgs?: string[]; // extra leak-gate args (tests pass --denylist)
 };
 
@@ -162,48 +163,74 @@ function materialize(dir: string, files: Record<string, string>) {
   }
 }
 
-/** Run verify against a fresh copy of `files`; returns the exit code (124 = timeout). */
-export function runVerify(verify: string, files: Record<string, string>, sandbox: boolean): number {
+/** Run verify inside bin/worker-sandbox (no network, only the copy is writable) against a fresh copy of `files`;
+ *  returns the exit code (124 = timeout). There is deliberately no unsandboxed path: verify is model-written code. */
+export function runVerify(verify: string, files: Record<string, string>, sandboxBin: string): number {
   const dir = mkdtempSync(join(tmpdir(), "sanitize-verify-"));
   materialize(dir, files);
-  const r = sandbox
-    ? spawnSync(join(here, "worker-sandbox"),
-        ["--worktree", dir, "--lane", "private", "--timeout", "60", "--exec", "sh", "-c", `export BENCH_WORK_DIR=/work; ${verify}`],
-        { encoding: "utf8", timeout: 90000 })
-    : spawnSync("timeout", ["60", "sh", "-c", verify], { cwd: dir, encoding: "utf8", env: { ...process.env, BENCH_WORK_DIR: dir } });
+  const r = spawnSync(sandboxBin,
+    ["--worktree", dir, "--lane", "private", "--timeout", "60", "--exec", "sh", "-c", `export BENCH_WORK_DIR=/work; ${verify}`],
+    { encoding: "utf8", timeout: 90000 });
   return r.status ?? 124;
 }
 
-export function leakGate(task: Task, extra: string[] = []): { ok: boolean; hits: string[] } {
-  const dir = mkdtempSync(join(tmpdir(), "sanitize-leak-"));
-  writeFileSync(join(dir, "task.json"), JSON.stringify(task, null, 2));
-  materialize(join(dir, "setup"), task.setup_files);
-  materialize(join(dir, "reference"), task.reference_solution);
-  const r = spawnSync("bun", [join(here, "leak-gate.ts"), ...extra, dir], { encoding: "utf8" });
-  // hits are file:line:rule only (leak-gate never prints content); keep the path relative to the temp dir
-  const hits = (r.stdout + r.stderr).split("\n").filter(Boolean).map((l) => l.replace(dir + "/", ""));
-  return { ok: r.status === 0, hits: r.status === 0 ? [] : hits.length ? hits : [`leak-gate exit ${r.status}`] };
+export const RULE_RE = /^[A-Z][0-9]$/;
+export const ID_RE = /^[a-z0-9]+-[a-z0-9]+(?:\.[0-9]+)*$/; // bead id: <prefix>-<hash>[.<child>...]
+export function rowError(row: Row): string | null {
+  if (!row || typeof row !== "object") return "row not an object";
+  if (typeof row.id !== "string" || !ID_RE.test(row.id)) return "row.id is not a bead id";
+  if (typeof row.rule !== "string" || !RULE_RE.test(row.rule)) return "row.rule is not like M3";
+  return null;
 }
 
-export async function sanitize(row: Row, deps: Deps, prompt: string): Promise<Verdict> {
+function reject(out: string, row: Row, body: Record<string, unknown>): string {
+  const dir = join(out, "rejected");
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, `${row.id}.json`);
+  writeFileSync(p, JSON.stringify({ id: row.id, rule: row.rule, ...body }, null, 2) + "\n");
+  return p;
+}
+
+/** Model -> final task -> verify FAIL/PASS in the sandbox -> leak-gate the exact bytes -> atomic rename into <out>. */
+export async function sanitize(row: Row, deps: Deps, prompt: string, out: string): Promise<Verdict> {
+  const bad = rowError(row);
+  if (bad) return { accepted: false, reason: bad }; // unsafe id: never used as a filename
+  const no = (reason: string, extra: Record<string, unknown> = {}): Verdict => {
+    const path = reject(out, row, { reason, ...extra });
+    return { accepted: false, reason, path, ...(extra as object) };
+  };
   const t0 = Date.now();
   let text: string;
-  try { text = await deps.callModel(prompt); } catch (e) { return { accepted: false, reason: `model call failed: ${(e as Error).message}` }; }
+  try { text = await deps.callModel(prompt); } catch (e) { return no(`model call failed: ${(e as Error).message}`); }
   const latencyMs = Date.now() - t0;
   let task: Task;
-  try { task = extractTask(text); } catch (e) { return { accepted: false, reason: (e as Error).message, latencyMs }; }
-  const bad = checkShape(task);
-  if (bad) return { accepted: false, reason: `schema: ${bad}`, latencyMs };
-  // leak gate first: a leaking task is never written back in full, even as a rejection
-  const leak = leakGate(task, deps.leakArgs);
-  if (!leak.ok) return { accepted: false, reason: "leak-gate", hits: leak.hits, latencyMs };
-  const startRc = runVerify(task.verify, task.setup_files, deps.sandbox);
-  if (startRc === 0) return { accepted: false, reason: "verify passes on start state", task, latencyMs };
-  const refRc = runVerify(task.verify, { ...task.setup_files, ...task.reference_solution }, deps.sandbox);
-  if (refRc !== 0) return { accepted: false, reason: `verify fails with reference solution (rc ${refRc}; start rc ${startRc})`, task, latencyMs };
-  task.tags = [...new Set([...(task.tags ?? []), "sweep-derived", "model-failure", row.rule])];
-  task.source = "worker-failure-sanitizer";
-  return { accepted: true, reason: `start rc ${startRc} (fail), reference rc 0 (pass), leak-gate clean`, task, latencyMs };
+  try { task = extractTask(text); } catch (e) { return no((e as Error).message, { latencyMs }); }
+  const shape = checkShape(task);
+  if (shape) return no(`schema: ${shape}`, { latencyMs });
+  // build the FINAL object now, so the bytes that are verified and leak-gated are exactly the bytes delivered
+  task = { ...task, tags: [...new Set([...(task.tags ?? []), "sweep-derived", "model-failure", row.rule])], source: "worker-failure-sanitizer" };
+  const final = JSON.stringify(task, null, 2) + "\n";
+  // A broken sandbox cannot yield an accept: the start run's non-zero rc would look like "fails as intended", but the
+  // reference run goes through the same sandbox and must exit 0, which a broken sandbox never does.
+  const sandboxBin = deps.sandboxBin ?? join(here, "worker-sandbox");
+  const startRc = runVerify(task.verify, task.setup_files, sandboxBin);
+  if (startRc === 0) return no("verify passes on start state", { latencyMs, task });
+  const refRc = runVerify(task.verify, { ...task.setup_files, ...task.reference_solution }, sandboxBin);
+  if (refRc !== 0) return no(`verify fails with reference solution (rc ${refRc}; start rc ${startRc})`, { latencyMs, task });
+  // leak-gate THE file that ships: temp file in the destination dir, then an atomic rename (same filesystem)
+  mkdirSync(out, { recursive: true });
+  const tmp = join(out, `.${row.id}.${process.pid}.tmp.json`);
+  writeFileSync(tmp, final);
+  const r = spawnSync("bun", [join(here, "leak-gate.ts"), ...(deps.leakArgs ?? []), tmp], { encoding: "utf8" });
+  if (r.status !== 0) {
+    unlinkSync(tmp);
+    // hit locations only (leak-gate prints file:line:rule, never content); the task text is not kept
+    const hits = (r.stdout + r.stderr).split("\n").filter(Boolean).map((l) => l.replace(tmp, `${row.id}.json`));
+    return no("leak-gate", { latencyMs, hits: hits.length ? hits : [`leak-gate exit ${r.status}`] });
+  }
+  const path = join(out, `${row.id}.json`);
+  renameSync(tmp, path);
+  return { accepted: true, reason: `start rc ${startRc} (fail), reference rc 0 (pass), leak-gate clean`, task, latencyMs, path };
 }
 
 export function laneproxyModel(url = process.env.SANITIZE_LLM_URL ?? "http://127.0.0.1:8099/v1/chat/completions") {
@@ -229,29 +256,19 @@ export function laneproxyModel(url = process.env.SANITIZE_LLM_URL ?? "http://127
   };
 }
 
-export function write(out: string, row: Row, v: Verdict) {
-  const dir = v.accepted ? out : join(out, "rejected");
-  mkdirSync(dir, { recursive: true });
-  const body = v.accepted ? v.task : { id: row.id, rule: row.rule, reason: v.reason, hits: v.hits, latencyMs: v.latencyMs, task: v.task };
-  const p = join(dir, `${row.id}.json`);
-  writeFileSync(p, JSON.stringify(body, null, 2) + "\n");
-  return p;
-}
-
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  let sandbox = true, out = join(VAULT, "synth"), rowArg = "";
+  let out = join(VAULT, "synth"), rowArg = "";
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--no-sandbox") sandbox = false;
-    else if (args[i] === "--out") out = args[++i];
+    if (args[i] === "--out") out = args[++i];
     else rowArg = args[i];
   }
   let row: Row;
-  try { row = JSON.parse(rowArg); } catch { console.error("usage: sanitize-task.ts [--no-sandbox] [--out DIR] '<queue-row-json>'"); process.exit(2); }
-  if (!row?.id || !/^[\w.-]+$/.test(row.id) || !row.rule) { console.error("sanitize-task: row needs a safe id and a rule"); process.exit(2); }
+  try { row = JSON.parse(rowArg); } catch { console.error("usage: sanitize-task.ts [--out DIR] '<queue-row-json>'"); process.exit(2); }
+  const bad = rowError(row);
+  if (bad) { console.error(`sanitize-task: ${bad}`); process.exit(2); }
   const draft = readFileSync(join(VAULT, "2026-10-31-task-draft.json"), "utf8");
-  const v = await sanitize(row, { callModel: laneproxyModel(), sandbox }, buildPrompt(row, gather(row), draft));
-  const p = write(out, row, v);
-  console.log(`${v.accepted ? "ACCEPTED" : "REJECTED"} ${row.id}: ${v.reason}${v.hits ? ` [${v.hits.join(", ")}]` : ""} (model ${v.latencyMs ?? "-"}ms, sandbox=${sandbox}) -> ${p}`);
+  const v = await sanitize(row, { callModel: laneproxyModel() }, buildPrompt(row, gather(row), draft), out);
+  console.log(`${v.accepted ? "ACCEPTED" : "REJECTED"} ${row.id}: ${v.reason}${v.hits ? ` [${v.hits.join(", ")}]` : ""} (model ${v.latencyMs ?? "-"}ms) -> ${v.path}`);
   process.exit(v.accepted ? 0 : 1);
 }
