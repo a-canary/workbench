@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# disk-guard-test — hermetic: pi/extensions/disk-guard.ts resolves its GC script from $PI_DISK_GC_SCRIPT, else
+# $HOME/bin/disk-gc.sh, runs it when present and skips it (no throw) when absent; bin/disk-gc.sh parses and
+# carries no absolute home path. No df, no real GC: only the exported helpers run.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+ext=$here/../pi/extensions/disk-guard.ts
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/disk-guard-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+# Run one exported helper of the extension under a chosen env (bun strips the type-only pi import).
+ev() { local x=$1; shift; env "$@" bun -e "const m = await import('$ext'); console.log(String(await ($x)))" 2>&1 | tail -1; }
+
+check "env override wins" "$(ev 'm.gcScript()' HOME=$tmp PI_DISK_GC_SCRIPT=/opt/gc.sh)" /opt/gc.sh
+check "default is \$HOME/bin/disk-gc.sh" "$(ev 'm.gcScript()' HOME=$tmp PI_DISK_GC_SCRIPT=)" "$tmp/bin/disk-gc.sh"
+
+printf '#!/bin/sh\ntouch "%s/ran"\n' "$tmp" >"$tmp/gc.sh"; chmod +x "$tmp/gc.sh"
+check "present script runs" "$(ev "m.runGc('$tmp/gc.sh')" HOME=$tmp)" true
+check "present script side effect" "$(test -e "$tmp/ran" && echo y || echo n)" y
+check "absent script is skipped" "$(ev "m.runGc('$tmp/missing.sh')" HOME=$tmp)" false
+
+check "disk-gc.sh parses" "$(bash -n "$here/disk-gc.sh" && echo ok)" ok
+
+# Phase 2 (wb#73 review): an odd /tmp dir name must never word-split or glob into the caller's cwd, the live
+# claude-<uid> scratch is kept, and only matching dirs older than a day go. Sandboxed: DISK_GC_TMP is the scan
+# root, HOME the trash root, and a no-op docker shim stands in for the real cache prune.
+root=$tmp/root; mkdir -p "$root/claude-x *" "$root/claude-old" "$root/claude-$(id -u)" "$root/claude-new" "$tmp/cwd" "$tmp/home/trash" "$tmp/shim"
+touch "$tmp/cwd/keep1" "$tmp/cwd/keep2"
+touch -d '3 days ago' "$root/claude-x *" "$root/claude-old" "$root/claude-$(id -u)"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/shim/docker"; chmod +x "$tmp/shim/docker"
+(cd "$tmp/cwd" && HOME=$tmp/home DISK_GC_TMP=$root PATH=$tmp/shim:$PATH bash "$here/disk-gc.sh")
+check "odd /tmp name leaves cwd alone" "$(ls "$tmp/cwd" | wc -l | tr -d ' ')" 2
+check "odd-named old dir removed" "$(test -e "$root/claude-x *" && echo kept || echo gone)" gone
+check "matching old dir removed" "$(test -e "$root/claude-old" && echo kept || echo gone)" gone
+check "live claude-<uid> scratch kept" "$(test -e "$root/claude-$(id -u)" && echo kept || echo gone)" kept
+check "fresh dir kept" "$(test -e "$root/claude-new" && echo kept || echo gone)" kept
+check "no absolute home paths" "$(grep -cE '/home/[a-z]' "$ext" "$here/disk-gc.sh" | awk -F: '{s+=$2} END {print s}')" 0
+
+[ "$fails" = 0 ] && echo "disk-guard-test: all pass" || { echo "disk-guard-test: FAILED"; exit 1; }
