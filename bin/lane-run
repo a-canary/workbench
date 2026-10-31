@@ -52,46 +52,62 @@ logdir() { echo "${LANE_LOG_DIR:-$HOME/vault/director/worker-logs}"; }
 gc_logs() { local d; d=$(logdir); [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '*.log' -mtime +14 -delete; return 0; }
 # cause <rc> <wlog> <lf> — one-line specific reason for a failed run, from output already captured (wb-it5)
 cause() {
-  local c n t f
+  local c n t f d
   case $1 in
     5) c="checkout failed" ;;
     4) grep -q 'timed out' "$2" 2>/dev/null && c="timeout" ;;
     7) c=$(basediff "$3") ;;
     2) f=$(cat "$2" "$3" 2>/dev/null)
-       c=$(basediff "$3"); [ -z "$c" ] || { printf ': %s' "${c:0:200}"; return 0; }
+       d=$(basediff "$3")
        t=$(grep -m1 '^(fail) ' <<<"$f" | sed -E 's/^\(fail\) //; s/ \[[^]]*\]$//')
        n=$(grep -m1 -oE '^ *[0-9]+ fail' <<<"$f" | sed 's/^ *//')
-       if grep -qiE 'timed out|timeout' <<<"$f"; then c="timeout"
+       if grep -v baseline <<<"$f" | grep -qiE 'timed out|timeout'; then c="timeout${d:+; $d}"  # a parent-baseline timeout is not the worker's
+       elif [ -n "$d" ]; then c=$d
        elif [ -n "$t" ]; then c="test $t${n:+ ($n)}"
        elif f=$(grep -m1 -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$f" | sed -E 's/(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+).*//') && [ -n "$f" ]; then c="tsc $f"
        elif [ -n "$n" ]; then c="tests ($n)"; fi ;;
   esac
   [ -z "${c:-}" ] || printf ': %s' "${c:0:200}"
 }
-# failset (stdin) — sorted failing names in Test output: vitest "FAIL " lines, bun "(fail)" lines, files with tsc "error TS"
+# failset (stdin) — sorted failing names in Test output: vitest "FAIL " and bun "(fail)" lines (ANSI colour
+# stripped), and tsc diagnostics as "file(line,col): error TSnnnn" so a new error in an already-red file is new
 failset() {
-  local o; o=$(cat)
+  local o; o=$(sed 's/\x1b\[[0-9;]*m//g')
   { sed -nE -e 's/^ *FAIL +//p' -e 's/^\(fail\) //p' <<<"$o" | sed -E 's/ +\[[^]]*\]$//; s/ +[0-9.]+ ?ms$//'
-    grep -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$o" | sed -E 's/(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+).*//'
+    grep -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$o" | sed -E 's/[: -]+error TS/: error TS/'
   } | LC_ALL=C sort -u
 }
-# section <lf> <RED|GREEN> [last] — one of worker-task's test runs in the worker log: the output between its
-# "worker-task: RED: " (or GREEN) line and its next own line. RED takes the first (the Test at the branch HEAD,
-# before the model ran, so pi output can't forge it); GREEN with last=1 takes the last (the Test after the worker)
+# prelude <lf> — the worker log up to worker-task's own "worker: lane=" line: its RED and parent-baseline runs,
+# before pi ran, so nothing the model prints can forge them
+prelude() { awk 'index($0,"worker-task: worker: ")==1{exit} {print}' "$1" 2>/dev/null; }
+# section <marker> [last] (stdin) — output between worker-task's "worker-task: <marker>" log line and its next
+# own line: the first such section, or with last=1 the last (GREEN runs after pi, so the last one is real)
 section() {
-  awk -v m="worker-task: $2: " -v last="${3:-}" 'index($0,"worker-task: ")==1{ if(f&&!last)exit; f=index($0,m)==1; if(f)b=""; next }
-    f{b=b $0 "\n"} END{printf "%s",b}' "$1" 2>/dev/null
+  awk -v m="worker-task: $1" -v last="${2:-}" 'index($0,"worker-task: ")==1{ if(f&&!last)exit; f=index($0,m)==1; if(f)b=""; next }
+    f{b=b $0 "\n"} END{printf "%s",b}'
 }
-# basediff <lf> — GREEN's failures against the RED baseline: new ones are worker-introduced, ones already red at
-# the branch HEAD are baseline-red (wb-it5). Empty when GREEN names nothing. Success stays the Test's exit code.
+both() { LC_ALL=C comm -12 <(printf '%s\n' "$1") <(printf '%s\n' "$2") | grep .; }
+minus() { LC_ALL=C comm -23 <(printf '%s\n' "$1") <(printf '%s\n' "$2") | grep .; }
+# shellcheck disable=SC2016 # awk program, not shell
+names() { awk 'NF{printf "%s%s",s,$0; s=", "}' <<<"$1"; }
+# basediff <lf> — GREEN's failures (A) against worker-task's runs before the model (wb-it5):
+#   RED (R): the Test at the RED commit, where the target test is meant to fail
+#   parent (P): the Test minus the RED tests at the RED commit's parent; only when that run was judged
+# worker-introduced = A-R-P, target-still-failing = A∩R-P, baseline-red = A∩P (omitted when P never ran).
+# No parseable RED failures: "baseline unknown". Empty when GREEN names nothing. Success stays the Test's exit code.
 basediff() {
-  # shellcheck disable=SC2016 # awk program, not shell
-  local r g new old j='NF{printf "%s%s",s,$0; s=", "}'
-  r=$(section "$1" RED | failset) g=$(section "$1" GREEN 1 | failset)
-  [ -n "$g" ] || return 0
-  new=$(LC_ALL=C comm -13 <(printf '%s\n' "$r") <(printf '%s\n' "$g") | awk "$j")
-  old=$(LC_ALL=C comm -12 <(printf '%s\n' "$r") <(printf '%s\n' "$g") | awk "$j")
-  printf '%s' "${new:+worker-introduced: $new}${new:+${old:+; }}${old:+baseline-red: $old}"
+  local pre a r x p='' out=''
+  a=$(section 'GREEN: ' 1 <"$1" | failset); [ -n "$a" ] || return 0
+  pre=$(prelude "$1")
+  r=$(section 'RED: ' <<<"$pre" | failset)
+  [ -n "$r" ] || { printf 'baseline unknown; failing: %s' "$(names "$a")"; return 0; }
+  if grep -q "^worker-task: baseline (RED's parent): " <<<"$pre" && ! grep -qE '^worker-task: baseline (timed out|checkout failed)' <<<"$pre"; then
+    p=$(section "baseline (RED's parent): " <<<"$pre" | failset)
+  fi
+  x=$(minus "$(minus "$a" "$r")" "$p"); [ -z "$x" ] || out="worker-introduced: $(names "$x")"
+  x=$(minus "$(both "$a" "$r")" "$p"); [ -z "$x" ] || out="${out:+$out; }target-still-failing: $(names "$x")"
+  x=$(both "$a" "$p"); [ -z "$x" ] || out="${out:+$out; }baseline-red: $(names "$x")"
+  printf '%s' "$out"
 }
 summary() { tail -"${2:-3}" "$1" 2>/dev/null | tr '\n' ' '; }
 

@@ -112,7 +112,7 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out"; then
     log "baseline timed out or crashed at startup (rc $base_rc); not judged"
   else
-    tail -n 20 "$red_out" >&2
+    cat "$red_out" >&2  # whole: lane-run reads its failing names as the parent baseline (wb-it5)
     log "baseline red: Test already fails before the RED commit (rc $base_rc)"; base_red=1
   fi
 fi
