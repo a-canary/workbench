@@ -148,6 +148,26 @@ ok=1; for _ in 1 2; do WORKER_VENV=$venv "$here/worker-sandbox" --worktree "$wt"
 if [ -n "$ok" ]; then echo "PASS  venv bound read-only, every run"; else echo "FAIL  venv bound read-only, every run"; fail=1; fi
 unlink "$venv/marker"; rmdir "$venv"; rmdir "$wt/.venv" 2>/dev/null
 
+# workspace deps (wb-e22): pnpm keeps per-package node_modules (apps/web/node_modules -> ../../node_modules/.pnpm/..);
+# GREEN failed "Failed to resolve react/jsx-dev-runtime" with only the root lent. And vitest writes its bundled config
+# to node_modules/.vite-temp: EROFS on the read-only lend. Both lent, the temp dir writable, the host untouched.
+droot=$(mktemp -d); mkdir -p "$droot/node_modules" "$droot/apps/web/node_modules" "$wt/apps/web"
+touch "$droot/node_modules/m1" "$droot/apps/web/node_modules/m2"
+ok=1; for _ in 1 2; do WORKER_DEPS=$droot/node_modules "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  '[ -e /work/node_modules/m1 ] && [ -e /work/apps/web/node_modules/m2 ] && ! touch /work/apps/web/node_modules/probe 2>/dev/null' >/dev/null 2>&1 || ok=; done
+if [ -n "$ok" ]; then echo "PASS  workspace package deps bound read-only"; else echo "FAIL  workspace package deps bound read-only"; fail=1; fi
+WORKER_DEPS=$droot/node_modules "$here/worker-sandbox" --worktree "$wt" --lane private --timeout 60 --exec sh -c \
+  'mkdir -p /work/node_modules/.vite-temp && touch /work/node_modules/.vite-temp/cfg.mjs' >/dev/null 2>&1 && [ ! -e "$droot/node_modules/.vite-temp/cfg.mjs" ] \
+  && echo "PASS  node_modules/.vite-temp writable, host untouched" || { echo "FAIL  node_modules/.vite-temp writable, host untouched"; fail=1; }
+rm -r "$droot"; rmdir "$wt/apps/web/node_modules" "$wt/apps/web" "$wt/apps" "$wt/node_modules" 2>/dev/null
+
+# a Test written on the host may call a runtime by its host path (aw3-29p: ~/.bun/bin/bun -> "bun: not found")
+for b in bun node pi; do
+  p=$(command -v "$b" 2>/dev/null) || continue
+  case $p in "$HOME"/*) ;; *) continue ;; esac
+  probe "$b at its host path under the jail home" --worktree "$wt" --lane private --timeout 60 --exec sh -c "[ -x ~/${p#"$HOME"/} ]"
+done
+
 # fail-closed: no systemd user scope -> refuse to run unlimited, unless explicitly opted out
 if env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR=/nonexistent "$here/worker-sandbox" --worktree "$wt" --lane private --exec true >/dev/null 2>&1
 then echo "FAIL  no cgroup scope refused"; fail=1; else echo "PASS  no cgroup scope refused"; fi

@@ -26,16 +26,18 @@ run() {
   local wt="$tmp/wt-$RANDOM"
   git init -q "$wt"
   echo '{}' > "$wt/package.json"
-  git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
+  [ -z "${BASEF:-}" ] || echo "$BASEBODY" > "$wt/$BASEF"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   local redf=${REDF:-t.sh}
   echo "${REDBODY:-test -f ok}" > "$wt/$redf"
-  git -C "$wt" add "$redf" && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
+  [ -z "${REDEXTRA:-}" ] || echo stub > "$wt/$REDEXTRA"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
   [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
-    --task "$tmp/task" --test "sh '$redf'" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
+    --task "$tmp/task" --test "${TEST:-sh '$redf'}" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
   if [ -e "$tmp/pwned" ]; then echo "FAIL  $1 (host code ran)"; fail=1
@@ -113,6 +115,13 @@ RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
+# a RED commit that also carries a source stub: the stub is the worker's to fill, its test stays guarded (wb-e22 H3)
+REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried source stub is editable" 'echo done > impl.txt' ok
+REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED test file still guarded beside a stub" 'echo true > t.test.sh' refused
+# a Test already red before the RED commit (whole-project tsc, a red sibling suite) is a prep fault:
+# caught before the worker runs (rc 7), not blamed on the model at GREEN (wb-e22 H4)
+BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "Test red before the RED commit is rc 7" 'true' rc7
+BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" run "Test green before the RED commit runs the worker" 'true' ok
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 # PR create retries a transient api.github.com refusal (2 of 5 lane runs hit one, 2026-10-29); the gh stub fails $GH_FAILS times
 mkdir "$tmp/ghflaky"

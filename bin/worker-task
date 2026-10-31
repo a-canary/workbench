@@ -38,8 +38,13 @@ g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] 
 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 
-mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
-[ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
+mapfile -d '' -t touched < <(g show -z --name-only --format= HEAD)
+[ ${#touched[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
+# guard the RED commit's test-like files; a source stub it also carries is the worker's to fill in, and guarding it
+# blocked the legitimate fix (wb-an0.12.3.1). No test-like name at all: guard everything, as before.
+# ponytail: a substring match, so latest.ts or inspect.ts stay guarded too (the old, safe direction)
+protected=(); for f in "${touched[@]}"; do [[ ${f,,} =~ test|spec|fixture|snapshot ]] && protected+=("$f"); done
+[ ${#protected[@]} -gt 0 ] || protected=("${touched[@]}")
 # read before the worker runs (the jail masks .git anyway)
 may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
 # a blanket exemption (even '^[^z]' or '^[a-m]', which dodge a single sentinel) matches many unrelated paths
@@ -64,7 +69,7 @@ runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*c
 # capture test output to detect startup crashes (infra) vs real failures
 red_out=$(mktemp "${TMPDIR:-/tmp}/worker-red.XXXXXX")
 green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
-trap 'rm -rf "$red_out" "$green_out"; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
+trap 'rm -rf "$red_out" "$green_out" ${base:+"$base"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
 startup_crash() {
   grep -qE 'EROFS: read-only file system|failed to load config|Startup Error' "$1"
@@ -82,6 +87,32 @@ elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
 elif startup_crash "$red_out"; then
   log "RED crashed at startup (infra, not a valid RED)"
   exit 4
+fi
+
+# Baseline: the Test minus the RED commit's own tests must already pass on the RED commit's parent, or GREEN fails
+# on errors the worker never touched (whole-project tsc, a red sibling suite; wb-e22). Each &&-segment naming a
+# RED file by stem as a whole word (foo for src/foo.test.ts) becomes `true`, so a cd or setup segment still runs.
+# ponytail: naive split on '&&' (a quoted && splits too); add a parser if a Test ever needs one
+base_test= keep=
+while IFS= read -r seg; do
+  words=" $(tr -c '[:alnum:]_-' ' ' <<<"$seg") "
+  for f in "${touched[@]}"; do s=${f##*/}; s=${s%%.*}; [ -n "$s" ] && [[ $words == *" $s "* ]] && { seg=' true '; break; }; done
+  [[ $seg =~ ^[[:space:]]*(true|cd[[:space:]].*)[[:space:]]*$ ]] || keep=1
+  base_test=${base_test:+$base_test&&}$seg
+done < <(printf '%s\n' "${test//&&/$'\n'}")
+if [ -n "$keep" ] && g rev-parse -q --verify HEAD~1 >/dev/null; then
+  base=$(mktemp -d "${TMPDIR:-/tmp}/worker-base.XXXXXX")
+  g archive HEAD~1 | tar -x -C "$base"
+  log "baseline (RED's parent): $base_test"
+  base_rc=0
+  "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$base" --lane private --timeout 300 --exec sh -c "$base_test" >"$red_out" 2>&1 || base_rc=$?
+  if [ $base_rc -eq 124 ]; then log "baseline timed out; not judged"
+  elif [ $base_rc -ne 0 ]; then
+    tail -n 20 "$red_out" >&2
+    { [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || startup_crash "$red_out"; } && { log "baseline crashed at startup (infra)"; exit 4; }
+    log "baseline red: Test already fails before the RED commit (rc $base_rc); scope Test: to the new tests"
+    exit 7
+  fi
 fi
 
 log "worker: lane=$lane tools=$tools"
