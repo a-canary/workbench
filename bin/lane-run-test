@@ -22,6 +22,7 @@ check "dotdot refused"        "$(ok safe_branch lane/a..b)"  n
 
 # run_one against a stub bd and a stub worker-task, with a real origin holding the RED branch
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+export TMPDIR=$tmp  # lane-run keeps its lane-run-<id>.* log on non-green runs; keep the test's inside $tmp (arc-lny)
 git init -q --bare "$tmp/o.git"; git clone -q "$tmp/o.git" "$tmp/r" 2>/dev/null
 G() { git -C "$tmp/r" -c user.name=t -c user.email=t@t "$@"; }
 G commit -q --allow-empty -m base && G push -q origin HEAD:refs/heads/main
