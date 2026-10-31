@@ -145,7 +145,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   fi
   sha=$(git -C "$wt/wt" rev-parse --short HEAD 2>/dev/null)
   git -C "$repo" worktree remove --force "$wt/wt" 2>/dev/null; rm -rf "$wt" "$task"
-  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran, or the runner crashed at startup in RED/GREEN)
+  # worker-task: 0 GREEN, 2 the model failed, 3 GREEN but push/PR failed, 4 infra (worker never ran, or the runner crashed at startup in RED/GREEN),
+  # 7 bead prep: GREEN failed, and the Test was already red before the RED commit
   case $rc in
     0) bd -C "$repo" close "$id" --reason "GREEN $sha on $branch: $(summary "$wlog" 1)" >/dev/null \
          || { log "$id: GREEN $sha pushed but bd close failed; bead left in_progress"; down=1; }
@@ -158,6 +159,9 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
        fail "$id" "$(summary "$wlog") (log: $lf)" lane-infra; down=1
        sprint end "$id" blocked "infra" seconds=$(( $(date +%s) - t0 )) ;;
+    7) # the bead's Test needs rescoping, not the model re-splitting or the queue stopping
+       fail "$id" "$(summary "$wlog") (log: $lf)" human
+       sprint end "$id" blocked "baseline red" seconds=$(( $(date +%s) - t0 )) ;;
     6) # hand back unlabelled so the next pass retries it (2026-10-29: a GitHub 443 blip sent wb-an0.5.2 to a human)
        log "$id: origin unreachable; handed back for the next pass"
        bd -C "$repo" update "$id" -s open -a "" >/dev/null; down=1; rm -f "$lf"

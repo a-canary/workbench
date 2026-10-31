@@ -106,6 +106,9 @@ check "infra failure stops the pass"   "$(STUB_RC=4 go)" "rc=1 down=1"
 check "infra failure is not qwen-failed" "$(grep -c 'label add X-1 qwen-failed' "$calls")" 0
 check "infra bead leaves the queue"    "$(grep -c 'label add X-1 lane-infra' "$calls")" 1
 check "ready excludes lane-infra"      "$(grep -c 'exclude-label .*lane-infra' "$calls")" 1
+check "baseline red keeps the pass going" "$(STUB_RC=7 go)" "rc=0 down=0"
+check "baseline red goes to a human"   "$(grep -c 'label add X-1 human' "$calls")" 1
+check "baseline red is a known rc"     "$(grep -c 'rc=7' "$calls")" 0
 check "failed close is an outage"      "$(CLOSE_FAIL=1 go)" "rc=1 down=1"
 check "unexpected rc goes to a human"  "$(STUB_RC=1 go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
 G branch -q lane/x-1 origin/main

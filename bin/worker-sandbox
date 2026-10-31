@@ -201,8 +201,10 @@ path=/usr/local/bin:/usr/bin:/bin
 for b in pi node bun; do
   p=$(command -v "$b" 2>/dev/null) || continue
   case $p in /usr/*) path=$path:${p%/*}; continue ;; esac  # already bound; just needs PATH
-  p=$(readlink -f "$p"); case $p in /usr/*) continue ;; esac
-  args+=(--ro-bind "$p" "/opt/$b/$b"); path=/opt/$b:$path
+  rp=$(readlink -f "$p"); case $rp in /usr/*) continue ;; esac
+  args+=(--ro-bind "$rp" "/opt/$b/$b"); path=/opt/$b:$path
+  # ...and at its host path under the jail home, for a Test written as ~/.bun/bin/bun (aw3-29p)
+  case $p in "$HOME"/*) args+=(--ro-bind "$rp" "/home/worker/${p#"$HOME"/}") ;; esac
 done
 case $profile in
   research) args+=(--ro-bind "$wt" /work --bind "$tmp/search.sock" /run/search.sock --setenv SEARCH_PORT "$sport") ;;
@@ -228,10 +230,22 @@ elif [ -e "$wt/.git" ]; then args+=(--ro-bind /dev/null /work/.git); fi
 # Skip only a real (non-empty) node_modules: bwrap leaves an empty mountpoint dir behind after each run.
 # Private or ollama lane, build/qa only: a public or research jail can carry what it reads off the host.
 # Same for a python repo's .venv (WORKER_VENV): bound read-only at /work/.venv, so GREEN's fresh checkout can run pytest.
+# A workspace's per-package node_modules (pnpm: apps/web/node_modules -> ../../node_modules/.pnpm/...) are lent too,
+# for packages the worktree has. vitest bundles its config into node_modules/.vite-temp: a tmpfs there (wb-e22).
 if [ "$lane" != public ] && [ "$profile" != research ]; then
-  for spec in "${WORKER_DEPS:-}:node_modules" "${WORKER_VENV:-}:.venv"; do
+  specs=("${WORKER_DEPS:-}:node_modules" "${WORKER_VENV:-}:.venv")
+  deps=${WORKER_DEPS:-}
+  # not qa: its worktree is read-only, so bwrap could not create the nested mountpoints
+  if [ "$profile" != qa ] && [ "${deps##*/}" = node_modules ] && [ -d "$deps" ]; then
+    root=${deps%/node_modules}
+    while IFS= read -r d; do rel=${d#"$root"/}; [ -d "$wt/${rel%/node_modules}" ] && specs+=("$d:$rel")
+    done < <(find "$root" -mindepth 2 -maxdepth 3 -type d -name node_modules -not -path "$root/node_modules/*" -not -path "$root/.*" 2>/dev/null)
+  fi
+  for spec in "${specs[@]}"; do
     src=${spec%:*} dst=${spec##*:}
-    [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ] && args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
+    [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ] || continue
+    args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
+    [ "$dst" = .venv ] || { mkdir -p "$src/.vite-temp" 2>/dev/null; [ -d "$src/.vite-temp" ] && args+=(--tmpfs "/work/$dst/.vite-temp"); }
   done
 fi
 args+=(--bind "$tmp/agent" /home/worker/.pi/agent

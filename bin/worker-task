@@ -5,7 +5,7 @@
 #               [--tools read,edit,write,bash] [--timeout 600] [--push]
 #
 # Contract: the worktree's HEAD commit is the director's failing test (RED commit).
-# The worker may not touch any file that commit touched, nor test/runner config
+# The worker may not touch any file that commit protected, nor test/runner config
 # (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
 # it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
@@ -64,7 +64,8 @@ runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*c
 # capture test output to detect startup crashes (infra) vs real failures
 red_out=$(mktemp "${TMPDIR:-/tmp}/worker-red.XXXXXX")
 green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
-trap 'rm -rf "$red_out" "$green_out"; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
+basedir= green=
+trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir" "$basedir.idx"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
 startup_crash() {
   grep -qE 'EROFS: read-only file system|failed to load config|Startup Error' "$1"
@@ -82,6 +83,38 @@ elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
 elif startup_crash "$red_out"; then
   log "RED crashed at startup (infra, not a valid RED)"
   exit 4
+fi
+
+# Baseline: the Test minus the RED commit's own tests, run on the RED commit's parent. If it already fails there,
+# a GREEN failure is errors the worker never protected (whole-project tsc, a red sibling suite; wb-e22), not the model.
+# Each &&-segment naming a RED file by stem as a whole word (foo for src/foo.test.ts) becomes `true`, so a cd or
+# setup segment still runs; a Test with no such segment (a glob, directory or -k/-t filter) is not judged.
+# Advisory only: it relabels a failed GREEN as rc 7 and never stops a run.
+# ponytail: naive split on '&&'; a split that breaks the shell (a quoted or subshell &&) skips the baseline
+base_test= keep= scoped=
+while IFS= read -r seg; do
+  words=" $(tr -c '[:alnum:]_-' ' ' <<<"$seg") "
+  for f in "${protected[@]}"; do s=${f##*/}; s=${s%%.*}; [ -n "$s" ] && [[ $words == *" $s "* ]] && { seg=' true ' scoped=1; break; }; done
+  [[ $seg =~ ^[[:space:]]*(true|cd[[:space:]].*)[[:space:]]*$ ]] || keep=1
+  base_test=${base_test:+$base_test&&}$seg
+done < <(printf '%s\n' "${test//&&/$'\n'}")
+base_red=
+if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g rev-parse -q --verify HEAD~1 >/dev/null; then
+  basedir=$(mktemp -d "${TMPDIR:-/tmp}/worker-base.XXXXXX")
+  log "baseline (RED's parent): $base_test"
+  base_rc=0
+  if ! GIT_INDEX_FILE="$basedir.idx" g read-tree HEAD~1 || ! GIT_INDEX_FILE="$basedir.idx" g checkout-index -a --prefix="$basedir/"; then
+    log "baseline checkout failed; not judged"
+  else "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$basedir" --lane private --timeout 300 --exec sh -c "$base_test" >"$red_out" 2>&1 || base_rc=$?
+  fi
+  rm -f "$basedir.idx"
+  if [ $base_rc -eq 0 ]; then :
+  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out"; then
+    log "baseline timed out or crashed at startup (rc $base_rc); not judged"
+  else
+    tail -n 20 "$red_out" >&2
+    log "baseline red: Test already fails before the RED commit (rc $base_rc)"; base_red=1
+  fi
 fi
 
 log "worker: lane=$lane tools=$tools"
@@ -122,6 +155,8 @@ if [ $green_rc -ne 0 ]; then
     log "GREEN crashed at startup (infra)"
     exit 4
   fi
+  # a GREEN timeout is a hang in the worker's code, the model's to own whatever the baseline said
+  [ -z "$base_red" ] || [ $green_rc -eq 124 ] || { log "test still fails after worker, and failed before the RED commit; scope Test: to the new tests"; exit 7; }
   die "test still fails after worker"
 fi
 

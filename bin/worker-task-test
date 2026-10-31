@@ -26,16 +26,18 @@ run() {
   local wt="$tmp/wt-$RANDOM"
   git init -q "$wt"
   echo '{}' > "$wt/package.json"
-  git -C "$wt" add package.json && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
+  [ -z "${BASEF:-}" ] || echo "$BASEBODY" > "$wt/$BASEF"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   local redf=${REDF:-t.sh}
   echo "${REDBODY:-test -f ok}" > "$wt/$redf"
-  git -C "$wt" add "$redf" && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
+  [ -z "${REDEXTRA:-}" ] || echo stub > "$wt/$REDEXTRA"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
   [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
   ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
-    --task "$tmp/task" --test "sh '$redf'" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
+    --task "$tmp/task" --test "${TEST:-sh '$redf'}" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
   if [ -e "$tmp/pwned" ]; then echo "FAIL  $1 (host code ran)"; fail=1
@@ -113,6 +115,20 @@ RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
 # GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
 LANE=public run "public lane GREEN runs" '' ok
+# a RED commit that also carries a source stub: every file it touched stays guarded (wb-e22 review: a
+# name-based or Worker-May-Edit stub exemption also unguarded mocks, golden files and the RED test itself)
+REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried file stays guarded" 'echo done > impl.txt' refused
+RED_MSG=$'red\n\nWorker-May-Edit: \\.sh$' REDF=t.test.sh REDBODY='test -f ok' run "Worker-May-Edit never unguards the RED test" 'echo true > t.test.sh' refused
+# a Test already red before the RED commit (whole-project tsc, a red sibling suite) is a prep fault: a GREEN
+# failure then exits rc 7, not blamed on the model (wb-e22 H4). The baseline never stops a run on its own.
+BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "Test red before the RED commit is rc 7" 'true' rc7
+BASEF=lint.sh BASEBODY='exit 1' TEST="sh t.sh && sh lint.sh" run "red baseline still commits a GREEN fix" 'echo "exit 0" > lint.sh' ok
+BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" run "Test green before the RED commit runs the worker" 'true' ok
+# Tests the stem match cannot scope: a subshell && (the split breaks the shell), a glob over new files
+TEST="(cd . && sh t.sh)" run "subshell && Test runs the worker" 'true' ok
+REDF=case.sh TEST='for f in c*.sh; do sh "$f"; done' run "Test globbing new files runs the worker" 'true' ok
+# ...and a model failure on such a Test is still the model's (rc 2), not a prep fault (rc 7)
+REDF=case.sh REDBODY='test -f never' TEST='for f in c*.sh; do sh "$f" || exit 1; done' run "unscoped Test model failure is rc 2" 'true' rc2
 PATH="$tmp/gitfail:$PATH" run "config check fails closed when git errors" 'echo x > conftest.py' refused
 # PR create retries a transient api.github.com refusal (2 of 5 lane runs hit one, 2026-10-29); the gh stub fails $GH_FAILS times
 mkdir "$tmp/ghflaky"
@@ -121,6 +137,12 @@ printf '#!/usr/bin/env bash\n[ "$2" = view ] && { [ "${GH_VIEW:-1}" = 0 ] && ech
 chmod +x "$tmp/ghflaky/gh"
 rm -f "$tmp/ghn"; GH_FAILS=2 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create retried past 2 refusals" 'true' ok
 rm -f "$tmp/ghn"; GH_FAILS=3 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "PR create gives up after 3 (rc 3)" 'true' rc3
+# the PR base branch name is not a temp dir: a pushed run must not delete ./main or ./master in its cwd
+mkdir -p "$tmp/cwd/main" "$tmp/cwd/master"
+rm -f "$tmp/ghn"; (cd "$tmp/cwd" && BASEF=lint.sh BASEBODY='exit 0' TEST="sh t.sh && sh lint.sh" GH_FAILS=0 PUSH=1 \
+  WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "pushed run with a baseline" 'true' ok)
+if [ -d "$tmp/cwd/main" ] && [ -d "$tmp/cwd/master" ]; then echo "PASS  pushed run leaves ./main and ./master"
+else echo "FAIL  pushed run leaves ./main and ./master"; fail=1; fi
 rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "already-open PR counts as delivered" 'true' ok
 rm -f "$tmp/ghn"; GH_FAILS=3 GH_VIEW=0 GH_STATE=MERGED PUSH=1 WORKER_PR_RETRY_S=0 PATH="$tmp/ghflaky:$PATH" run "merged PR is not delivery (rc 3)" 'true' rc3
 
