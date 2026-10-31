@@ -2,7 +2,7 @@
 // Queue CLI — the Driver's next-bead picker across every configured beads db. Port of driver-next.sh.
 //   bun director/src/queue/cli.ts [N]     top N rows (default 1): dir, id, P<pri>, title (TSV)
 // Env: QUEUE_DBS (file: one bd dir per line, # comments; default: cwd only), DRIVER_LANE (default "claude"),
-//      SPRINT_STEER (default ./steer-<lane>.json), LANE_URL (laneproxy base URL; unset = no v100-starved row).
+//      SPRINT_STEER (default ./steer-<lane>.json).
 import { readFileSync } from "node:fs";
 import { readSteer } from "../sprint/steer.ts";
 import { format, rank, type Bead, type Row } from "./rank.ts";
@@ -13,7 +13,6 @@ import { burnGate } from "../budget/burn.ts";
 export type Ctx = {
   dbs: string[];
   steer: string;
-  laneUrl?: string;
   limits?: Limit[] | null;
   silos?: Record<string, string>;
   exec: (cmd: string[]) => string; // stdout, "" on failure
@@ -37,34 +36,6 @@ const beads = (c: Ctx, dir: string, args: string[]): Bead[] | null => {
     return null;
   }
 };
-
-// Sum a bd query across every configured db; null if any db is unreadable (fail closed).
-const countAcross = (c: Ctx, args: string[]): number | null => {
-  const ns = c.dbs.map((d) => beads(c, d, args)?.length);
-  return ns.length && ns.every((n) => n !== undefined) ? ns.reduce((a, n) => a! + n!, 0)! : null;
-};
-
-const V100_READY = ["ready", "--json", "-n", "100", "-l", "lane:v100", "--exclude-label", "qwen-failed,human"];
-
-// V100 up but idle (no lane:v100 bead running anywhere, laneproxy queue empty) → top row tells the
-// Driver to feed it. A lane that answers non-200 is down, not starved. Fails closed: an unreadable
-// db or /__lanes could hide a running bead, so either suppresses the row (the shell assumed idle).
-function starved(c: Ctx): Bead | null {
-  if (!c.laneUrl || c.exec(["curl", "-s", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}", `${c.laneUrl}/v1/models`]) !== "200") return null;
-  if (countAcross(c, ["list", "--status", "in_progress", "-l", "lane:v100", "--json", "--limit", "100"]) !== 0) return null;
-  try {
-    const l = JSON.parse(c.exec(["curl", "-s", "-m", "3", `${c.laneUrl}/__lanes`]));
-    if (!Array.isArray(l.waiting) || !Array.isArray(l.slots)) return null;
-    if (l.waiting.length + l.slots.filter((s: { lane: unknown }) => s.lane != null).length > 0) return null;
-  } catch {
-    return null;
-  }
-  const rdy = countAcross(c, V100_READY) ?? 0;
-  return {
-    dir: "-", id: "v100-starved", priority: 0, created_at: "0000", updated_at: "", labels: [], issue_type: "task", status: "open",
-    title: `[v100-starved] V100 idle (${rdy} lane:v100 ready, 0 running): decompose one into lane-run RED-test beads, then run lane-run`,
-  };
-}
 
 export function next(c: Ctx, n: number): number {
   const ready: Bead[] = [];
@@ -90,8 +61,6 @@ export function next(c: Ctx, n: number): number {
     ready.length = 0;
     ready.push(...kept);
   }
-  const s = starved(c);
-  if (s) ready.push(s);
   let rows = rank(ready, claimed, readSteer(c.steer), c.now);
   if (held.length > 0) {
     const g = held[0]!.g;
@@ -115,7 +84,6 @@ if (import.meta.main) {
   const c: Ctx = {
     dbs: dbFile ? readDbs(dbFile) : [process.cwd()], // a configured but missing file throws: fail loud
     steer: process.env.SPRINT_STEER ?? `steer-${lane}.json`,
-    laneUrl: process.env.LANE_URL,
     limits: process.env.BUDGET_GATE === "off" ? undefined : null,
     silos: dbFile ? readSilos(dbFile) : {},
     exec: (cmd) => Bun.spawnSync(cmd, { timeout: 60_000, stderr: "pipe" }).stdout.toString(),
