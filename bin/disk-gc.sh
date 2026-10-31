@@ -35,10 +35,12 @@ while IFS= read -r item; do
     log "Removed ~/trash/$item (~$((${item_kb:-0} / 1024))M), freed $((freed_kb / 1024))M so far"
 done < <(ls -1tr ~/trash 2>/dev/null)
 
-# Phase 2: if still below 5GB freed, clean our own /tmp scratch dirs older than 1 day.
+# Phase 2: if still below 5GB freed, clean our own /tmp scratch dirs untouched for 2+ days
+# (find -mtime +1 rounds down, so it matches >= 48h).
 # NUL-delimited: an unquoted `for d in $dirs` split a name like 'claude-x *' and globbed
 # the `*` against the caller's cwd, rm -rf'ing the project checkout (wb#73 review).
 tmp_root=${DISK_GC_TMP:-/tmp}
+tmp_root=${tmp_root%/}  # find prints root/name; a trailing slash made live_scratch root//name and the skip missed
 live_scratch="$tmp_root/claude-$(id -u)"  # Claude Code's per-user scratch: mtime lags while in use
 if [ "$freed_kb" -lt "$max_kb" ]; then
     while IFS= read -r -d '' d; do
