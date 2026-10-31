@@ -346,6 +346,17 @@ sys.exit(0 if time.monotonic() - t0 < 6 else 1)
 PY
 then echo "PASS  relay closes a fast-streaming client at the deadline"; else echo "FAIL  relay closes a fast-streaming client at the deadline"; fail=1; fi
 kill $frl
+# an upstream dial or TLS failure is a 502 with its reason on stderr, never a silent close that reads as
+# an empty result (wb-6uz); neither the client nor the log (stderr is shared with the jail's) names the upstream
+for u in "unix2http 127.0.0.1:1 refused" "unix2https 127.0.0.1:$rport tls"; do
+  set -- $u
+  python3 "$here/relay.py" "$1" "$rt/e$3" "$2" 2>"$rt/e$3.err" & erl=$!
+  for _ in $(seq 30); do [ -S "$rt/e$3" ] && break; sleep 0.1; done
+  got=$(curl -s -m 5 -w ' %{http_code}' --unix-socket "$rt/e$3" http://x/v1/models)
+  kill $erl
+  if [ "$got" = "upstream unreachable 502" ] && grep -q '^relay: upstream ' "$rt/e$3.err" && ! grep -q '127\.0\.0\.1' "$rt/e$3.err"
+  then echo "PASS  relay answers 502 + logs on a $3 upstream"; else echo "FAIL  relay answers 502 + logs on a $3 upstream (got '$got', log '$(head -c 200 "$rt/e$3.err")')"; fail=1; fi
+done
 # connection cap: with 3 slots held by idle clients, a 4th is closed at once (every door, not just http)
 capped() { python3 - "$1" <<'PY'
 import socket, sys, time

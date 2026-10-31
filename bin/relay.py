@@ -44,8 +44,8 @@ def serve(listener, dial):
 PATHS = tuple(os.environ.get("RELAY_PATHS", "/v1/chat/completions,/v1/models").split(","))
 DROP = (b"authorization", b"connection", b"keep-alive", b"upgrade", b"te", b"x-lane")  # x-lane: laneproxy lane pick
 
-def refuse(c, why):
-    c.sendall(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" % (len(why), why))
+def refuse(c, why, status=b"403 Forbidden"):
+    c.sendall(b"HTTP/1.1 %s\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" % (status, len(why), why))
     c.close()
 
 TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
@@ -103,7 +103,15 @@ def http_one(c, dial):
     if os.environ.get("RELAY_HOST"):  # a remote upstream routes on Host; the jail's says 127.0.0.1
         keep = [h for h in keep if h.partition(b":")[0].lower() != b"host"] + [b"Host: " + os.environ["RELAY_HOST"].encode()]
     if os.environ.get("RELAY_KEY"): keep.append(b"Authorization: Bearer " + os.environ["RELAY_KEY"].encode())
-    with dial() as u:  # dial only once the head passed
+    try: u = dial()  # dial only once the head passed
+    except OSError as e:  # refused, DNS, TLS verify (ssl.SSLError is an OSError): say so, never a silent close
+        refuse(c, b"upstream unreachable", b"502 Bad Gateway")  # first, so a dead stderr can't swallow it
+        # fixed tokens only (class, errno, SSL reason): this stderr is shared with the jailed worker's, so no
+        # str(e) / repr, which can carry the upstream hostname or certificate names
+        try: print(f"relay: upstream {type(e).__name__} errno={e.errno} reason={getattr(e, 'reason', None)}", file=sys.stderr, flush=True)
+        except (OSError, ValueError): pass
+        return
+    with u:
         u.sendall(b"\r\n".join([line, *keep]) + b"\r\n\r\n" + body[:length])
         left = length - len(body)
         while left > 0 and (d := rx(min(left, 65536))):
