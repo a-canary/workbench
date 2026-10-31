@@ -107,7 +107,7 @@ test("plan: one bead per new HARNESS shape, MODEL rows to queue deduped, judge c
   const keys = Object.fromEntries(out.cases.filter((c) => c.class === "HARNESS").map((c) => [c.id, shapeKey(c)]));
   expect(keys).toEqual({ h1: "h1-already-exists", h2: "infra-erofs", h3a: "h3-empty-red-commit", h3b: "h3-protected-non-test", h4: "h4-whole-project-tsc" });
   // infra-erofs already has an open bead; m1 already queued
-  const p = plan(out, (k) => k === "infra-erofs", new Set(["m1 2026-10-29T10:00:00Z"]));
+  const p = plan(out, (k) => ({ open: k === "infra-erofs", ids: new Set<string>() }), new Set(["m1 2026-10-29T10:00:00Z"]));
   expect(p.beads.map((b) => b.key)).toEqual(["h1-already-exists", "h3-empty-red-commit", "h3-protected-non-test", "h4-whole-project-tsc"]);
   expect(p.beads[0].title).toBe("worker-failure shape h1-already-exists: 1 case (e.g. h1)");
   expect(p.beads[0].description).toMatch(/^shape: h1-already-exists\n/);
@@ -119,8 +119,17 @@ test("plan groups cases of one shape into a single bead naming the count", () =>
   const sprints = ["h3a", "h3b"].flatMap((i) => [start(i), end(i)]).join("\n");
   const out = classify(sprints, { notes, log });
   out.cases[1].runs[0].cause = "empty-red-commit"; // force same shape
-  const p = plan(out, () => false, new Set());
+  const p = plan(out, () => ({ open: false, ids: new Set<string>() }), new Set());
   expect(p.beads.map((b) => b.title)).toEqual(["worker-failure shape h3-empty-red-commit: 2 cases (e.g. h3a, h3b)"]);
+});
+
+test("plan: a closed shape refiles only for cases no earlier bead listed", () => {
+  const sprints = ["h3a", "h3b"].flatMap((i) => [start(i), end(i)]).join("\n");
+  const out = classify(sprints, { notes, log });
+  out.cases[1].runs[0].cause = "empty-red-commit"; // force same shape
+  const closed = (ids: string[]) => () => ({ open: false, ids: new Set(ids) });
+  expect(plan(out, closed(["h3a", "h3b"]), new Set()).beads).toEqual([]);
+  expect(plan(out, closed(["h3a"]), new Set()).beads.map((b) => b.title)).toEqual(["worker-failure shape h3-empty-red-commit: 1 case (e.g. h3b)"]);
 });
 
 test("file: bd create per bead with shape label; queue rows appended as jsonl", () => {
