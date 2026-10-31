@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
-#   lane-run [--repo DIR]... [--label lane:v100] [--lane private|public] [--once] [--idle 600]
-#   --lane public sends the worker to the 9router Worker combo; worker-sandbox refuses any repo that is
-#   neither PUBLIC nor listed in $WORKER_PREPUBLIC (e.g. --label lane:9router --lane public).
+#   lane-run [--repo DIR]... [--label lane:v100] [--lane private] [--once] [--idle 600]
+#   (the public 9router lane is retired on home-lab-1: 9router moved to ai-lab-02, repos-mxu8 A, 2026-10-31)
 #   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
 # The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
@@ -28,11 +27,12 @@ while [ $# -gt 0 ]; do
     --lane) lane=$2; shift 2 ;;
     --once) once=1; shift ;;
     --idle) idle=$2; shift 2 ;;
+    -h|--help) sed -n '2,6s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
   esac
 done
 # a bad lane would fail every bead as the model's fault (qwen-failed) and poison the queue
-[[ $lane == private || $lane == public ]] || { echo "lane-run: --lane private|public, got '$lane'" >&2; exit 2; }
+[[ $lane == private ]] || { echo "lane-run: --lane private, got '$lane'" >&2; exit 2; }
 [ ${#repos[@]} -gt 0 ] || repos=("$PWD")
 [[ $idle =~ ^[0-9]+$ ]] || { echo "lane-run: --idle wants seconds, got '$idle'" >&2; exit 2; }
 log() { echo "lane-run: $*" >&2; }
@@ -98,7 +98,7 @@ interrupted() {
 
 down=
 endpoint_up() {
-  local port=${WORKER_PRIVATE_PORT:-8099}; [ "$lane" != public ] || port=${WORKER_PUBLIC_PORT:-20128}
+  local port=${WORKER_PRIVATE_PORT:-8099}
   curl -sf -m 5 -o /dev/null "http://127.0.0.1:$port/v1/models" || { log "model endpoint :$port down; not claiming"; return 1; }
 }
 lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout before the model runs
@@ -110,7 +110,7 @@ lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout bef
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
   local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
   endpoint_up || { down=1; return 1; }
-  [ "$lane" = public ] || ! lane_busy || return 1  # the 9router lane does not queue on laneproxy
+  ! lane_busy || return 1
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
   j=$(bd -C "$repo" ready --json -n 1 -l "$label" --exclude-label qwen-failed,human,lane-infra) \
     && id=$(jq -er '.[0].id // ""' <<<"$j") \
