@@ -144,8 +144,10 @@ for _ in $(seq 50); do [ -S "$tmp/ep.sock" ] && break; sleep 0.1; done
 # research profile: second door, to a search/fetch MCP server run on the host for this jail only
 if [ "$profile" = research ]; then
   sport=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
-  # ponytail: any streamable-http MCP works; default is search-mcp on PATH
-  SEARCH_MCP_ALLOW_PRIVATE_HOSTS=false SEARCH_MCP_DOWNLOAD_ENABLED=false setsid ${WORKER_SEARCH_CMD:-search-mcp} \
+  # ponytail: any streamable-http MCP works; default is search-mcp on PATH, else free-search-mcp's own venv
+  # (its uv install never puts it on PATH, so a plain-shell run failed every research check, wb-5v3)
+  scmd=${WORKER_SEARCH_CMD:-$(command -v search-mcp || echo "$HOME/.local/share/free-search-mcp/.venv/bin/search-mcp")}
+  SEARCH_MCP_ALLOW_PRIVATE_HOSTS=false SEARCH_MCP_DOWNLOAD_ENABLED=false setsid $scmd \
     --transport streamable-http --host 127.0.0.1 --port "$sport" >"$tmp/search.log" 2>&1 &
   search_pid=$!
   for _ in $(seq 100); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$sport/mcp" && break; sleep 0.2; done
