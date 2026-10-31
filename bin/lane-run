@@ -56,7 +56,9 @@ cause() {
   case $1 in
     5) c="checkout failed" ;;
     4) grep -q 'timed out' "$2" 2>/dev/null && c="timeout" ;;
+    7) c=$(basediff "$3") ;;
     2) f=$(cat "$2" "$3" 2>/dev/null)
+       c=$(basediff "$3"); [ -z "$c" ] || { printf ': %s' "${c:0:200}"; return 0; }
        t=$(grep -m1 '^(fail) ' <<<"$f" | sed -E 's/^\(fail\) //; s/ \[[^]]*\]$//')
        n=$(grep -m1 -oE '^ *[0-9]+ fail' <<<"$f" | sed 's/^ *//')
        if grep -qiE 'timed out|timeout' <<<"$f"; then c="timeout"
@@ -64,7 +66,32 @@ cause() {
        elif f=$(grep -m1 -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$f" | sed -E 's/(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+).*//') && [ -n "$f" ]; then c="tsc $f"
        elif [ -n "$n" ]; then c="tests ($n)"; fi ;;
   esac
-  [ -z "${c:-}" ] || printf ': %s' "${c:0:100}"
+  [ -z "${c:-}" ] || printf ': %s' "${c:0:200}"
+}
+# failset (stdin) — sorted failing names in Test output: vitest "FAIL " lines, bun "(fail)" lines, files with tsc "error TS"
+failset() {
+  local o; o=$(cat)
+  { sed -nE -e 's/^ *FAIL +//p' -e 's/^\(fail\) //p' <<<"$o" | sed -E 's/ +\[[^]]*\]$//; s/ +[0-9.]+ ?ms$//'
+    grep -oE '[^ ]+(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+)[: -]+error TS[0-9]+' <<<"$o" | sed -E 's/(\([0-9]+,[0-9]+\)|:[0-9]+:[0-9]+).*//'
+  } | LC_ALL=C sort -u
+}
+# section <lf> <RED|GREEN> [last] — one of worker-task's test runs in the worker log: the output between its
+# "worker-task: RED: " (or GREEN) line and its next own line. RED takes the first (the Test at the branch HEAD,
+# before the model ran, so pi output can't forge it); GREEN with last=1 takes the last (the Test after the worker)
+section() {
+  awk -v m="worker-task: $2: " -v last="${3:-}" 'index($0,"worker-task: ")==1{ if(f&&!last)exit; f=index($0,m)==1; if(f)b=""; next }
+    f{b=b $0 "\n"} END{printf "%s",b}' "$1" 2>/dev/null
+}
+# basediff <lf> — GREEN's failures against the RED baseline: new ones are worker-introduced, ones already red at
+# the branch HEAD are baseline-red (wb-it5). Empty when GREEN names nothing. Success stays the Test's exit code.
+basediff() {
+  # shellcheck disable=SC2016 # awk program, not shell
+  local r g new old j='NF{printf "%s%s",s,$0; s=", "}'
+  r=$(section "$1" RED | failset) g=$(section "$1" GREEN 1 | failset)
+  [ -n "$g" ] || return 0
+  new=$(LC_ALL=C comm -13 <(printf '%s\n' "$r") <(printf '%s\n' "$g") | awk "$j")
+  old=$(LC_ALL=C comm -12 <(printf '%s\n' "$r") <(printf '%s\n' "$g") | awk "$j")
+  printf '%s' "${new:+worker-introduced: $new}${new:+${old:+; }}${old:+baseline-red: $old}"
 }
 summary() { tail -"${2:-3}" "$1" 2>/dev/null | tr '\n' ' '; }
 
@@ -108,7 +135,7 @@ lane_busy() { # a saturated laneproxy queue would eat the worker's --timeout bef
   log "lane busy ($n waiting); deferring"
 }
 run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an outage)
-  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha sig= base= keep=
+  local j id desc branch test wt= task= wlog= lf= wpid= made= rc t0 sha why sig= base= keep=
   endpoint_up || { down=1; return 1; }
   ! lane_busy || return 1
   # bd's stderr (warnings even on success) goes to our log, never into the JSON
@@ -173,7 +200,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        log "■ $id done $sha"; sprint end "$id" done "GREEN $sha" seconds=$(( $(date +%s) - t0 ))
        rm -f "$lf" ;;
     2) fail "$id" "$(summary "$wlog") (log: $lf)"  # full worker output for a human; the bead keeps worker-task's own lines
-       sprint end "$id" blocked "worker failed$(cause 2 "$wlog" "$lf")" seconds=$(( $(date +%s) - t0 )) ;;
+       why="worker failed$(cause 2 "$wlog" "$lf")"; echo "lane-run: finding: $why" >>"$lf"
+       sprint end "$id" blocked "$why" seconds=$(( $(date +%s) - t0 )) ;;
     4) # unblamed (not qwen-failed: nothing to re-split) and stop this pass, so one outage costs one bead,
        # not the queue; lane-infra is excluded from ready, so neither a dead endpoint nor a worker that
        # kills its own pi loops. ponytail: after an outage, `bd label remove <id> lane-infra` to retry
@@ -181,7 +209,8 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
        sprint end "$id" blocked "infra$(cause 4 "$wlog" "$lf")" seconds=$(( $(date +%s) - t0 )) ;;
     7) # the bead's Test needs rescoping, not the model re-splitting or the queue stopping
        fail "$id" "$(summary "$wlog") (log: $lf)" human
-       sprint end "$id" blocked "baseline red" seconds=$(( $(date +%s) - t0 )) ;;
+       why="baseline red$(cause 7 "$wlog" "$lf")"; echo "lane-run: finding: $why" >>"$lf"
+       sprint end "$id" blocked "$why" seconds=$(( $(date +%s) - t0 )) ;;
     6) # hand back unlabelled so the next pass retries it (2026-10-29: a GitHub 443 blip sent wb-an0.5.2 to a human)
        log "$id: origin unreachable; handed back for the next pass"
        bd -C "$repo" update "$id" -s open -a "" >/dev/null; down=1; rm -f "$lf"

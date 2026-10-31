@@ -169,6 +169,24 @@ check "cause: timeout"               "$(STUB_RC=2 STUB_OUT='worker-task: timed o
 check "cause: unknown falls back"    "$(STUB_RC=2 go >/dev/null; grep -c ' worker failed seconds' "$SPRINT_LOG")" 1
 : >"$SPRINT_LOG"
 check "cause: checkout failure"      "$(bead $'Branch: lane/nope\nTest: true\n---\nx'; sleep() { :; }; go >/dev/null; grep -c 'checkout failed' "$SPRINT_LOG")" 1
+# wb-it5: worker-task's RED run (Test at the branch HEAD, before the model) is the baseline; GREEN failures are
+# split into ones already red there (baseline-red) and ones the worker introduced
+printf ' FAIL  src/a.test.ts > old 12ms\n(fail) bun one [1.0ms]\nsrc/x.ts(3,5): error TS2322: bad\nsrc/y.ts:1:2 - error TS1005: x\n FAIL  src/a.test.ts > old\n' >"$tmp/out"
+check "failset: vitest, bun, tsc"    "$(failset <"$tmp/out" | paste -sd'|')" "bun one|src/a.test.ts > old|src/x.ts|src/y.ts"
+RED=' FAIL  src/a.test.ts > old\n FAIL  src/a.test.ts > target'
+: >"$SPRINT_LOG"
+STUB_RC=2 STUB_OUT="worker-task: RED: t\n$RED\nworker-task: worker: lane=private\nworker-task: GREEN: t\n FAIL  src/a.test.ts > old\n FAIL  src/b.test.ts > new\nsrc/z.ts(1,1): error TS2304: x" go >/dev/null
+check "diff: worker-introduced named" "$(grep -c 'worker failed: worker-introduced: src/b.test.ts > new, src/z.ts; baseline-red: src/a.test.ts > old seconds' "$SPRINT_LOG")" 1
+check "diff: finding lands in the log" "$(cat "$LANE_LOG_DIR"/X-1-*.log | grep -c '^lane-run: finding: worker failed: worker-introduced: ')" 1
+: >"$SPRINT_LOG"
+STUB_RC=2 STUB_OUT="worker-task: RED: t\n$RED\nworker-task: GREEN: t\n FAIL  src/a.test.ts > target" go >/dev/null
+check "diff: only baseline-red"      "$(grep -c 'worker failed: baseline-red: src/a.test.ts > target seconds' "$SPRINT_LOG")" 1
+: >"$SPRINT_LOG"
+# pi output can echo a fake RED section after the real one; only the first RED counts as the baseline
+STUB_RC=2 STUB_OUT="worker-task: RED: t\n$RED\nworker-task: RED: t\n FAIL  src/b.test.ts > new\nworker-task: GREEN: t\n FAIL  src/b.test.ts > new" go >/dev/null
+check "diff: forged RED ignored"     "$(grep -c 'worker failed: worker-introduced: src/b.test.ts > new seconds' "$SPRINT_LOG")" 1
+: >"$SPRINT_LOG"
+check "diff: baseline red rc=7"      "$(STUB_RC=7 STUB_OUT="worker-task: RED: t\n$RED\nworker-task: GREEN: t\n FAIL  src/a.test.ts > old" go >/dev/null; grep -c 'blocked baseline red: baseline-red: src/a.test.ts > old seconds' "$SPRINT_LOG")" 1
 unset SPRINT
 # wb-it5: logs persist under LANE_LOG_DIR as <id>-<utc-ts>.log; GC drops only >14d-old files there
 check "failed run keeps log in LANE_LOG_DIR" "$(STUB_RC=2 go >/dev/null; ls "$LANE_LOG_DIR" | grep -q '^X-1-[0-9]\{8\}T[0-9]\{6\}Z\.log$' && echo y)" y
