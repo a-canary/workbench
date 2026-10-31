@@ -43,7 +43,9 @@ err=$(mktemp)
 probe() {
   local name=$1; shift
   if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"; then echo "PASS  $name"; return; fi
-  case $name in *readable|*reachable)
+  case $name in
+  *not\ *|*no\ *|*unreadable|*unreachable) ;;  # negated names stay negative: never retry
+  *readable|*reachable)
     echo "RETRY $name: $(tail -n 1 "$err")"
     if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"; then echo "PASS  $name (after retry)"; return; fi ;;
   esac
