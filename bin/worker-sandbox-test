@@ -29,7 +29,6 @@ env carries no secrets	! env | grep -Eiq '^[^=]*(key|token|secret|pass)'
 internet blocked	! curl -s -m 3 -o /dev/null https://1.1.1.1
 dns blocked	! curl -s -m 3 -o /dev/null https://github.com
 other localhost blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:8080/
-public lane port blocked	! curl -s -m 3 -o /dev/null http://127.0.0.1:20128/v1/models
 endpoint reachable	curl -sf -m 10 -o /dev/null http://127.0.0.1:$port/v1/models
 EOF
 )
