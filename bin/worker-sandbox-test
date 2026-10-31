@@ -38,10 +38,18 @@ fail=0
 # probe <name> <worker-sandbox args...>: on FAIL show the jail's stderr, so a jail that never
 # started (e.g. search door down) is distinguishable from a probe that ran and failed (wb-v2k)
 err=$(mktemp)
+# Positive probes (*readable, *reachable) retry once: they flaked under concurrent gate runs (wb-bgm).
+# Negative probes (blocked, masked, refused) never retry, so a jail leak can't pass on a second roll.
 probe() {
   local name=$1; shift
-  if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"
-  then echo "PASS  $name"; else echo "FAIL  $name"; tail -n 5 "$err" | sed 's/^/      /'; fail=1; fi
+  if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"; then echo "PASS  $name"; return; fi
+  case $name in
+  *not\ *|*no\ *|*unreadable|*unreachable) ;;  # negated names stay negative: never retry
+  *readable|*reachable)
+    echo "RETRY $name: $(tail -n 1 "$err")"
+    if "$here/worker-sandbox" "$@" >/dev/null 2>"$err"; then echo "PASS  $name (after retry)"; return; fi ;;
+  esac
+  echo "FAIL  $name"; tail -n 5 "$err" | sed 's/^/      /'; fail=1
 }
 while IFS=$'\t' read -r name cmd; do
   probe "$name" --worktree "$wt" --lane private --timeout 60 --exec sh -c "$cmd"
