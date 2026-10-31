@@ -18,7 +18,7 @@ import { basename, join } from "node:path";
 
 export type Klass = "HARNESS" | "MODEL" | "judge";
 export type Run = { rule: string; klass: Klass; note: string };
-export type Case = { id: string; rule: string; class: Klass; runs: Run[] };
+export type Case = { id: string; rule: string; class: Klass; runs: Run[]; error?: string };
 
 const isTestPath = (p: string) => /(^|[/._-])(tests?|spec)([/._-]|$)|\.(test|spec)\./.test(p);
 const after = (s: string, marker: RegExp) => { const m = marker.exec(s); return m ? s.slice(m.index) : ""; };
@@ -44,7 +44,8 @@ export function classifyRun(note: string, log: string): { rule: string; klass: K
   const M = (rule: string) => ({ rule, klass: "MODEL" as const });
 
   // H1 prep: lane-run refused the bead/branch before any worker work.
-  if (/bead lacks Branch:|Branch: must be lane\/|already exists|could not check out/.test(text)) return H("H1");
+  // Note text only, or whole-line lane-run prep output in the log: worker test output must not trip it.
+  if (/bead lacks Branch:|Branch: must be lane\/|already exists|could not check out/.test(note) || /^could not check out /m.test(log)) return H("H1");
   // H2 sandbox: jail infra error in the GREEN phase.
   if (/bun: not found|EROFS|Failed to resolve import|not a git repository/.test(green)) return H("H2");
   // H3 guard misfire: RED commit empty, or the "protected" list holds a non-test path.
@@ -71,8 +72,12 @@ export function classifyRun(note: string, log: string): { rule: string; klass: K
 
 type Row = { ts: string; id: string; finding?: string; lane?: string; ev?: string; outcome?: string; dir?: string };
 
-export function classify(sprints: string, opts: { from?: string; to?: string; notes: (id: string, dir: string) => string; log: (path: string) => string }) {
-  const rows: Row[] = sprints.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+export function classify(sprints: string, opts: { from?: string; to?: string; notes: (id: string, dir: string) => string; log: (path: string) => string; noDirOk?: boolean }) {
+  const rows: Row[] = [];
+  let skipped = 0;
+  for (const l of sprints.split("\n").filter(Boolean)) {
+    try { const r = JSON.parse(l); if (r && typeof r === "object") rows.push(r); else skipped++; } catch { skipped++; }
+  }
   const dirOf = new Map<string, string>();
   for (const r of rows) if (r.ev === "start" && r.lane === "v100" && r.dir) dirOf.set(r.id, r.dir);
   const inRange = (ts: string) => (!opts.from || ts.slice(0, 10) >= opts.from) && (!opts.to || ts.slice(0, 10) <= opts.to);
@@ -80,7 +85,12 @@ export function classify(sprints: string, opts: { from?: string; to?: string; no
   const ids = [...new Set(fails.map((r) => r.id))];
   const cases: Case[] = ids.map((id) => {
     const nrows = fails.filter((r) => r.id === id).length;
-    const notes = opts.notes(id, dirOf.get(id) ?? "").split("\n").filter((n) => /^qwen-failed:/.test(n) && /\(log: \S+\)/.test(n));
+    const dir = dirOf.get(id);
+    const judge = (error: string): Case => ({ id, rule: "none", class: "judge", runs: [], error });
+    if (!dir && !opts.noDirOk) return judge("no start row with dir for bead");
+    let raw: string;
+    try { raw = opts.notes(id, dir ?? ""); } catch (e) { return judge(`bd show failed: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`); }
+    const notes = raw.split("\n").filter((n) => /^qwen-failed:/.test(n) && /\(log: \S+\)/.test(n));
     const runNotes = notes.slice(Math.max(0, notes.length - nrows));
     const runs: Run[] = runNotes.map((note) => {
       const path = /\(log: (\S+?)\)/.exec(note)![1];
@@ -91,7 +101,7 @@ export function classify(sprints: string, opts: { from?: string; to?: string; no
   });
   const counts = { HARNESS: 0, MODEL: 0, judge: 0 };
   for (const c of cases) counts[c.class]++;
-  return { counts, cases };
+  return { counts, skipped, cases };
 }
 
 function main() {
@@ -103,6 +113,7 @@ function main() {
   const out = classify(sprints, {
     from: arg("--from"),
     to: arg("--to"),
+    noDirOk: !!notesDir, // offline notes are keyed by id, so no repo dir is needed
     notes: (id, dir) => {
       const raw = notesDir ? readFileSync(join(notesDir, `${id}.json`), "utf8") : execFileSync("bd", ["-C", dir, "show", id, "--json"], { encoding: "utf8" });
       return (JSON.parse(raw)[0]?.notes as string) ?? "";
