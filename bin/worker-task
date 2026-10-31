@@ -67,8 +67,15 @@ green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
 basedir= green=
 trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir" "$basedir.idx"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
+# the sandbox masks .git and has no docker or network to a local DB (wb-igh: a merge-gate Test died with
+# "not a git repository" and was taken as a valid RED). Sets $crash to the matched pattern (our own constant,
+# never test output: GREEN output is worker-controlled and WORKER_TASK_LOG reaches beads).
+crash_pats=('EROFS: read-only file system' 'failed to load config' 'Startup Error'
+  'fatal: not a git repository' 'docker: (command )?not found' 'Cannot connect to the Docker daemon'
+  'ECONNREFUSED 127\.0\.0\.1:5432' 'connect ECONNREFUSED .*:5432' 'This does not look like a tar archive')
+crash=
 startup_crash() {
-  grep -qE 'EROFS: read-only file system|failed to load config|Startup Error' "$1"
+  local p; for p in "${crash_pats[@]}"; do grep -qE -- "$p" "$1" && { crash=$p; return 0; }; done; return 1
 }
 
 log "RED: $test"
@@ -81,7 +88,7 @@ elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
   log "RED test command not runnable in sandbox (rc $red_rc)"
   exit 4
 elif startup_crash "$red_out"; then
-  log "RED crashed at startup (infra, not a valid RED)"
+  log "RED crashed at startup (infra, not a valid RED; pattern: $crash)"
   exit 4
 fi
 
@@ -152,7 +159,7 @@ if [ $green_rc -ne 0 ]; then
     log "GREEN test command not runnable in sandbox (rc $green_rc)"
     exit 4
   elif startup_crash "$green_out"; then
-    log "GREEN crashed at startup (infra)"
+    log "GREEN crashed at startup (infra; pattern: $crash)"
     exit 4
   fi
   # a GREEN timeout is a hang in the worker's code, the model's to own whatever the baseline said
