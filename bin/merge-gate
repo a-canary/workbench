@@ -3,7 +3,7 @@
 #   bin/merge-gate     run from anywhere; prints PASS/FAIL per check, logs under $TMPDIR
 # Includes the OSS release checks: identity/host scrub of the tree and a gitleaks scan of all history reachable
 # from HEAD (what merging ships). History is NOT identity-scrubbed: publish from a squashed/orphan release commit.
-# Needs a search MCP for the research-profile sandbox tests: search-mcp on PATH, or WORKER_SEARCH_CMD.
+# Needs a search MCP for the research-profile sandbox tests: search-mcp on PATH, free-search-mcp's venv, or WORKER_SEARCH_CMD.
 set -u
 cd "$(dirname "$(readlink -f "$0")")/.."
 logs=$(mktemp -d)
