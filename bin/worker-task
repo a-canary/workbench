@@ -65,7 +65,7 @@ runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*c
 red_out=$(mktemp "${TMPDIR:-/tmp}/worker-red.XXXXXX")
 green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
 basedir= green=
-trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
+trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir" "$basedir.idx"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
 startup_crash() {
   grep -qE 'EROFS: read-only file system|failed to load config|Startup Error' "$1"
@@ -109,7 +109,7 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   fi
   rm -f "$basedir.idx"
   if [ $base_rc -eq 0 ]; then :
-  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || startup_crash "$red_out"; then
+  elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out"; then
     log "baseline timed out or crashed at startup (rc $base_rc); not judged"
   else
     tail -n 20 "$red_out" >&2
@@ -155,7 +155,8 @@ if [ $green_rc -ne 0 ]; then
     log "GREEN crashed at startup (infra)"
     exit 4
   fi
-  [ -z "$base_red" ] || { log "test still fails after worker, and failed before the RED commit; scope Test: to the new tests"; exit 7; }
+  # a GREEN timeout is a hang in the worker's code, the model's to own whatever the baseline said
+  [ -z "$base_red" ] || [ $green_rc -eq 124 ] || { log "test still fails after worker, and failed before the RED commit; scope Test: to the new tests"; exit 7; }
   die "test still fails after worker"
 fi
 
