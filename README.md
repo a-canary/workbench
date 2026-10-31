@@ -85,7 +85,7 @@ Needs `bd` (beads), `gh`, `pi`, `bwrap`, `jq`, `bun`, `python3`, `curl`, and any
 
 4. Review and merge the PR as usual. Worker code never runs on the host: tests run inside the jail too.
 
-Run `bin/merge-gate` on a clean checkout before merging a change to workbench itself. It needs the private-lane endpoint up and a search MCP (`search-mcp` on PATH, or `WORKER_SEARCH_CMD`).
+Run `bin/merge-gate` on a clean checkout before merging a change to workbench itself. It needs the private-lane endpoint up and a search MCP (`search-mcp` on PATH, free-search-mcp's venv under `~/.local/share`, or `WORKER_SEARCH_CMD`).
 
 ## Qualification
 
