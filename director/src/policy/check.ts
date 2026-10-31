@@ -24,7 +24,7 @@ export interface LaneOpts {
 
 export type LaneVerdict = { ok: true } | { ok: false; reason: string };
 
-// The five lane targets. The ledger is the fifth but bookie-only, so it is not
+// The lane targets. The ledger is one too but bookie-only, so it is not
 // a plain path prefix — see checkWritePath.
 const ALLOW_PREFIXES = [
   "~/repos/**",
@@ -36,8 +36,8 @@ const ALLOW_PREFIXES = [
   "/tmp/**",
   "~/vault/ke/**",
   "~/vault/director/**",
-  // ~/trash: the to-trash/retire destination (operator ruling arc-ypp, 2026-10-30).
-  // Move-in only by rule (GLOBAL-RULES write lane); nothing there is read back as config or code.
+  // ~/trash: the retire/GC destination (operator ruling arc-ypp, 2026-10-30).
+  // Move-in only by RULE (GLOBAL-RULES write lane) — this prefix check cannot tell a move from a write.
   "~/trash/**",
 ];
 export const ALLOWLIST_DISPLAY = [...ALLOW_PREFIXES, "ledger-via-bookie"];
@@ -162,7 +162,7 @@ export function checkWritePath(target: string, opts: LaneOpts = {}): LaneVerdict
     };
   }
 
-  // The ledger (fifth lane target) is bookie-only — invariant 2. Protected:
+  // The ledger (a lane target) is bookie-only — invariant 2. Protected:
   // the canonical ~/vault/ledger.db plus whatever db this check was told to
   // consult (--db / LEDGER_DB). Any other .db follows the plain allowlist.
   const consultedDb = opts.db ? resolve(expandHome(opts.db, home)) : undefined;
