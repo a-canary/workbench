@@ -3,9 +3,10 @@
 //   bun bin/worker-failure-classify.ts [--sprints F] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
 //                                      [--notes-dir DIR] [--log-dir DIR]
 //
-// Cases = lane=v100, ev=end, outcome=blocked, finding="worker failed" rows. Each row is paired (aligned from the
-// newest end) with the bead's `qwen-failed:` notes that carry a `(log: /tmp/lane-run-*)` pointer; the note plus the
-// log it points to is the evidence for that run. Rules run first-match-wins, H* (HARNESS) then M* (MODEL); no match
+// Cases = lane=v100, ev=end, outcome=blocked rows whose finding is a worker run's: "worker failed[: cause]",
+// "infra[: cause]" or "baseline red[: cause]". Each row is paired (aligned from the newest end, per kind) with the
+// bead's note of that kind (`qwen-failed:` / `lane-infra:` / `human:`) carrying a `(log: …)` pointer; the sprint
+// finding, the note and the log it points to are the evidence for that run. Rules run first-match-wins, H* (HARNESS) then M* (MODEL); no match
 // -> "judge". A bead's class is its LAST run's class. Rules are the prototype's
 // (~/vault/director/worker-failures/2026-10-31-cases.md); H5 there ("worker said pass + infra string") is H2 and is
 // not a separate rule. Output: JSON {counts, cases:[{id, rule, class, runs:[...]}]}.
@@ -35,7 +36,20 @@ const tscErrFiles = (s: string) => [...s.matchAll(/^(\S+?)\(\d+,\d+\): error TS\
 const stem = (p: string) => basename(p).replace(/\.(test|spec)\.[a-z]+$|\.[a-z]+$/i, "");
 
 // Classify one run from its bead note line + the lane-run log it points to.
-export function classifyRun(note: string, log: string): { rule: string; klass: Klass } {
+// lane-run's sprint finding (PR #81/#83, wb-it5): "worker failed: worker-introduced: a; target-still-failing: b;
+// baseline-red: c", "baseline red: …", "infra[: startup crash: …]". Read from sprints.jsonl, never the log: the
+// log carries worker-controlled text that could forge a label.
+export function findingLabel(finding: string): Klass | undefined {
+  if (/^infra\b/.test(finding) || /^baseline red\b/.test(finding)) return "HARNESS";
+  const d = /^worker failed: (.*)$/.exec(finding)?.[1] ?? "";
+  if (/^timeout\b/.test(d)) return undefined; // the worker's own timeout: M1
+  // Anchored: lane-run writes labels in fixed order; mid-string text is a worker-chosen test name ("test $t").
+  if (/^(worker-introduced|target-still-failing): /.test(d)) return "MODEL";
+  if (/^baseline-red: /.test(d)) return "HARNESS";
+  return undefined; // "baseline unknown", "test X", plain "worker failed": no baseline verdict
+}
+
+export function classifyRun(note: string, log: string, finding = ""): { rule: string; klass: Klass } {
   const text = `${note}\n${log}`;
   const red = log.split(/^worker-task: GREEN:/m)[0];
   const greenCmd = /^worker-task: GREEN: (.*)$/m.exec(log)?.[1] ?? /GREEN: (.*?) test still fails/.exec(note)?.[1] ?? "";
@@ -52,7 +66,13 @@ export function classifyRun(note: string, log: string): { rule: string; klass: K
   if (/HEAD \(RED commit\) touches no files/.test(text)) return H("H3");
   const prot = /modified protected test files: (.*)/.exec(text)?.[1];
   if (prot && prot.split(/\s+/).filter(Boolean).some((p) => !isTestPath(p))) return H("H3");
-  // H4 baseline red: unscoped whole-project tsc, and no tsc error is in a file the worker could have touched
+  // H4 baseline diff from lane-run's labels: infra/lane-infra and baseline-red-only -> HARNESS; any
+  // worker-introduced or target-still-failing failure -> MODEL (M4), even beside a baseline-red one.
+  if (/^lane-infra:/.test(note)) return H("H4");
+  const lab = findingLabel(finding);
+  if (lab === "HARNESS") return H("H4");
+  if (lab === "MODEL") return M("M4");
+  // H4 legacy (rows without labels, before PR #81): unscoped whole-project tsc, and no tsc error is in a file the worker could have touched
   // (a test file named in GREEN, or its implementation sibling).
   if (/tsc --noEmit -p \.\s*$/.test(greenCmd)) {
     const errs = tscErrFiles(green);
@@ -70,6 +90,9 @@ export function classifyRun(note: string, log: string): { rule: string; klass: K
   return { rule: "none", klass: "judge" };
 }
 
+// note prefix lane-run writes for a sprint finding's kind (lane-run fail()); undefined = not a worker run
+const noteKind = (f: string) => (/^worker failed\b/.test(f) ? "qwen-failed" : /^infra\b/.test(f) ? "lane-infra" : /^baseline red\b/.test(f) ? "human" : undefined);
+
 type Row = { ts: string; id: string; finding?: string; lane?: string; ev?: string; outcome?: string; dir?: string };
 
 export function classify(sprints: string, opts: { from?: string; to?: string; notes: (id: string, dir: string) => string; log: (path: string) => string; noDirOk?: boolean }) {
@@ -81,21 +104,27 @@ export function classify(sprints: string, opts: { from?: string; to?: string; no
   const dirOf = new Map<string, string>();
   for (const r of rows) if (r.ev === "start" && r.lane === "v100" && r.dir) dirOf.set(r.id, r.dir);
   const inRange = (ts: string) => (!opts.from || ts.slice(0, 10) >= opts.from) && (!opts.to || ts.slice(0, 10) <= opts.to);
-  const fails = rows.filter((r) => r.lane === "v100" && r.ev === "end" && r.outcome === "blocked" && r.finding === "worker failed" && inRange(r.ts));
+  const fails = rows.filter((r) => r.lane === "v100" && r.ev === "end" && r.outcome === "blocked" && !!noteKind(r.finding ?? "") && inRange(r.ts));
   const ids = [...new Set(fails.map((r) => r.id))];
   const cases: Case[] = ids.map((id) => {
-    const nrows = fails.filter((r) => r.id === id).length;
+    const mine = fails.filter((r) => r.id === id);
     const dir = dirOf.get(id);
     const judge = (error: string): Case => ({ id, rule: "none", class: "judge", runs: [], error });
     if (!dir && !opts.noDirOk) return judge("no start row with dir for bead");
     let raw: string;
     try { raw = opts.notes(id, dir ?? ""); } catch (e) { return judge(`bd show failed: ${String((e as Error).message ?? e).split("\n")[0].slice(0, 200)}`); }
-    const notes = raw.split("\n").filter((n) => /^qwen-failed:/.test(n) && /\(log: \S+\)/.test(n));
-    const runNotes = notes.slice(Math.max(0, notes.length - nrows));
-    const runs: Run[] = runNotes.map((note) => {
-      const path = /\(log: (\S+?)\)/.exec(note)![1];
-      return { ...classifyRun(note, opts.log(path)), note: note.slice(0, 160) };
-    });
+    const lines = raw.split("\n").filter((n) => /\(log: \S+\)/.test(n));
+    // pair each row with its kind's notes from the newest end; a row with no note left is dropped
+    const left = new Map<string, string[]>();
+    const runs: Run[] = [];
+    for (const r of [...mine].reverse()) {
+      const k = noteKind(r.finding ?? "")!;
+      if (!left.has(k)) left.set(k, lines.filter((n) => n.startsWith(`${k}: `)));
+      const note = left.get(k)!.pop();
+      if (!note) continue;
+      const path = /\(log: (\S+?)[;)]/.exec(note)![1];
+      runs.unshift({ ...classifyRun(note, opts.log(path), r.finding ?? ""), note: note.slice(0, 160) });
+    }
     const last = runs[runs.length - 1] ?? { rule: "none", klass: "judge" as Klass };
     return { id, rule: last.rule, class: last.klass, runs };
   });

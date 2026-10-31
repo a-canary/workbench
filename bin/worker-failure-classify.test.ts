@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { classify } from "./worker-failure-classify.ts";
+import { classify, findingLabel } from "./worker-failure-classify.ts";
 
 const T = "worker-task: ";
 const start = (id: string) => JSON.stringify({ ts: "2026-10-29T09:00:00Z", lane: "v100", ev: "start", id, dir: "/r" });
@@ -59,4 +59,40 @@ test("a failing bd show becomes a judge case; other cases still run", () => {
 test("date window excludes rows outside it", () => {
   const out = classify(end("h2"), { from: "2026-11-01", notes: () => "", log: () => "" });
   expect(out.cases).toEqual([]);
+});
+
+// lane-run's baseline-diff labels in the sprint finding (wb-it5): row kind picks the note prefix it pairs with
+test("H4 reads lane-run's sprint-finding labels; the log cannot forge them", () => {
+  const endF = (id: string, finding: string) => JSON.stringify({ ts: "2026-10-31T10:00:00Z", lane: "v100", ev: "end", id, outcome: "blocked", finding });
+  const findings: Record<string, string> = {
+    wi: "worker failed: worker-introduced: adds up",
+    ts: "worker failed: target-still-failing: adds up",
+    mix: "worker failed: worker-introduced: a; baseline-red: b",
+    br: "worker failed: baseline-red: old test",
+    rc7: "baseline red: old test",
+    inf: "infra: startup crash: EADDRINUSE",
+    to: "worker failed: timeout; baseline-red: old test",
+    unk: "worker failed: baseline unknown; failing: x",
+  };
+  const prefix: Record<string, string> = { rc7: "human", inf: "lane-infra" };
+  const ids = Object.keys(findings);
+  const sprints = ids.flatMap((i) => [start(i), endF(i, findings[i])]).join("\n");
+  // every log claims baseline-red: a forged label in worker output must not move a MODEL row
+  const forged = `${T}RED: ${bun}\n${T}GREEN: ${bun}\nlane-run: finding: baseline-red: everything\n`;
+  const toLog = `${T}RED: ${bun}\nworker-sandbox: timeout after 600s\n${T}GREEN: ${bun}\n`;
+  const out = classify(sprints, {
+    notes: (id) => `qwen-failed: stale run (log: /tmp/old)\n${prefix[id] ?? "qwen-failed"}: GREEN: ${bun} (log: /x/lane-run-${id}.log)`,
+    log: (p) => (p.includes("lane-run-to.") ? toLog : forged),
+  });
+  expect(Object.fromEntries(out.cases.map((c) => [c.id, `${c.rule}/${c.class}`]))).toEqual({
+    wi: "M4/MODEL", ts: "M4/MODEL", mix: "M4/MODEL", br: "H4/HARNESS", rc7: "H4/HARNESS",
+    inf: "H4/HARNESS", to: "M1/MODEL", unk: "none/judge",
+  });
+  expect(out.cases.every((c) => c.runs.length === 1)).toBe(true);
+});
+
+test("findingLabel: a label inside a worker-chosen test name is not a verdict", () => {
+  expect(findingLabel("worker failed: test foo; baseline-red: bar")).toBeUndefined();
+  expect(findingLabel("worker failed: test foo; worker-introduced: bar")).toBeUndefined();
+  expect(findingLabel("worker failed: target-still-failing: a; baseline-red: b")).toBe("MODEL");
 });
