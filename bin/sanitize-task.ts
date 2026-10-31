@@ -49,7 +49,7 @@ const SHAPE: Record<string, string> = {
 
 const TOOLCHAIN =
   "The verify command runs offline in a jail whose ONLY tools are: python3 (stdlib only — NO mypy, NO pip packages), node and bun (NO tsc, NO npm installs), gcc, sh. " +
-  "For a strict type/compile gate use gcc, e.g. tests built without warnings and then `gcc -std=c11 -Wall -Wextra -Wconversion -Werror -c <impl>.c`. " +
+  "For a strict type/compile gate use gcc, e.g. first build and run the tests with plain `gcc -std=c11` (NO -Werror, so behaviour is judged separately), then `gcc -std=c11 -Wall -Wextra -Wconversion -Werror -c <impl>.c`. " +
   "verify must start with `cd $BENCH_WORK_DIR && ` and chain the test run AND the strict check with &&.";
 
 /** Replace anything path-like or host-like so no private layout reaches the prompt. */
