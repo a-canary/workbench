@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { asText, scanText } from "./leak-gate.ts";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -121,4 +121,55 @@ test("scanText dedupes per line+rule and maps split terms to their first line", 
     { file: "f", line: 1, rule: "ipv4" },
     { file: "f", line: 2, rule: "deny" },
   ]);
+});
+
+// wb-201: deliberate obfuscation of a deny term must still hit. Terms are made up; never the real denylist.
+const T = ["zorblax"];
+const denyLines = (text: string) => scanText("f", text, T).filter((h) => h.rule === "deny").map((h) => h.line);
+const b64 = (s: string) => Buffer.from(s).toString("base64");
+const hex = (s: string) => Buffer.from(s).toString("hex");
+
+test("deny: Cyrillic/Greek homoglyphs, fullwidth and accents fold to Latin", () => {
+  expect(denyLines("ok\nzоrblаx\n")).toEqual([2]); // Cyrillic o, a
+  expect(denyLines("ZΟRBLΑX")).toEqual([1]); // Greek capital Omicron, Alpha
+  expect(denyLines("ｚｏｒｂｌａｘ")).toEqual([1]); // fullwidth
+  expect(denyLines("zórbläx")).toEqual([1]); // combining marks
+});
+
+test("deny: HTML entities (decimal, hex, named) decode before match", () => {
+  expect(denyLines("&#122;orbl&#x61;x")).toEqual([1]);
+  expect(denyLines("&#X7A;&#111;rblax")).toEqual([1]);
+  expect(denyLines("zor&amp;blax")).toEqual([1]);
+});
+
+test("deny: JSON \\uXXXX escapes decode before match", () => {
+  expect(denyLines(JSON.stringify({ t: "x" }).replace("x", "\\u007aorbl\\u0061x"))).toEqual([1]);
+});
+
+test("deny: reversed text hits", () => {
+  expect(denyLines("ok\nxalbroz svc")).toEqual([2]);
+});
+
+test("deny: base64 runs (std and url-safe) decode and hit", () => {
+  expect(denyLines(`blob: "${b64("the zorblax svc")}"`)).toEqual([1]);
+  expect(denyLines(`v="${b64("zorblax")}"`)).toEqual([1]); // 12 chars incl. padding
+  expect(denyLines(`k=${b64("~~zorblax~~??>>").replace(/\+/g, "-").replace(/\//g, "_")}`)).toEqual([1]);
+});
+
+test("deny: hex runs decode and hit", () => {
+  expect(denyLines(`h=${hex("zorblax")}`)).toEqual([1]); // 14 hex chars
+  expect(denyLines(`h=0x${hex("my zorblax").toUpperCase()}`)).toEqual([1]);
+});
+
+test("deny: ordinary TS source with hashes and long identifiers stays clean", () => {
+  const src = [
+    'import { createHash } from "node:crypto";',
+    "export const SHA = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\";",
+    "const integrity = \"sha512-Q2xh1yJ0dW5kZXJzdGFuZGluZ0FsbFRoZUJhc2U2NA==\";",
+    "function normalizeConfigurationValues(input: Record<string, unknown>) { return input; }",
+    "const url = `https://example.com/api/v1/resources?id=${encodeURIComponent(id)}&amp;x=1`;",
+    "const s = \"caf\\u00e9 \\u2014 na\\u00efve\";",
+  ].join("\n");
+  expect(denyLines(src)).toEqual([]);
+  expect(denyLines(readFileSync(GATE, "utf8"))).toEqual([]);
 });

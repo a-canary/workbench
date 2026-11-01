@@ -9,7 +9,9 @@
 //   deny          private names from --denylist (default ~/vault/director/leak-denylist.txt — kept OUT of every repo;
 //                 one term per line, `#` comments). Case-insensitive SUBSTRING match after URL-decoding and dropping
 //                 every non-alphanumeric char across the whole file, so slug/camel/snake/dotted/line-split/%-encoded
-//                 variants all hit. Over-matching is the intended failure mode.
+//                 variants all hit. Over-matching is the intended failure mode. Before squashing, each line is
+//                 de-obfuscated (wb-201): HTML entities, JSON \uXXXX, %XX, NFKD + combining-mark strip, and a Cyrillic/
+//                 Greek->Latin confusables fold. Reversed text, and base64 (>=12 incl. padding) / hex (>=12, even) runs decoded, also hit.
 //   ipv4          except 127.0.0.1, 0.0.0.0, RFC5737 doc ranges
 //   tailscale-ip  100.64.0.0/10 and fd7a:115c:a1e0::/48
 //   tailscale-host  *.ts.net
@@ -46,6 +48,32 @@ const emailOk = (domain: string) =>
 // %XX decoded byte-wise; malformed sequences stay as-is
 const urlDecode = (s: string) => s.replace(/%([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
+// wb-201 de-obfuscation for the deny rule only. Each step is total (never throws); unknown forms stay as-is.
+const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+const cp = (n: number) => (n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "");
+const htmlDecode = (s: string) =>
+  s.replace(/&(?:#x([0-9a-f]{1,6})|#(\d{1,7})|([a-z]+));/gi, (m, h, d, n) =>
+    h ? cp(parseInt(h, 16)) : d ? cp(Number(d)) : (NAMED[n.toLowerCase()] ?? m));
+const jsonDecode = (s: string) => s.replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+// lowercase Latin lookalikes (Cyrillic, Greek); applied after toLowerCase so capitals fold via their lowercase form
+const CONFUSABLE: Record<string, string> = {
+  а: "a", в: "b", е: "e", ё: "e", к: "k", м: "m", н: "h", о: "o", р: "p", с: "c", т: "t", у: "y", х: "x",
+  і: "i", ї: "i", ј: "j", ѕ: "s", һ: "h", ԁ: "d", ԛ: "q", ԝ: "w", ӏ: "l",
+  α: "a", β: "b", ε: "e", η: "n", ι: "i", κ: "k", μ: "u", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u", χ: "x", ζ: "z",
+};
+const fold = (s: string) =>
+  [...urlDecode(jsonDecode(htmlDecode(s))).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()]
+    .map((c) => CONFUSABLE[c] ?? c).join("");
+// decoded payloads of plausible base64 / hex runs in one line, folded + squashed
+const B64 = /[A-Za-z0-9+/_-]{10,}={0,2}/g; // kept only when >=12 chars incl. padding
+const HEX = /(?:[0-9a-f]{2}){6,}/gi;
+function decodedRuns(ln: string): string[] {
+  const out: string[] = [];
+  for (const m of ln.matchAll(HEX)) out.push(squash(fold(Buffer.from(m[0], "hex").toString("latin1"))));
+  for (const m of ln.matchAll(B64)) if (m[0].length >= 12) out.push(squash(fold(Buffer.from(m[0], "base64").toString("utf8"))));
+  return out;
+}
+
 export function loadDenylist(path: string): string[] | null {
   if (!existsSync(path)) return null;
   const terms = readFileSync(path, "utf8").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))
@@ -73,9 +101,14 @@ export function scanText(file: string, text: string, terms: string[]): Hit[] {
   let flat = "";
   const lineOf: number[] = [];
   lines.forEach((ln, i) => {
-    for (const ch of urlDecode(ln).toLowerCase()) if (/[a-z0-9]/.test(ch)) { flat += ch; lineOf.push(i + 1); }
+    for (const ch of fold(ln)) if (/[a-z0-9]/.test(ch)) { flat += ch; lineOf.push(i + 1); }
   });
-  for (const t of terms) for (let at = flat.indexOf(t); at >= 0; at = flat.indexOf(t, at + 1)) add(lineOf[at], "deny");
+  for (const t of terms) {
+    for (let at = flat.indexOf(t); at >= 0; at = flat.indexOf(t, at + 1)) add(lineOf[at], "deny");
+    const r = [...t].reverse().join(""); // reversed text == reversed term in forward text
+    for (let at = flat.indexOf(r); at >= 0; at = flat.indexOf(r, at + 1)) add(lineOf[at], "deny");
+  }
+  lines.forEach((ln, i) => { for (const d of decodedRuns(ln)) if (terms.some((t) => d.includes(t))) add(i + 1, "deny"); });
   lines.forEach((raw, i) => {
     for (const ln of new Set([raw, urlDecode(raw)])) {
       for (const m of ln.matchAll(IP)) { const r = ipRule(m.slice(1, 5).map(Number)); if (r) add(i + 1, r); }
