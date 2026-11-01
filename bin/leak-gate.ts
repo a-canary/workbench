@@ -1,17 +1,18 @@
 // leak-gate — deterministic, fail-closed leak scan for sanitized synthetic tasks before they leave this host (wb-rf4).
 //
-//   bun bin/leak-gate.ts [--denylist F] [--allow-no-gitleaks] <file-or-dir>...
+//   bun bin/leak-gate.ts [--denylist F] [--allow-no-gitleaks] [--budget-ms N] <file-or-dir>...
 //
 // Exit 0 = no hit. Exit 1 = hits, one `file:line:rule` per line on stdout — NO line content is ever printed (a line
 // may also carry a secret). Exit 2 = cannot scan (missing/empty denylist, gitleaks missing without
-// --allow-no-gitleaks, gitleaks crash, read error, no files, bad args) — fail closed.
+// --allow-no-gitleaks, gitleaks crash, read error, no files, bad args, text scan over --budget-ms [60000]) — fail closed.
 // Rules:
 //   deny          private names from --denylist (default ~/vault/director/leak-denylist.txt — kept OUT of every repo;
 //                 one term per line, `#` comments). Case-insensitive SUBSTRING match after URL-decoding and dropping
 //                 every non-alphanumeric char across the whole file, so slug/camel/snake/dotted/line-split/%-encoded
 //                 variants all hit. Over-matching is the intended failure mode. Before squashing, each line is
 //                 de-obfuscated (wb-201): HTML entities, JSON \uXXXX, %XX, NFKD + combining-mark strip, and a Cyrillic/
-//                 Greek->Latin confusables fold. Reversed text, and base64 (>=12 incl. padding) / hex (>=12, even) runs decoded, also hit.
+//                 Greek->Latin confusables fold. Reversed text, and base64 (>=12 incl. padding; also at offsets 1-3, and whitespace-
+//                 split spans joined) / hex (>=12; also offset 1, `\x` separators dropped) runs decoded, also hit.
 //   ipv4          except 127.0.0.1, 0.0.0.0, RFC5737 doc ranges
 //   tailscale-ip  100.64.0.0/10 and fd7a:115c:a1e0::/48
 //   tailscale-host  *.ts.net
@@ -30,8 +31,11 @@ export type Hit = { file: string; line: number; rule: string };
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 const IP = /(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d.])/g;
 const TS6 = /(?<![0-9a-f:])fd7a:115c:a1e0(?![0-9a-f])/i;
-const TSHOST = /[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net\b/i;
-const EMAIL = /[\w.+-]+@((?:[\w-]+\.)+[A-Za-z]{2,}|[\w-]+)\b/g;
+// wb-13k: both patterns are linear. TSHOST anchors on the last label char before ".ts.net" (same match set as
+// label(.label)*.ts.net). EMAIL bounds the local part to 64 (RFC 5321) so a long run without '@' costs O(64) per start
+// instead of O(run); the domain group is unchanged, so every '@' still yields the same domain as before.
+const TSHOST = /[a-z0-9-]\.ts\.net\b/i;
+const EMAIL = /[\w.+-]{1,64}@((?:[\w-]+\.)+[A-Za-z]{2,}|[\w-]+)\b/g;
 const HOME = /\/(?:home|Users)\/[A-Za-z0-9._-]+|\/root(?![\w-])/;
 
 function ipRule(o: number[]): string | null {
@@ -64,15 +68,23 @@ const CONFUSABLE: Record<string, string> = {
 const fold = (s: string) =>
   [...urlDecode(jsonDecode(htmlDecode(s))).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase()]
     .map((c) => CONFUSABLE[c] ?? c).join("");
-// decoded payloads of plausible base64 / hex runs in one line, folded + squashed
+// decoded payloads of plausible base64 / hex runs in one line, folded + squashed. Each run is also decoded at
+// offsets 1-3 (base64) / 1 (hex) so a short glued prefix cannot misalign it; `\x` separators are dropped first.
 const B64 = /[A-Za-z0-9+/_-]{10,}={0,2}/g; // kept only when >=12 chars incl. padding
-const HEX = /(?:[0-9a-f]{2}){6,}/gi;
+const HEX = /[0-9a-f]{12,}/gi;
+const b64Variants = (run: string, out: string[]) => {
+  for (let o = 0; o < 4 && run.length - o >= 12; o++) out.push(squash(fold(Buffer.from(run.slice(o), "base64").toString("utf8"))));
+};
 function decodedRuns(ln: string): string[] {
   const out: string[] = [];
-  for (const m of ln.matchAll(HEX)) out.push(squash(fold(Buffer.from(m[0], "hex").toString("latin1"))));
-  for (const m of ln.matchAll(B64)) if (m[0].length >= 12) out.push(squash(fold(Buffer.from(m[0], "base64").toString("utf8"))));
+  for (const m of ln.replace(/\\x/gi, "").matchAll(HEX))
+    for (const o of [0, 1]) out.push(squash(fold(Buffer.from(m[0].slice(o), "hex").toString("latin1"))));
+  for (const m of ln.matchAll(B64)) b64Variants(m[0], out);
   return out;
 }
+// base64 wrapped or split by whitespace/newlines: whitespace-joined spans of base64 chars, whitespace stripped, decoded
+// at offsets 0-3. Reported at the span's first line. The lookbehind starts spans only at run starts (linear).
+const B64_SPAN = /(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]+(?:\s+[A-Za-z0-9+/_-]+)+={0,2}/g;
 
 export function loadDenylist(path: string): string[] | null {
   if (!existsSync(path)) return null;
@@ -89,7 +101,9 @@ export function asText(buf: Buffer): string | null {
 }
 
 // all text rules over one file; terms are pre-squashed (loadDenylist)
-export function scanText(file: string, text: string, terms: string[]): Hit[] {
+// deadline (performance.now() ms): past it the scan throws, and main fails closed (wb-13k)
+export function scanText(file: string, text: string, terms: string[], deadline = Infinity): Hit[] {
+  const tick = () => { if (performance.now() >= deadline) throw new Error(`scan time budget exceeded on ${file}`); };
   const seen = new Set<string>();
   const hits: Hit[] = [];
   const add = (line: number, rule: string) => {
@@ -101,15 +115,33 @@ export function scanText(file: string, text: string, terms: string[]): Hit[] {
   let flat = "";
   const lineOf: number[] = [];
   lines.forEach((ln, i) => {
+    tick();
     for (const ch of fold(ln)) if (/[a-z0-9]/.test(ch)) { flat += ch; lineOf.push(i + 1); }
   });
   for (const t of terms) {
+    tick();
     for (let at = flat.indexOf(t); at >= 0; at = flat.indexOf(t, at + 1)) add(lineOf[at], "deny");
     const r = [...t].reverse().join(""); // reversed text == reversed term in forward text
     for (let at = flat.indexOf(r); at >= 0; at = flat.indexOf(r, at + 1)) add(lineOf[at], "deny");
   }
-  lines.forEach((ln, i) => { for (const d of decodedRuns(ln)) if (terms.some((t) => d.includes(t))) add(i + 1, "deny"); });
+  lines.forEach((ln, i) => {
+    tick();
+    for (const d of decodedRuns(ln)) if (terms.some((t) => d.includes(t))) add(i + 1, "deny");
+  });
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === "\n") lineStarts.push(i + 1);
+  for (const m of text.matchAll(B64_SPAN)) {
+    tick();
+    const ds: string[] = [];
+    b64Variants(m[0].replace(/\s+/g, ""), ds);
+    if (ds.some((d) => terms.some((t) => d.includes(t)))) {
+      let lo = 0;
+      for (let hi = lineStarts.length - 1; lo < hi;) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= m.index!) lo = mid; else hi = mid - 1; }
+      add(lo + 1, "deny");
+    }
+  }
   lines.forEach((raw, i) => {
+    tick();
     for (const ln of new Set([raw, urlDecode(raw)])) {
       for (const m of ln.matchAll(IP)) { const r = ipRule(m.slice(1, 5).map(Number)); if (r) add(i + 1, r); }
       if (TS6.test(ln)) add(i + 1, "tailscale-ip");
@@ -151,27 +183,30 @@ const hasGitleaks = () => {
 export function main(argv: string[]): number {
   let denyPath = join(homedir(), "vault/director/leak-denylist.txt");
   let allowNoGitleaks = false;
+  let budgetMs = 60_000; // whole text scan; past it -> exit 2 (a stalled scan must never read as a pass)
   const paths: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--denylist") denyPath = argv[++i];
     else if (a === "--allow-no-gitleaks") allowNoGitleaks = true;
+    else if (a === "--budget-ms") { budgetMs = Number(argv[++i]); if (!(budgetMs >= 0)) { console.error("leak-gate: bad --budget-ms"); return 2; } }
     else if (a.startsWith("--")) { console.error(`leak-gate: unknown flag ${a}`); return 2; }
     else paths.push(a);
   }
-  if (!paths.length) { console.error("usage: leak-gate [--denylist F] [--allow-no-gitleaks] <file-or-dir>..."); return 2; }
+  if (!paths.length) { console.error("usage: leak-gate [--denylist F] [--allow-no-gitleaks] [--budget-ms N] <file-or-dir>..."); return 2; }
   const fail = (msg: string) => { console.error(`leak-gate: FAIL CLOSED: ${msg}`); return 2; };
   const terms = denyPath ? loadDenylist(denyPath) : null;
   if (!terms) return fail(`denylist missing or empty: ${denyPath}`);
 
   const files: string[] = [];
   const hits: Hit[] = [];
+  const deadline = performance.now() + budgetMs;
   try {
     for (const p of paths) walk(p, files, hits);
     for (const f of files) {
       const text = asText(readFileSync(f));
       if (text === null) hits.push({ file: f, line: 1, rule: "unscannable" });
-      else hits.push(...scanText(f, text, terms));
+      else hits.push(...scanText(f, text, terms, deadline));
     }
   } catch (e) { return fail((e as Error).message); }
   if (!files.length && !hits.length) return fail("no files to scan");
