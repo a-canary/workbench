@@ -173,3 +173,48 @@ test("deny: ordinary TS source with hashes and long identifiers stays clean", ()
   expect(denyLines(src)).toEqual([]);
   expect(denyLines(readFileSync(GATE, "utf8"))).toEqual([]);
 });
+
+// wb-13k: regex cost must stay linear on long unbroken runs; detection unchanged.
+const rnd = (n: number, abc = "abcdefghijklmnopqrstuvwxyz0123456789") => {
+  let s = "";
+  for (let i = 0; i < n; i++) s += abc[(Math.random() * abc.length) | 0];
+  return s;
+};
+
+test("perf: 200KB unbroken alnum (and @ / . heavy variants) scans in < 2s", () => {
+  for (const text of [rnd(200_000), rnd(200_000, "ab.c@1-"), "x@" + rnd(200_000), "a.".repeat(100_000) + "ts"]) {
+    const t0 = performance.now();
+    scanText("f", text, T);
+    expect(performance.now() - t0).toBeLessThan(2000);
+  }
+});
+
+test("email/tailscale-host detection survives the bounded rewrite", () => {
+  const rules = (s: string) => scanText("f", s, T).map((h) => h.rule);
+  expect(rules(`${"a".repeat(500)}@corp.io`)).toContain("email");
+  expect(rules("a@example.com.x@evil.io")).toContain("email");
+  expect(rules("dev@example.com qa@svc.test")).not.toContain("email");
+  expect(rules(`${"a".repeat(5000)}.tail99.ts.net`)).toContain("tailscale-host");
+  expect(rules("x.ts.net")).toContain("tailscale-host");
+  expect(rules("tsnet and .ts.network")).not.toContain("tailscale-host");
+});
+
+test("scan over the time budget fails closed (exit 2), never passes", () => {
+  const r = run("--denylist", deny, "--budget-ms", "0", clean);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain("FAIL CLOSED");
+});
+
+test("deny: base64 split by whitespace/newline decodes and hits", () => {
+  const e = b64("the zorblax svc here");
+  expect(denyLines(`blob: ${e.slice(0, 7)}\n${e.slice(7, 15)} ${e.slice(15)}`).length).toBeGreaterThan(0);
+});
+
+test("deny: base64 with a glued 1-3 char prefix hits", () => {
+  for (const p of ["q", "qz", "qzk"]) expect(denyLines(`${p}${b64("the zorblax svc")}`)).toEqual([1]);
+});
+
+test("deny: \\x-separated and odd-prefix hex hit", () => {
+  expect(denyLines(`s="${[...Buffer.from("zorblax")].map((b) => "\\x" + b.toString(16)).join("")}"`)).toEqual([1]);
+  expect(denyLines(`h=a${hex("zorblax")}`)).toEqual([1]);
+});
