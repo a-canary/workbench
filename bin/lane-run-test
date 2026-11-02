@@ -54,6 +54,8 @@ cat >"$tmp/models-stub.py" <<'EOF'
 import http.server
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b'{"data":[]}')
+    def do_POST(self):  # the lent-GPU reclaim; recorded so the test sees it was sent
+        open(__file__ + ".posts", "a").write(self.path + "\n"); self.send_response(200); self.end_headers()
     def log_message(self, *a): pass
 s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_port, flush=True); s.serve_forever()
 EOF
@@ -102,11 +104,13 @@ check "no LANES_URL: gate off"         "$(STUB_RC=0 go)" "rc=0 down=0"
 # wb-68n2.2: a dead model endpoint idles the pass before any claim, so the bead stays open and unlabelled
 dead=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
 check "dead endpoint: idle, no claim"  "$(WORKER_PRIVATE_PORT=$dead STUB_RC=0 go; grep -c -- '--claim\|label add\|note ' "$calls")" $'rc=1 down=1\n0'
-# GPU lent to a batch job: the worker's first POST reclaims it, so a refused GET is not an outage
+# GPU lent to a batch job: lane-run POSTs once to reclaim it, then claims only if the GET answers
 jq -n '{waiting: [], idle: {lent: true}}' >"$tmp/lent.json"
-check "lent GPU: refused GET dispatches" "$(LANES_URL=file://$tmp/lent.json WORKER_PRIVATE_PORT=$dead STUB_RC=0 go)" "rc=0 down=0"
+check "lent GPU: reclaim then dispatch"  "$(LANES_URL=file://$tmp/lent.json STUB_RC=0 go)" "rc=0 down=0"
+check "lent GPU: reclaim POST sent"      "$(grep -c '^/v1/chat/completions$' "$tmp/models-stub.py.posts")" 1
+check "lent GPU, reclaim failed: idles"  "$(LANES_URL=file://$tmp/lent.json WORKER_PRIVATE_PORT=$dead STUB_RC=0 go; grep -c -- '--claim' "$calls")" $'rc=1 down=1\n0'
 jq -n '{waiting: [], idle: {lent: false}}' >"$tmp/lent.json"
-check "not lent: refused GET still idles" "$(LANES_URL=file://$tmp/lent.json WORKER_PRIVATE_PORT=$dead STUB_RC=0 go)" "rc=1 down=1"
+check "not lent: no reclaim POST"        "$(LANES_URL=file://$tmp/lent.json STUB_RC=0 go >/dev/null; grep -c . "$tmp/models-stub.py.posts")" 1
 check "bd outage is not an empty queue" "$(READY_FAIL=1 go)" "rc=1 down=1"
 check "non-JSON from bd is an outage"  "$(READY_JSON='oops' go)" "rc=1 down=1"
 check "empty queue is not an outage"   "$(READY_JSON='[]' go)" "rc=1 down=0"
