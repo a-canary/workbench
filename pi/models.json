@@ -79,89 +79,6 @@
         }
       ]
     },
-    "pool": {
-      "baseUrl": "http://YOUR-192_168_1_159-IP:8091/v1",
-      "api": "openai-completions",
-      "apiKey": "!pass show api/arc-llm-proxy/api-key",
-      "compat": {
-        "supportsDeveloperRole": false
-      },
-      "models": [
-        {
-          "id": "default/auto-llm",
-          "name": "Pool auto-llm (classify+routed)",
-          "reasoning": true,
-          "contextWindow": 131072,
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        {
-          "id": "default/worker",
-          "name": "Pool Worker combo (automations)",
-          "reasoning": true,
-          "contextWindow": 131072,
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        {
-          "id": "director/planning",
-          "name": "Director Planning (speed 10, UX lane)",
-          "reasoning": true,
-          "contextWindow": 131072
-        },
-        {
-          "id": "director/hard",
-          "name": "Director Hard (speed 10, UX lane)",
-          "reasoning": true,
-          "contextWindow": 131072
-        },
-        {
-          "id": "director/driver",
-          "name": "Director Driver (speed 10, UX lane)",
-          "reasoning": true,
-          "contextWindow": 131072
-        }
-      ]
-    },
-    "arc-priv": {
-      "baseUrl": "http://127.0.0.1:8093/v1",
-      "api": "openai-completions",
-      "apiKey": "!pass show api/arc-llm-proxy-private/key",
-      "models": [
-        {
-          "id": "glm-5.3",
-          "name": "GLM-5.3 (private, OllamaCloud)"
-        },
-        {
-          "id": "glm-5.3-flash",
-          "name": "GLM-5.3-flash (private driver/judge)"
-        },
-        {
-          "id": "driver",
-          "name": "private driver alias"
-        },
-        {
-          "id": "planning",
-          "name": "private planning/Director alias"
-        },
-        {
-          "id": "hard",
-          "name": "private attack/critic alias"
-        },
-        {
-          "id": "judge",
-          "name": "private judge alias (flash)"
-        },
-        {
-          "id": "local",
-          "name": "local V100 ollama (qwen3:8b)"
-        }
-      ]
-    },
     "ollama-cloud": {
       "baseUrl": "https://ollama.com/v1",
       "api": "openai-completions",
@@ -260,6 +177,44 @@
           "compat": {
             "supportsDeveloperRole": false
           }
+        }
+      ]
+    },
+    "9router": {
+      "baseUrl": "http://127.0.0.1:20128/v1",
+      "api": "openai-completions",
+      "apiKey": "!cat ~/.config/9router/api-key",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "Worker",
+          "name": "9router Worker combo (automations, free/cheap fallback chain)",
+          "reasoning": true,
+          "contextWindow": 131072,
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "Director",
+          "name": "9router Director combo",
+          "reasoning": true,
+          "contextWindow": 131072
+        },
+        {
+          "id": "Driver",
+          "name": "9router Driver combo",
+          "reasoning": true,
+          "contextWindow": 131072
+        },
+        {
+          "id": "Reviewer",
+          "name": "9router Reviewer combo",
+          "reasoning": true,
+          "contextWindow": 131072
         }
       ]
     }

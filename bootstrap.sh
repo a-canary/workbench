@@ -52,18 +52,6 @@ fi
 run ln -sfn "$SKILLS_DIR/skills" ~/.pi/skills
 echo "  → ~/.pi/skills (from $SKILLS_REPO @ $SKILLS_REF)"
 
-# --- Proxy ---
-echo "proxy:"
-PROXY_REPO=$(jq -r '.components.proxy.repo' "$WORKBENCH_DIR/manifest.json")
-PROXY_REF=$(jq -r '.components.proxy.ref' "$WORKBENCH_DIR/manifest.json")
-# ponytail: an existing checkout may be someone's dev clone, so it is left alone, not updated.
-if [[ -d ~/repos/arc-llm-proxy ]]; then
-    echo "  ~/repos/arc-llm-proxy: present (not updated)"
-else
-    run git clone -q --depth 1 --branch "$PROXY_REF" "$PROXY_REPO" ~/repos/arc-llm-proxy
-    echo "  → ~/repos/arc-llm-proxy (from $PROXY_REPO @ $PROXY_REF)"
-fi
-
 # --- Pi config ---
 echo "pi config:"
 install_file "$WORKBENCH_DIR/pi/models.json" ~/.pi/agent/models.json

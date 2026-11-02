@@ -23,6 +23,6 @@ Policy owns: schedule (cron/heartbeats), agent access (tools/paths/model/network
 
 ## House rules
 - Enforcement must be structural (gate/hook/constraint file), not prose exhortation. Prose rules go in AGENTS.md and are marked as such.
-- Never print secrets. Never call local inference hosts or provider APIs directly — all LLM calls go through arc-llm-proxy aliases (arc-proxy/<alias>). Direct provider calls are an emergency bypass only; the structural enforcement is the proxy + per-repo provider config, not prose.
+- Never print secrets. Never call local inference hosts or provider APIs directly — all LLM calls go through the shared 9router combos (`9router/<combo>`). Direct provider calls are an emergency bypass only; the structural enforcement is the router + per-repo provider config, not prose.
 - Markdown: never wordwrap, one concept per line.
 - One question at a time in HITL.
