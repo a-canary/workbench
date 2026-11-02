@@ -102,6 +102,11 @@ check "no LANES_URL: gate off"         "$(STUB_RC=0 go)" "rc=0 down=0"
 # wb-68n2.2: a dead model endpoint idles the pass before any claim, so the bead stays open and unlabelled
 dead=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
 check "dead endpoint: idle, no claim"  "$(WORKER_PRIVATE_PORT=$dead STUB_RC=0 go; grep -c -- '--claim\|label add\|note ' "$calls")" $'rc=1 down=1\n0'
+# GPU lent to a batch job: the worker's first POST reclaims it, so a refused GET is not an outage
+jq -n '{waiting: [], idle: {lent: true}}' >"$tmp/lent.json"
+check "lent GPU: refused GET dispatches" "$(LANES_URL=file://$tmp/lent.json WORKER_PRIVATE_PORT=$dead STUB_RC=0 go)" "rc=0 down=0"
+jq -n '{waiting: [], idle: {lent: false}}' >"$tmp/lent.json"
+check "not lent: refused GET still idles" "$(LANES_URL=file://$tmp/lent.json WORKER_PRIVATE_PORT=$dead STUB_RC=0 go)" "rc=1 down=1"
 check "bd outage is not an empty queue" "$(READY_FAIL=1 go)" "rc=1 down=1"
 check "non-JSON from bd is an outage"  "$(READY_JSON='oops' go)" "rc=1 down=1"
 check "empty queue is not an outage"   "$(READY_JSON='[]' go)" "rc=1 down=0"
