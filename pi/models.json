@@ -183,7 +183,7 @@
     "9router": {
       "baseUrl": "http://127.0.0.1:20128/v1",
       "api": "openai-completions",
-      "apiKey": "!cat ~/.config/9router/api-key",
+      "apiKey": "!pass show api/9router/local-key 2>/dev/null || cat ~/.config/9router/api-key",
       "compat": {
         "supportsDeveloperRole": false
       },

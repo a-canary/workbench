@@ -17,7 +17,7 @@ Each component repo improves its own axis. workbench's job is integration + qual
 | layer | where | what |
 |---|---|---|
 | skills | `arc-skills` (pinned) | the know-how |
-| routing | shared 9router (ai-lab-02 `127.0.0.1:20128`, not pinned) | combos `Worker`/`Director`/`Driver`/`Reviewer`, failover; pi provider `9router`, key in `~/.config/9router/api-key` |
+| routing | shared 9router (not pinned): `127.0.0.1:20128` on the router host only; elsewhere `ssh -L 20128:127.0.0.1:20128 <router-host>` | combos `Worker`/`Director`/`Driver`/`Reviewer`, failover; pi provider `9router`, key from pass `api/9router/local-key` or `~/.config/9router/api-key` |
 | pi config | `pi/` (here) | models.json, extensions, settings |
 | model params | `models/` (here) | context, KV, quant, per-model tuning |
 | hardware | `hardware/` (here) | V100, vast instance playbooks |
