@@ -6,7 +6,7 @@ Tested agent configuration: model through skills. Pins exact component versions,
 
 ```
 arc-skills (skills axis) ──┐
-arc-llm-proxy (routing) ───┼──► workbench (pins versions, qualifies, ships)
+9router (shared routing) ──┼──► workbench (pins versions, qualifies, ships)
 harness-bench (testing) ───┘
 ```
 
@@ -17,7 +17,7 @@ Each component repo improves its own axis. workbench's job is integration + qual
 | layer | where | what |
 |---|---|---|
 | skills | `arc-skills` (pinned) | the know-how |
-| proxy | `arc-llm-proxy` (pinned) | routing, load balancing, failover |
+| routing | shared 9router (not pinned): `127.0.0.1:20128` on the router host only; elsewhere `ssh -L 20128:127.0.0.1:20128 <router-host>` | combos `Worker`/`Director`/`Driver`/`Reviewer`, failover; pi provider `9router`, key from pass `api/9router/local-key` or `~/.config/9router/api-key` |
 | pi config | `pi/` (here) | models.json, extensions, settings |
 | model params | `models/` (here) | context, KV, quant, per-model tuning |
 | hardware | `hardware/` (here) | V100, vast instance playbooks |
@@ -34,7 +34,7 @@ cd workbench
 
 Pulls the pinned component versions, installs config, symlinks skills.
 Skills are cloned to `${XDG_DATA_HOME:-~/.local/share}/workbench/arc-skills` and `~/.pi/skills` links there.
-An existing real `~/.pi/skills` dir and any config file that would change are kept as `*.bak-<timestamp>`; an existing `~/repos/arc-llm-proxy` is left untouched.
+An existing real `~/.pi/skills` dir and any config file that would change are kept as `*.bak-<timestamp>`.
 
 ## QA role dependencies
 

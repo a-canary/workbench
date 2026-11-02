@@ -10,12 +10,6 @@
       "dest": "~/.pi/skills",
       "last_tested": "de2f95b7b091d82e7bacbd912aede6bad1e52f08"
     },
-    "proxy": {
-      "repo": "https://github.com/a-canary/arc-llm-proxy",
-      "ref": "main",
-      "path": ".",
-      "dest": "~/repos/arc-llm-proxy"
-    },
     "pi-extensions": {
       "repo": "https://github.com/a-canary/workbench",
       "ref": "main",

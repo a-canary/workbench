@@ -43,14 +43,14 @@ check "README: names WORKER_CHROME"      "$(has "$readme" "WORKER_CHROME")" y
 # A copy of the workbench whose manifest points at local file:// repos; npx and python3 are stubs.
 wb="$tmp/wb"; mkdir -p "$wb" "$tmp/stub"
 cp -r "$here/bootstrap.sh" "$here/pi" "$wb/"
-for r in skills proxy; do
+for r in skills; do
   git init -q -b main "$tmp/src-$r"
   mkdir -p "$tmp/src-$r/skills/demo"; echo "$r" >"$tmp/src-$r/skills/demo/SKILL.md"
   git -C "$tmp/src-$r" add -A
   git -C "$tmp/src-$r" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init
 done
-jq --arg s "file://$tmp/src-skills" --arg p "file://$tmp/src-proxy" \
-  '.components.skills.repo=$s | .components.skills.ref="main" | .components.proxy.repo=$p | .components.proxy.ref="main"' \
+jq --arg s "file://$tmp/src-skills" \
+  '.components.skills.repo=$s | .components.skills.ref="main"' \
   "$here/manifest.json" >"$wb/manifest.json"
 printf '#!/bin/sh\necho "$*" >>"%s/npx.args"\n' "$tmp" >"$tmp/stub/npx"
 # python3 stub: imports fail; pip exits $PIP_RC (1 = PEP 668 refusal)
@@ -68,7 +68,7 @@ check "fresh: skills not under /tmp"     "$(readlink "$h1/.pi/skills" | grep -c 
 check "fresh: models.json installed"     "$(cmp -s "$wb/pi/models.json" "$h1/.pi/agent/models.json" && echo y)" y
 check "fresh: agent settings installed"  "$(cmp -s "$wb/pi/agent-settings.json" "$h1/.pi/agent/settings.json" && echo y)" y
 check "fresh: extensions installed"      "$(ls "$h1/.pi/agent/extensions" | tr '\n' ' ')" "$(ls "$wb/pi/extensions" | tr '\n' ' ')"
-check "fresh: proxy cloned"              "$(cat "$h1/repos/arc-llm-proxy/skills/demo/SKILL.md" 2>&1)" proxy
+check "fresh: no arc-llm-proxy clone"  "$([ -e "$h1/repos/arc-llm-proxy" ] && echo y || echo n)" n
 check "fresh: npx has --path cache"      "$(has "$(cat "$tmp/npx.args" 2>&1)" "-y @puppeteer/browsers install chrome-headless-shell --path $h1/.cache/puppeteer")" y
 
 # existing user: real ~/.pi/skills dir and an edited models.json are backed up, never deleted
@@ -83,6 +83,5 @@ git -C "$tmp/src-skills" -c user.name=t -c user.email=t@t -c commit.gpgsign=fals
 sleep 1
 check "rerun: exits 0"                   "$(real "$h2" 0)" 0
 check "rerun: skills updated to ref"     "$(cat "$h2/.pi/skills/demo/SKILL.md" 2>&1)" second
-check "rerun: proxy left alone"        "$(has "$(cat "$tmp/out")" "arc-llm-proxy: present (not updated)")" y
 check "rerun: no extra models backup"    "$(ls "$h2"/.pi/agent/models.json.bak-* | wc -l)" 1
 exit $fails
