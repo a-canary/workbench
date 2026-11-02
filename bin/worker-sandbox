@@ -123,7 +123,7 @@ case $lane in
     # no default endpoint: home-lab-1's local 9router is retired, it moved to ai-lab-02 (repos-mxu8 A)
     port=${WORKER_PUBLIC_PORT:?public lane has no endpoint on this host; set WORKER_PUBLIC_PORT} model=${WORKER_PUBLIC_MODEL:-Worker}
     # the key stays on the host: the relay adds it to each request, the jail sends "none"
-    key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;
+    key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router/local-key}" | head -1)} ;;
   *) die "--lane private|ollama|public required" ;;
 esac
 
