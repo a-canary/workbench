@@ -120,7 +120,7 @@ case $lane in
     key=$(pass show "${WORKER_OLLAMA_PASS:-api/ollamacloud/api-key}" | head -1) ;;
   public)
     need_public "public lane" prepublic  # sends the code to a cloud model
-    # no default endpoint: home-lab-1's local 9router is retired, it moved to ai-lab-02 (repos-mxu8 A)
+    # no default endpoint: this host's local 9router is retired, it moved to another lab host (repos-mxu8 A)
     port=${WORKER_PUBLIC_PORT:?public lane has no endpoint on this host; set WORKER_PUBLIC_PORT} model=${WORKER_PUBLIC_MODEL:-Worker}
     # the key stays on the host: the relay adds it to each request, the jail sends "none"
     key=${WORKER_PUBLIC_KEY:-$(pass show "${WORKER_PUBLIC_PASS:-api/9router}" | head -1)} ;;

@@ -27,7 +27,7 @@ const files: Record<string, string | Buffer> = {
   "ts6.txt": "peer fd7a:115c:a1e0::1\n",
   "magic.txt": "host box.tail1234.ts.net\n",
   "email.txt": "mail ops@corp.io please\n",
-  "home.txt": "see /home/bob/notes\n",
+  "home.txt": "see /home/testuser/notes\n",
   "root.txt": "see /root/stuff\n",
   "nested/key.env": `GITHUB_TOKEN=${secret}\n`,
   "sameline.txt": `mail ops@corp.io key=${secret}\n`,
