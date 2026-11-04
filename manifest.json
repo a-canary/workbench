@@ -1,14 +1,14 @@
 {
   "name": "workbench",
   "description": "Tested agent configuration: model through skills",
-  "qualified": "2026-11-01",
+  "qualified": "2026-11-04",
   "components": {
     "skills": {
       "repo": "https://github.com/a-canary/arc-skills",
       "ref": "main",
       "path": "skills",
       "dest": "~/.pi/skills",
-      "last_tested": "de2f95b7b091d82e7bacbd912aede6bad1e52f08"
+      "last_tested": "c4e08e059f7bfa7d0ae9f0f7f93283ac596f3428"
     },
     "pi-extensions": {
       "repo": "https://github.com/a-canary/workbench",
