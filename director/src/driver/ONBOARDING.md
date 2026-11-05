@@ -14,7 +14,7 @@ into it.
    bash <director-root>/src/driver/scripts/discover-setup.sh
    ```
    Prints `repo-root`, `agents-md-exists`, `director-bindings-exist`,
-   `git-remote`, `arc-agents-available`, `arc-agents-config`, `vault-path`,
+   `git-remote`, `vault-path`,
    `directors-registry`, `repo-already-registered` — each `<key>\t<value>`,
    `-` for absent.
 
@@ -35,11 +35,8 @@ into it.
    - **Each remaining binding** (`event-bus`, `task-delegation`, `workspace`,
      `on-task-verified`, `todo-list`, `feedback-sink`, `planning-target`,
      `model`, `scheduler.mode`): suggest the flat-file/harness-native default for each
-     (see [BINDINGS.md](BINDINGS.md)), but if `arc-agents-available: yes`,
-     also surface the arc-agents-backed alternative as a selectable option
-     (e.g. `task-delegation: arc-agents`, `scheduler.mode: arc-agents`) rather
-     than silently preferring it — the habitual default always wins unless
-     the user opts in.
+     (see [BINDINGS.md](BINDINGS.md)). The habitual default always wins
+     unless the user opts in to an alternative.
 
 3. Write `AGENTS.md` at the target repo root from
    `<director-root>/src/driver/AGENTS.md.template`, filling in the answers. If

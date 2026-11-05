@@ -26,20 +26,6 @@ fi
 remote_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || echo -)"
 emit git-remote "$remote_url"
 
-if command -v arc-agents >/dev/null 2>&1 || [ -d "$HOME/repos/arc-agents" ]; then
-  emit arc-agents-available yes
-else
-  emit arc-agents-available no
-fi
-
-if [ -f "$repo_root/config.json" ] && grep -q '"exec_cli_alias"' "$repo_root/config.json" 2>/dev/null; then
-  emit arc-agents-config "$repo_root/config.json"
-elif [ -f "$HOME/repos/arc-agents/config.json" ]; then
-  emit arc-agents-config "$HOME/repos/arc-agents/config.json"
-else
-  emit arc-agents-config -
-fi
-
 xdg_vault="${XDG_DATA_HOME:-$HOME/.local/share}/arc/vault"
 if [ -d "$xdg_vault" ]; then
   emit vault-path "$xdg_vault"
