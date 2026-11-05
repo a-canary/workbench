@@ -285,9 +285,34 @@ test("Bash redirect to an fd-backed device path is still blocked", () => {
   expect(r.code).toBe(2);
 });
 
-test("Bash redirect to the stderr device is still blocked", () => {
-  const se = "/" + "dev" + "/" + "stderr";
-  const r = runHook({ tool_name: "Bash", tool_input: { command: `echo x > ${se}` } }, emptyDb);
+// /dev/stdout and /dev/stderr only reach a file if the fd was already pointed
+// at one — and THAT redirect is itself extracted and gated. Exempt them
+// (operator verdict, bead repos-uqdk); /dev/fd/N stays blocked above.
+test("Bash redirect to the stdout/stderr devices is not a write target", () => {
+  for (const dev of ["stdout", "stderr"]) {
+    const d = "/" + "dev" + "/" + dev;
+    for (const cmd of [`echo x > ${d}`, `echo x 1>&2 2>${d}`, `(echo x >${d})`]) {
+      const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+      expect(r.code).toBe(0);
+    }
+  }
+}, 20_000); // 6 hook spawns; the default 5s times out under full-suite load
+
+// The redirect char class keeps `(){}` and backtick (so `$(...)` targets are
+// rejected), which glued a closing paren onto the null device: `(cmd >/dev/null)`
+// extracted `/dev/null)` and was flagged. Trailing closers are now stripped
+// before the device check only.
+test("a subshell/brace-closed null-device redirect is not a false positive", () => {
+  const nul = "/" + "dev" + "/" + "null";
+  for (const cmd of [`(ls >${nul})`, `x=$(ls 2>${nul})`, `{ ls >${nul}; }`, "y=`ls 2>" + nul + "`"]) {
+    const r = runHook({ tool_name: "Bash", tool_input: { command: cmd } }, emptyDb);
+    expect(r.code).toBe(0);
+  }
+}, 20_000);
+
+test("a device-prefixed path that continues past the closer is still gated", () => {
+  const nul = "/" + "dev" + "/" + "null";
+  const r = runHook({ tool_name: "Bash", tool_input: { command: `echo x >${nul})/../../opt/lane-hook-x` } }, emptyDb);
   expect(r.code).toBe(2);
 });
 
