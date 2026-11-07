@@ -18,7 +18,7 @@ Policy owns: schedule (cron/heartbeats), agent access (tools/paths/model/network
 1. Restate the declared contract/rule in one line; confirm scope (which layer, which repos).
 2. Check it against existing contracts for conflict (read the §5 table + invariants + the repo's CHOICES.md).
 3. Write the minimal change to the right surface. One contract per change.
-4. If the rule needs code, hooks, or cron wiring to enforce: file a ledger row via bookie (`cd ~/repos/arc-agents && bun bin/bookie.ts create ...`) — do not build it.
+4. If the rule needs code, hooks, or cron wiring to enforce: file a bead (`bd create ...`) — do not build it.
 5. Commit with per-commit `-c user.name -c user.email` from the operator profile (`~/vault/USER.md`).
 
 ## House rules
