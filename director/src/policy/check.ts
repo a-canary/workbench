@@ -183,7 +183,10 @@ export function checkWritePath(target: string, opts: LaneOpts = {}): LaneVerdict
 }
 
 function allowlistHint(): string {
-  return 'Unlock requires a human-gate approval: ledger event kind=note, payload "lane-approve <prefix>".';
+  // The operator writes the lane-approve event; an agent writing it would be forging the approval.
+  return 'To unlock, post a /decide card asking the operator to approve the prefix ' +
+    '(bun ~/repos/arc-skills/skills/human-gate-post-webui/decide.ts ask). ' +
+    'The approval is a ledger event kind=note, payload "lane-approve <prefix>", written by the operator, never by an agent.';
 }
 
 // --- CLI: the merge-gate / diff-review entry point.
