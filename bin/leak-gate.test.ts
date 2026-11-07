@@ -87,7 +87,7 @@ test("non-text and non-regular files are unscannable hits, never decoded", () =>
 test("no line content is ever printed", () => {
   const r = run("--denylist", deny, fx);
   const all = r.out + r.err;
-  for (const v of [secret, "10.20.30.40", "100.101.102.103", "ops@corp.io", "/home/bob", "zorblax", "ZORBLAX", "tail1234"])
+  for (const v of [secret, "10.20.30.40", "100.101.102.103", "ops@corp.io", "/home/testuser", "zorblax", "ZORBLAX", "tail1234"])
     expect(all).not.toContain(v);
   for (const l of r.out.trim().split("\n")) expect(l).toMatch(/^\S+:\d+:[\w:-]+$/);
 });
