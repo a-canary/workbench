@@ -64,8 +64,9 @@ runner_cfg='(^|/)(package\.json|[^/]*\.lockb?|[^/]*[.-]config\.[cm]?[jt]s|[^/]*c
 # capture test output to detect startup crashes (infra) vs real failures
 red_out=$(mktemp "${TMPDIR:-/tmp}/worker-red.XXXXXX")
 green_out=$(mktemp "${TMPDIR:-/tmp}/worker-green.XXXXXX")
+reply=$(mktemp "${TMPDIR:-/tmp}/worker-reply.XXXXXX")
 basedir= green=
-trap 'rm -rf "$red_out" "$green_out" ${basedir:+"$basedir" "$basedir.idx"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
+trap 'rm -rf "$red_out" "$green_out" "$reply" ${basedir:+"$basedir" "$basedir.idx"}; [ -n "${green:-}" ] && rm -rf "$green"' EXIT
 
 # the sandbox masks .git and has no docker or network to a local DB (wb-igh: a merge-gate Test died with
 # "not a git repository" and was taken as a valid RED). Sets $crash to the matched pattern (our own constant,
@@ -130,7 +131,7 @@ fi
 
 log "worker: lane=$lane tools=$tools"
 t0=$(date +%s)
-wrc=0; sbx --task "$task" --tools "$tools" --timeout "$tmo" >&2 || { wrc=$?; log "worker rc=$wrc (judging by tests)"; }
+wrc=0; sbx --task "$task" --tools "$tools" --timeout "$tmo" | tee "$reply" >&2 || { wrc=$?; log "worker rc=$wrc (judging by tests)"; }
 log "worker took $(( $(date +%s) - t0 ))s"
 
 # a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
@@ -138,7 +139,12 @@ log "worker took $(( $(date +%s) - t0 ))s"
 g diff --quiet HEAD -- "${protected[@]}" || die "worker modified protected test files: ${protected[*]}"
 g add -A
 g diff --cached --raw | grep -q ' 160000 ' && die "worker staged a gitlink"
-g diff --cached --quiet && { [ "$wrc" -eq 0 ] || [ "$wrc" -eq 124 ] || { log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4; }; die "worker produced no changes"; }
+if g diff --cached --quiet; then
+  case $wrc in 0 | 124) ;; *) log "worker exited rc=$wrc with no changes (endpoint or sandbox down?)"; exit 4 ;; esac
+  # an empty 200 (blank reply, nothing done) is the endpoint failing, never a model attempt (repos-oyai)
+  [ "$wrc" -eq 124 ] || grep -q '[^[:space:]]' "$reply" || { log "worker replied nothing and changed nothing (empty endpoint reply)"; exit 4; }
+  die "worker produced no changes"
+fi
 # --no-renames: a rename would list only its new name and hide the config file it removed
 # names go to a file first so a git error dies here instead of reading as "no config files"
 names=$(mktemp "${TMPDIR:-/tmp}/worker-names.XXXXXX")
