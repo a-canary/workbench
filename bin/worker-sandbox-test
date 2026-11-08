@@ -231,6 +231,11 @@ mkdir "$wt/.venv"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows an empty mountpoint"; else echo "FAIL  public lane allows an empty mountpoint"; fail=1; fi
 rmdir "$wt/.venv"
+# ...nor a dir git cannot read: ls-files only warns on stderr, yet the jail (same uid) can chmod it back
+mkdir "$wt/.venv"; touch "$wt/.venv/s"; chmod 000 "$wt/.venv"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "FAIL  public lane refuses an unreadable dir"; fail=1; else echo "PASS  public lane refuses an unreadable dir"; fi
+chmod 700 "$wt/.venv"; unlink "$wt/.venv/s"; rmdir "$wt/.venv"
 mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
