@@ -21,7 +21,7 @@ mkdir -p "$spool"/{ready,done,failed} "$q"/{ready,running,done,failed} "$work"
 # REM_TEE=file (record the result stream the remote managed to emit before the caller hung up),
 # REM_CAT_TAG + REM_CAT_FILE (replace that script's stdout with a crafted file), JOB_KILL_AFTER_MV (SIGKILL the remote
 # script right after it moved the incoming dir into place: no trap runs, like a real kill),
-# JOB_STAMP_FAIL (the stamp read prints nothing, like a failed sudo), JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies).
+# JOB_STAMP_FAIL (the stamp read prints nothing, like a failed sudo), JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies), JOB_FAIL_SEED (the checkpoint extract dies after writing).
 cat >"$tmp/remstub" <<'EOF'
 #!/bin/bash
 b=$(printf %s "$1" | sed -n 's/.*echo \([A-Za-z0-9+\/=]*\) | base64 -d.*/\1/p')
@@ -47,6 +47,7 @@ if [ "$1" = sh ] && [ -n "${JOB_STAMP_FAIL:-}" ]; then case "${3:-}" in "if [ -f
 if [ "$1" = du ] && [ -n "${JOB_DU_EMPTY:-}" ]; then exit 0; fi
 if [ "$1" = du ] && [ -n "${DU_LIE:-}" ]; then for a; do :; done; printf '1\t%s\n' "$a"; exit 0; fi
 if [ "$1" = tar ] && [ -n "${JOB_FAIL_TAR:-}" ]; then case " $* " in *" -xf "*) "$@"; exit 137 ;; esac; fi
+if [ "$1" = tar ] && [ -n "${JOB_FAIL_SEED:-}" ]; then case " $* " in *" -xf - "*) "$@"; exit 2 ;; esac; fi
 exec "$@"
 EOF
 # after the agent-side tar finishes, mutate the spool dir the way a hostile agent would
@@ -452,6 +453,66 @@ check "infra ceiling: tick 33 degrades to log only and retires" "$(tick REM_FAIL
 finished done iw
 for k in 1 2 3; do tick REM_FAIL_TAG=prep REM_FAIL_MODE=before >/dev/null; done
 check "infra counter: cleared when the job is collected" "$(cat "$tmp/state/done.iw.infra")$(tick)$(exists "$tmp/state/done.iw.infra")$(cat "$spool/done/iw/work/out.txt")" 30nout-iw
+
+# ---- checkpoint relay: spool ckpt/<key>/<N>.tar -> remote $Q/ckpt/<key>/, one tar per tick
+# ckt FILE CONTENT [MEMBER]: a checkpoint tar holding MEMBER (default sub/_rdj_ckpt.pt)
+ckt() { local m=${3:-sub/_rdj_ckpt.pt} s; s=$(mktemp -d "$tmp/ckt.XXXXXX"); mkdir -p "$s/$(dirname "$m")"; printf %s "$2" >"$s/$m"; tar -C "$s" -cf "$1" "$m"; }
+ck=$spool/ckpt rq=$q/ckpt
+check "ckpt: spool dir is created" "$(tick)$(exists "$ck")" 0y
+mkdir -p "$ck/k1"; for n in 1 2 3; do ckt "$ck/k1/$n.tar" "w$n"; done; cp "$ck/k1/3.tar" "$tmp/k1-3.tar"
+echo x >"$ck/k1/x.tar"; echo x >"$ck/k1/.4.tar.part"
+check "ckpt relay: tick exit" "$(tick)" 0
+check "ckpt relay: highest N relayed byte-exact" "$(cmp -s "$rq/k1/3.tar" "$tmp/k1-3.tar" && echo same)" same
+check "ckpt relay: older local tars dropped, sent one deleted" "$(exists "$ck/k1/1.tar")$(exists "$ck/k1/2.tar")$(exists "$ck/k1/3.tar")" nnn
+check "ckpt relay: non-numeric names left alone, not sent" "$(exists "$ck/k1/x.tar")$(exists "$ck/k1/.4.tar.part")$(exists "$rq/k1/x.tar")" yyn
+check "ckpt relay: logs key, bytes, seconds" "$(grep -c "ckpt relayed k1/3.tar: $(stat -c %s "$tmp/k1-3.tar") bytes in [0-9]*s" "$tmp/err")" 1
+check "ckpt relay: no .part left remotely" "$(ls -A "$rq/k1" | grep -c part)" 0
+for n in 4 5; do ckt "$ck/k1/$n.tar" "w$n"; tick >/dev/null; done
+check "ckpt relay: remote keeps the 2 highest N" "$(ls "$rq/k1" | tr '\n' ' ')" "4.tar 5.tar "
+mkdir -p "$ck/ka" "$ck/kb"; ckt "$ck/ka/1.tar" a; ckt "$ck/kb/1.tar" b; touch -d '1 hour ago' "$ck/kb/1.tar"
+check "ckpt relay: one tar per tick, longest waiting first" "$(tick)$(exists "$rq/kb/1.tar")$(exists "$rq/ka/1.tar")$(exists "$ck/ka/1.tar")" 0yny
+check "ckpt relay: the other goes next tick" "$(tick)$(exists "$rq/ka/1.tar")$(exists "$ck/ka/1.tar")" 0yn
+ckt "$ck/ka/2.tar" a2
+check "ckpt relay: ssh lost keeps the local tar" "$(tick REM_FAIL_TAG=ckput REM_FAIL_MODE=before)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")" 1yn
+check "ckpt relay: short stream never lands, local kept" "$(tick REM_TRUNC_TAG=ckput REM_TRUNC_BYTES=100)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")$(ls -A "$rq/ka" | grep -c part)" 1yn0
+check "ckpt relay: past the start deadline it defers" "$(tick V100_CKPT_START_BY=0)$(exists "$ck/ka/2.tar")$(grep -c 'relay deferred' "$tmp/err")" 0y1
+check "ckpt relay: retry delivers" "$(tick)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")" 0ny
+mkdir -p "$ck/kc"; ckt "$ck/kc/1.tar" big
+check "ckpt relay: over the cap is dropped loudly, never sent" "$(tick V100_CKPTMAX=10)$(exists "$ck/kc/1.tar")$(exists "$rq/kc")$(grep -c 'over the 10 cap' "$tmp/err")" 1nn1
+for n in Bad _x 'x;touch PWNED3' "$(printf 'a%.0s' $(seq 82))"; do mkdir -p "$ck/$n"; ckt "$ck/$n/1.tar" bad; done
+check "ckpt relay: bad keys ignored with a log line" "$(tick)$(grep -c 'ignoring ckpt entry' "$tmp/err")$(exists "$ck/Bad/1.tar")" 04y
+check "ckpt relay: bad keys never reach the remote" "$(grep -c PWNED3 "$tmp/rem.log")$(exists "$tmp/PWNED3")$(ls "$rq" | grep -c -e Bad -e _x)" 0n0
+for n in Bad _x 'x;touch PWNED3' "$(printf 'a%.0s' $(seq 82))"; do rm -rf "${ck:?}/$n"; done
+ckt "$ck/k1/6.tar" w6; touch "$ck/k1/DONE"
+check "ckpt DONE: both sides dropped" "$(tick)$(exists "$ck/k1")$(exists "$rq/k1")" 0nn
+
+# ---- checkpoint seeding at submit
+mkdir -p "$rq/ks"; ckt "$rq/ks/5.tar" s5; ckt "$rq/ks/7.tar" s7; ckt "$rq/ks/10.tar" s10 _rdj_ckpt.pt
+mkjob sj; echo ks >"$spool/ready/sj/ckpt_key"
+check "seed: tick exit" "$(tick)" 0
+check "seed: highest N (numeric) extracted into out/" "$(cat "$work/3-rnd-sj/out/_rdj_ckpt.pt" 2>/dev/null)$(exists "$work/3-rnd-sj/out/sub")" s10n
+check "seed: job still submitted" "$(isfile "$q/ready/3-rnd-sj/run.sh")$(exists "$spool/ready/sj")" yn
+check "seed: logged" "$(grep -c 'seeded sj from ks/10.tar' "$tmp/err")" 1
+check "seed: extracted as the job user before the dir went live" "$(grep -c "tar -C $work/.incoming-sj/out --no-same-owner -xf -" "$tmp/job.log")" 1
+seedcase() {  # seedcase LABEL NAME TARFILE [TICKVAR]: the job is submitted unseeded with a WARN
+  mkdir -p "$rq/kx$2"; cp "$3" "$rq/kx$2/1.tar"; mkjob "$2"; echo "kx$2" >"$spool/ready/$2/ckpt_key"
+  check "seed refused ($1): submitted unseeded with a WARN" "$(tick ${4:+"$4"})$(isfile "$q/ready/3-rnd-$2/run.sh")$(find "$work/3-rnd-$2" -name _rdj_ckpt.pt | wc -l)$(grep -c "WARN seeding $2 from kx$2 failed" "$tmp/err")" 0y01
+}
+ckt "$tmp/wrong.tar" x sub/other.pt;           seedcase "wrong name" swn "$tmp/wrong.tar"
+s=$(mktemp -d "$tmp/ckt.XXXXXX"); mkdir "$s/a"; echo x >"$s/_rdj_ckpt.pt"; tar -P -C "$s" -cf "$tmp/dot.tar" a/../_rdj_ckpt.pt   # -P: keep the ..
+seedcase "dot-dot" sdd "$tmp/dot.tar"
+s=$(mktemp -d "$tmp/ckt.XXXXXX"); echo x >"$s/_rdj_ckpt.pt"; tar -P -cf "$tmp/abs.tar" "$s/_rdj_ckpt.pt"
+seedcase "absolute path" sab "$tmp/abs.tar"
+s=$(mktemp -d "$tmp/ckt.XXXXXX"); ln -s /etc/passwd "$s/_rdj_ckpt.pt"; tar -C "$s" -cf "$tmp/sym.tar" _rdj_ckpt.pt
+seedcase "symlink" ssy "$tmp/sym.tar"
+s=$(mktemp -d "$tmp/ckt.XXXXXX"); mkdir "$s/d"; echo x >"$s/d/_rdj_ckpt.pt"; tar -C "$s" -cf "$tmp/dir.tar" d
+seedcase "dir entry" sdi "$tmp/dir.tar"
+echo garbage >"$tmp/garbage.tar";               seedcase "not a tar" sga "$tmp/garbage.tar"
+ckt "$tmp/ok.tar" ok;                           seedcase "extract dies: partial file removed" sfx "$tmp/ok.tar" JOB_FAIL_SEED=1
+mkjob sbk; echo 'Bad Key' >"$spool/ready/sbk/ckpt_key"
+check "seed: bad ckpt_key warns, job submitted" "$(tick)$(isfile "$q/ready/3-rnd-sbk/run.sh")$(grep -c 'WARN sbk: ckpt_key' "$tmp/err")" 0y1
+mkjob snk; echo nokey >"$spool/ready/snk/ckpt_key"
+check "seed: no checkpoint yet, submitted unseeded" "$(tick)$(isfile "$q/ready/3-rnd-snk/run.sh")$(exists "$work/3-rnd-snk/out")$(grep -c 'no checkpoint for nokey' "$tmp/err")" 0yn1
 
 # ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
 mkdir -p "$tmp/bin" "$tmp/emptyspool"
