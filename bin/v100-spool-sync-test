@@ -477,12 +477,18 @@ check "ckpt relay: ssh lost keeps the local tar" "$(tick REM_FAIL_TAG=ckput REM_
 check "ckpt relay: short stream never lands, local kept" "$(tick REM_TRUNC_TAG=ckput REM_TRUNC_BYTES=100)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")$(ls -A "$rq/ka" | grep -c part)" 1yn0
 check "ckpt relay: past the start deadline it defers" "$(tick V100_CKPT_START_BY=0)$(exists "$ck/ka/2.tar")$(grep -c 'relay deferred' "$tmp/err")" 0y1
 check "ckpt relay: retry delivers" "$(tick)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")" 0ny
-mkdir -p "$ck/kc"; ckt "$ck/kc/1.tar" big
-check "ckpt relay: over the cap is dropped loudly, never sent" "$(tick V100_CKPTMAX=10)$(exists "$ck/kc/1.tar")$(exists "$rq/kc")$(grep -c 'over the 10 cap' "$tmp/err")" 1nn1
+mkdir -p "$ck/kc" "$ck/kd"; ckt "$ck/kc/1.tar" "$(head -c 20000 /dev/zero | tr '\0' x)"; ckt "$ck/kd/1.tar" d; touch -d '2 hours ago' "$ck/kc/1.tar"
+check "ckpt relay: over-cap tar kept + logged, and skipped so a newer key still goes" "$(tick V100_CKPTMAX=15000)$(exists "$ck/kc/1.tar")$(exists "$rq/kc")$(exists "$rq/kd/1.tar")$(grep -c 'kc/1.tar: [0-9]* bytes exceeds V100_CKPTMAX (15000), kept, not relayed' "$tmp/err")" 0yny1
 for n in Bad _x 'x;touch PWNED3' "$(printf 'a%.0s' $(seq 82))"; do mkdir -p "$ck/$n"; ckt "$ck/$n/1.tar" bad; done
 check "ckpt relay: bad keys ignored with a log line" "$(tick)$(grep -c 'ignoring ckpt entry' "$tmp/err")$(exists "$ck/Bad/1.tar")" 04y
 check "ckpt relay: bad keys never reach the remote" "$(grep -c PWNED3 "$tmp/rem.log")$(exists "$tmp/PWNED3")$(ls "$rq" | grep -c -e Bad -e _x)" 0n0
 for n in Bad _x 'x;touch PWNED3' "$(printf 'a%.0s' $(seq 82))"; do rm -rf "${ck:?}/$n"; done
+mkdir -p "$ck/ke"; ckt "$ck/ke/1.tar" e
+check "ckpt store cap: upload refused, local kept, logged" "$(tick V100_CKPT_TOTALMAX=1000)$(exists "$ck/ke/1.tar")$(exists "$rq/ke/1.tar")$(grep -c 'GPU host store full' "$tmp/err")" 1yn1
+mkdir -p "$rq/kold" "$rq/knew" "$ck/kl"; ckt "$rq/kold/1.tar" o; ckt "$rq/knew/1.tar" n; ckt "$ck/kl/1.tar" l
+touch -d '15 days ago' "$rq/kold/1.tar" "$ck/kl/1.tar"
+check "ckpt TTL: stale keys dropped on both sides, fresh kept" "$(tick)$(exists "$rq/kold")$(exists "$rq/knew/1.tar")$(exists "$ck/kl")$(exists "$rq/kl")$(grep -c 'kold: no tar in 14d' "$tmp/err")" 0nynn1
+check "ckpt store cap: retry under the default cap delivers" "$(exists "$ck/ke/1.tar")$(exists "$rq/ke/1.tar")" ny
 ckt "$ck/k1/6.tar" w6; touch "$ck/k1/DONE"
 check "ckpt DONE: both sides dropped" "$(tick)$(exists "$ck/k1")$(exists "$rq/k1")" 0nn
 
@@ -494,6 +500,8 @@ check "seed: highest N (numeric) extracted into out/" "$(cat "$work/3-rnd-sj/out
 check "seed: job still submitted" "$(isfile "$q/ready/3-rnd-sj/run.sh")$(exists "$spool/ready/sj")" yn
 check "seed: logged" "$(grep -c 'seeded sj from ks/10.tar' "$tmp/err")" 1
 check "seed: extracted as the job user before the dir went live" "$(grep -c "tar -C $work/.incoming-sj/out --no-same-owner -xf -" "$tmp/job.log")" 1
+mkdir -p "$ck/kz"; ckt "$ck/kz/3.tar" fresh _rdj_ckpt.pt; mkjob sz1; echo kz >"$spool/ready/sz1/ckpt_key"
+check "seed: a checkpoint staged in the same tick seeds the job" "$(tick)$(cat "$work/3-rnd-sz1/out/_rdj_ckpt.pt" 2>/dev/null)$(grep -c 'seeded sz1 from kz/3.tar' "$tmp/err")" 0fresh1
 seedcase() {  # seedcase LABEL NAME TARFILE [TICKVAR]: the job is submitted unseeded with a WARN
   mkdir -p "$rq/kx$2"; cp "$3" "$rq/kx$2/1.tar"; mkjob "$2"; echo "kx$2" >"$spool/ready/$2/ckpt_key"
   check "seed refused ($1): submitted unseeded with a WARN" "$(tick ${4:+"$4"})$(isfile "$q/ready/3-rnd-$2/run.sh")$(find "$work/3-rnd-$2" -name _rdj_ckpt.pt | wc -l)$(grep -c "WARN seeding $2 from kx$2 failed" "$tmp/err")" 0y01
@@ -514,14 +522,14 @@ check "seed: bad ckpt_key warns, job submitted" "$(tick)$(isfile "$q/ready/3-rnd
 mkjob snk; echo nokey >"$spool/ready/snk/ckpt_key"
 check "seed: no checkpoint yet, submitted unseeded" "$(tick)$(isfile "$q/ready/3-rnd-snk/run.sh")$(exists "$work/3-rnd-snk/out")$(grep -c 'no checkpoint for nokey' "$tmp/err")" 0yn1
 
-# ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit
+# ---- the default REMOTE is bounded, and an unreachable remote is a nonzero exit (2 ssh calls: the ckpt sweep, then the result list)
 mkdir -p "$tmp/bin" "$tmp/emptyspool"
 printf '#!/bin/sh\necho "$*" >>"$SSH_LOG"\nexit 255\n' >"$tmp/bin/ssh"; chmod +x "$tmp/bin/ssh"
 rc=$(cd "$tmp" && env -u REMOTE PATH="$tmp/bin:$PATH" PUB_RUN=env SPOOL="$tmp/emptyspool" V100_STATE="$tmp/state" V100_HOST=gpu-host SSH_LOG="$tmp/ssh.log" "$sync" 2>"$tmp/err"; echo $?)
 check "unreachable remote: exit nonzero" "$rc" 1
-check "default ssh: BatchMode"         "$(grep -c 'BatchMode=yes' "$tmp/ssh.log")" 1
-check "default ssh: ConnectTimeout"    "$(grep -c 'ConnectTimeout=10' "$tmp/ssh.log")" 1
-check "default ssh: ServerAlive"       "$(grep -c 'ServerAliveInterval=15 -o ServerAliveCountMax=4' "$tmp/ssh.log")" 1
-check "default ssh: host"              "$(grep -c ' gpu-host ' "$tmp/ssh.log")" 1
+check "default ssh: BatchMode"         "$(grep -c 'BatchMode=yes' "$tmp/ssh.log")" 2
+check "default ssh: ConnectTimeout"    "$(grep -c 'ConnectTimeout=10' "$tmp/ssh.log")" 2
+check "default ssh: ServerAlive"       "$(grep -c 'ServerAliveInterval=15 -o ServerAliveCountMax=4' "$tmp/ssh.log")" 2
+check "default ssh: host"              "$(grep -c ' gpu-host ' "$tmp/ssh.log")" 2
 
 exit $fails
