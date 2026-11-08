@@ -18,7 +18,7 @@ mkdir -p "$spool"/{ready,done,failed} "$q"/{ready,running,done,failed} "$work"
 # stubs: the "remote" logs "<script tag> <command>" and can inject faults; the job-user prefix logs its argv
 # and can fail like a broken sudo. Fault knobs (env): REM_FAIL_TAG + REM_FAIL_MODE=before|after (exit 255; after
 # = "lost ack"), REM_TRUNC_TAG + REM_TRUNC_BYTES (cut the stdin stream), REM_OUT_TAG + REM_OUT_VAL (fake stdout),
-# REM_TEE=file (record the result stream the remote managed to emit before the caller hung up),
+# REM_TEE=file (record the result stream the remote managed to emit before the caller hung up), REM_SLOW_TAG (that script stalls 30 s),
 # REM_CAT_TAG + REM_CAT_FILE (replace that script's stdout with a crafted file), JOB_KILL_AFTER_MV (SIGKILL the remote
 # script right after it moved the incoming dir into place: no trap runs, like a real kill),
 # JOB_STAMP_FAIL (the stamp read prints nothing, like a failed sudo), JOB_SUDO_FAIL, JOB_PROBE_FAIL=1|empty (only the yes/no probes fail, or print nothing), JOB_DU_EMPTY, DU_LIE, JOB_FAIL_TAR (extract dies), JOB_FAIL_SEED (the checkpoint extract dies after writing).
@@ -31,6 +31,7 @@ echo $(ls -d "$TMPDIR"/v100-sync.*/j.* 2>/dev/null | wc -l) >>"$J_LOG"
 if [ "$tag" = "${REM_OUT_TAG:-}" ]; then echo "$REM_OUT_VAL"; exit 0; fi
 if [ "$tag" = "${REM_CAT_TAG:-}" ]; then cat "$REM_CAT_FILE"; exit 0; fi
 if [ "$tag" = "${REM_FAIL_TAG:-}" ] && [ "${REM_FAIL_MODE:-}" = before ]; then exit 255; fi
+if [ "$tag" = "${REM_SLOW_TAG:-}" ]; then sleep 30 </dev/null >/dev/null 2>&1; fi
 if [ "$tag" = "${REM_TRUNC_TAG:-}" ]; then head -c "$REM_TRUNC_BYTES" | bash -c "$1"; exit $?; fi
 if [ "$tag" = work ] && [ -n "${REM_TEE:-}" ]; then bash -c "$1" | tee "$REM_TEE"; exit 0; fi
 bash -c "$1"; rc=$?
@@ -475,8 +476,14 @@ check "ckpt relay: the other goes next tick" "$(tick)$(exists "$rq/ka/1.tar")$(e
 ckt "$ck/ka/2.tar" a2
 check "ckpt relay: ssh lost keeps the local tar" "$(tick REM_FAIL_TAG=ckput REM_FAIL_MODE=before)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")" 1yn
 check "ckpt relay: short stream never lands, local kept" "$(tick REM_TRUNC_TAG=ckput REM_TRUNC_BYTES=100)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")$(ls -A "$rq/ka" | grep -c part)" 1yn0
-check "ckpt relay: past the start deadline it defers" "$(tick V100_CKPT_START_BY=0)$(exists "$ck/ka/2.tar")$(grep -c 'relay deferred' "$tmp/err")" 0y1
-check "ckpt relay: retry delivers" "$(tick)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")" 0ny
+check "ckpt relay: under 10 s before the end deadline it defers" "$(tick V100_CKPT_END_BY=9)$(exists "$ck/ka/2.tar")$(grep -c 'relay deferred' "$tmp/err")" 0y1
+t0=$SECONDS; r=$(tick V100_CKPT_END_BY=12 REM_SLOW_TAG=ckput)
+check "ckpt relay: a slow put is cut off by the end deadline, local kept" "$r$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")$(grep -c 'relay failed (rc 124)' "$tmp/err")$([ $((SECONDS - t0)) -lt 25 ] && echo fast)" 1yn1fast
+check "ckpt relay: retry delivers" "$(tick)$(exists "$ck/ka/2.tar")$(exists "$rq/ka/2.tar")$(exists "$tmp/state/ckpt-fail.ka")" 0nyn
+mkdir -p "$ck/kf" "$ck/kg"; ckt "$ck/kf/1.tar" f; ckt "$ck/kg/1.tar" g; touch -d '2 hours ago' "$ck/kf/1.tar"; touch -d '1 hour ago' "$ck/kg/1.tar"
+check "ckpt backoff: oldest key fails" "$(tick REM_FAIL_TAG=ckput REM_FAIL_MODE=before)$(exists "$ck/kf/1.tar")$(exists "$tmp/state/ckpt-fail.kf")" 1yy
+check "ckpt backoff: the failed key goes to the back, the next key relays" "$(tick)$(exists "$rq/kg/1.tar")$(exists "$rq/kf/1.tar")$(exists "$ck/kf/1.tar")" 0yny
+check "ckpt backoff: then the failed key relays, stamp cleared" "$(tick)$(exists "$rq/kf/1.tar")$(exists "$tmp/state/ckpt-fail.kf")" 0yn
 mkdir -p "$ck/kc" "$ck/kd"; ckt "$ck/kc/1.tar" "$(head -c 20000 /dev/zero | tr '\0' x)"; ckt "$ck/kd/1.tar" d; touch -d '2 hours ago' "$ck/kc/1.tar"
 check "ckpt relay: over-cap tar kept + logged, and skipped so a newer key still goes" "$(tick V100_CKPTMAX=15000)$(exists "$ck/kc/1.tar")$(exists "$rq/kc")$(exists "$rq/kd/1.tar")$(grep -c 'kc/1.tar: [0-9]* bytes exceeds V100_CKPTMAX (15000), kept, not relayed' "$tmp/err")" 0yny1
 for n in Bad _x 'x;touch PWNED3' "$(printf 'a%.0s' $(seq 82))"; do mkdir -p "$ck/$n"; ckt "$ck/$n/1.tar" bad; done

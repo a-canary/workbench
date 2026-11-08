@@ -16,7 +16,7 @@
 #   V100_ARCHIVE   remote finished-payload dir       (default: /var/lib/v100job/archive)
 #   V100_OUTMAX    result payload cap, bytes         (default: 200 MB)    V100_MAXFILES  result file cap (default 10000)
 #   V100_STATE     per-job attempt counters          (default: ${XDG_STATE_HOME:-~/.local/state}/v100-spool-sync)
-#   V100_CKPTMAX   checkpoint tar cap, bytes         (default: 2 GiB)     V100_CKPT_START_BY  no relay starts after this tick second (default 30)
+#   V100_CKPTMAX   checkpoint tar cap, bytes         (default: 2 GiB)     V100_CKPT_END_BY  the relay is cut off at this tick second (default 60)
 #   V100_CKPT_TOTALMAX  remote checkpoint store cap  (default: 20 GiB)    V100_CKPT_TTL_DAYS  checkpoint key lifetime since its newest tar (default 14)
 # Layout: spool ready/<name>/run.sh -> remote $V100_WORK/3-rnd-<name>/ + queue token $V100_Q/ready/3-rnd-<name>/.
 # Checkpoints: spool ckpt/<key>/<N>.tar (key ^[a-z0-9][a-z0-9._-]{0,80}$, N = increasing step; the agent renames a complete
@@ -58,7 +58,7 @@ OUTMAX=${V100_OUTMAX:-209715200}
 MAXFILES=${V100_MAXFILES:-10000}
 STATE=${V100_STATE:-${XDG_STATE_HOME:-${HOME:?set V100_STATE or HOME}/.local/state}/v100-spool-sync}
 WORKTRIES=3 LOGTRIES=10 INFRATRIES=${V100_INFRATRIES:-30}
-CKPTMAX=${V100_CKPTMAX:-2147483648} CKPT_START_BY=${V100_CKPT_START_BY:-30}
+CKPTMAX=${V100_CKPTMAX:-2147483648} CKPT_END_BY=${V100_CKPT_END_BY:-60}
 CKPT_TOTALMAX=${V100_CKPT_TOTALMAX:-21474836480} CKPT_TTL=${V100_CKPT_TTL_DAYS:-14}
 if [ -z "${SPOOL:-}" ]; then
   h=$(getent passwd agent-pub | cut -d: -f6) || true
@@ -134,6 +134,7 @@ seed() (
   [ -n "$t" ] || exit 2
   names=$(tar -tf "$d/$t") && types=$(tar -tvf "$d/$t" | cut -c1) && [ -n "$names" ] || { echo "unreadable $t"; exit 1; }
   if printf "%s\n" "$names" | grep -qvxE "([A-Za-z0-9_][A-Za-z0-9._-]*/)*_rdj_ckpt\.pt"; then echo "unsafe path in $t"; exit 1; fi
+  # ponytail: sparse members list as "-" and pass; extracted as the job user into this job, they only hurt the agent own job
   if printf "%s\n" "$types" | grep -qvx -- -; then echo "non-regular entry in $t"; exit 1; fi
   [ "$(printf "%s\n" "$names" | wc -l)" = "$(printf "%s\n" "$types" | wc -l)" ] || { echo "listing mismatch in $t"; exit 1; }
   $RUN mkdir -p -- "$o" || { echo "mkdir out failed"; exit 1; }
@@ -402,7 +403,7 @@ collect() {
 # sides, a key past the TTL is dropped here, else all but the highest N are deleted here. Then ONE tar is sent (the one
 # waiting longest, skipping any over the cap), size-checked remotely before it lands; on any failure the local file stays.
 relay() {
-  local c=$SPOOL/ckpt key k f p sz rc out t0 mt st now best= bt= tars
+  local c=$SPOOL/ckpt key k f p sz rc out t0 mt st now best= bt= tars left fs
   rsh "$R_CKSWEEP" "$CKPT_TTL" </dev/null >"$stage/swept" || { fail "ckpt sweep failed, relay skipped this tick"; return 0; }
   while IFS= read -r key; do log "ckpt $key: no tar in ${CKPT_TTL}d, dropped on the GPU host"; done <"$stage/swept"
   pub find "$c" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' >"$stage/ckeys" || { fail "cannot list ckpt spool"; return 0; }
@@ -413,6 +414,7 @@ relay() {
     if pub test -e "$k/DONE"; then
       rsh "$R_CKDEL" "$key" </dev/null || { fail "ckpt $key: remote delete failed, retry next tick"; continue; }
       wipe "$k" || { fail "ckpt $key: local delete failed"; continue; }
+      rm -f -- "$STATE/ckpt-fail.$key"
       log "ckpt $key: DONE, dropped"; continue
     fi
     pub find "$k" -mindepth 1 -maxdepth 1 -type f -printf '%f\0' >"$stage/ctars" || { fail "cannot list ckpt $key"; continue; }
@@ -421,25 +423,32 @@ relay() {
     f=${tars[-1]}
     st=$(pub stat -c '%Y %s' -- "$k/$f") && mt=${st% *} sz=${st#* } && [[ $mt =~ ^[0-9]+$ && $sz =~ ^[0-9]+$ ]] || { fail "ckpt $key/$f: cannot stat"; continue; }
     if [ $((now - mt)) -gt $((CKPT_TTL * 86400)) ]; then
-      wipe "$k" && log "ckpt $key: newest tar older than ${CKPT_TTL}d, dropped" || fail "ckpt $key: local delete failed"; continue
+      wipe "$k" && rm -f -- "$STATE/ckpt-fail.$key" && log "ckpt $key: newest tar older than ${CKPT_TTL}d, dropped" || fail "ckpt $key: local delete failed"; continue
     fi
     for p in "${tars[@]:0:${#tars[@]}-1}"; do pub rm -f -- "$k/$p" || fail "ckpt $key: cannot drop $p"; done
     # kept (it may be valuable) but never a candidate, so it cannot starve the other keys
     if [ "$sz" -gt "$CKPTMAX" ]; then log "ckpt $key/$f: $sz bytes exceeds V100_CKPTMAX ($CKPTMAX), kept, not relayed"; continue; fi
+    # a key whose last relay failed waits as if staged at that failure (operator-side stamp), so it cannot wedge the others
+    fs=$(stat -c %Y -- "$STATE/ckpt-fail.$key" 2>/dev/null) && [ "$fs" -gt "$mt" ] && mt=$fs
     if [ -z "$best" ] || [ "$mt" -lt "$bt" ]; then best=$key/$f bt=$mt; fi
   done 3<"$stage/ckeys"
   [ -n "$best" ] || return 0
-  if [ "$SECONDS" -ge "$CKPT_START_BY" ]; then log "ckpt $best: tick at ${SECONDS}s, relay deferred"; return 0; fi
+  # the whole relay ends by CKPT_END_BY so submit/collect always get the rest of the cron's 110 s
+  left=$((CKPT_END_BY - SECONDS))
+  if [ "$left" -lt 10 ]; then log "ckpt $best: tick at ${SECONDS}s, relay deferred"; return 0; fi
   key=${best%%/*} f=${best#*/} p=$c/$best
   sz=$(pub stat -c %s -- "$p") && [[ $sz =~ ^[0-9]+$ ]] || { fail "ckpt $best: cannot stat"; return 0; }
   if [ "$sz" -gt "$CKPTMAX" ]; then log "ckpt $best: $sz bytes exceeds V100_CKPTMAX ($CKPTMAX), kept, not relayed"; return 0; fi
   # head bounds the stream at what was measured: a file still growing fails the size check instead of filling the host
   t0=$SECONDS rc=0
-  out=$(pub cat -- "$p" | head -c $((sz + 1)) | rsh "$R_CKPUT" "$key" "$f" "$sz" "$CKPT_TOTALMAX") || rc=$?
+  # a put cut off by the timeout fails like any other: local tar kept, the next put clears the remote .part
+  touch -- "$STATE/ckpt-fail.$key" || true
+  out=$(pub cat -- "$p" | head -c $((sz + 1)) | REMOTE="timeout -k 5 $left $REMOTE" rsh "$R_CKPUT" "$key" "$f" "$sz" "$CKPT_TOTALMAX") || rc=$?
   if [ "$rc" = 3 ] && [[ $out == "full "* ]]; then
     fail "ckpt $best: GPU host store full (${out#full } bytes held + $sz > V100_CKPT_TOTALMAX $CKPT_TOTALMAX), kept, retry next tick"; return 0
   fi
   if [ "$rc" != 0 ] || [ "$out" != "$sz" ]; then fail "ckpt $best: relay failed (rc $rc), kept, retry next tick"; return 0; fi
+  rm -f -- "$STATE/ckpt-fail.$key"
   pub rm -f -- "$p" || fail "ckpt $best: relayed, but the local copy could not be deleted"
   log "ckpt relayed $best: $sz bytes in $((SECONDS - t0))s"
 }
