@@ -11,6 +11,8 @@ cat > "$tmp/stub" <<'EOF'
 wt=$2; cd "$wt" || exit 9
 # like need_public: the public lane needs a git repo to check visibility
 case " $* " in *" --lane public "*) [ -e "$wt/.git" ] || exit 7 ;; esac
+# like the real public lane: no lent deps (WORKER_VENV/WORKER_DEPS), so a test command there is not runnable
+case " $* " in *" --lane public "*" --exec "*) exit 127 ;; esac
 while [ $# -gt 0 ]; do [ "$1" = --exec ] && { shift; exec "$@"; }; shift; done
 touch ok && eval "$ATTACK"
 EOF
@@ -130,8 +132,8 @@ RED_MSG=$'red\n\nWorker-May-Edit: ^[a-m]' run "Worker-May-Edit '^[a-m]' refused"
 RED_MSG=$'red\n\nWorker-May-Edit: \\.py$' run "Worker-May-Edit '\\.py\$' refused" 'echo x > conftest.py' refused
 RED_MSG=$'red\n\nWorker-May-Edit: \\.(toml|ini|cfg)$' run "Worker-May-Edit toml/ini/cfg refused" 'echo x > setup.cfg' refused
 RED_MSG=$'red\n\nWorker-May-Edit: ^package\\.json$|^conftest\\.py$' run "Worker-May-Edit naming two files allowed" 'echo x > conftest.py' ok
-# GREEN runs no model, so the public lane's visibility check never sees the .git-less green copy
-LANE=public run "public lane GREEN runs" '' ok
+# RED and GREEN run no model: private lane, deps lent, and the visibility check never sees the .git-less green copy
+LANE=public run "public lane RED and GREEN run in the private lane" '' ok
 # a RED commit that also carries a source stub: every file it touched stays guarded (wb-e22 review: a
 # name-based or Worker-May-Edit stub exemption also unguarded mocks, golden files and the RED test itself)
 REDF=t.test.sh REDBODY='test "$(cat impl.txt)" = done' REDEXTRA=impl.txt run "RED-carried file stays guarded" 'echo done > impl.txt' refused

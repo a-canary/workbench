@@ -82,7 +82,9 @@ startup_crash() { # $1 output file; $2=red also matches red_pats
 
 log "RED: $test"
 red_rc=0
-sbx --timeout 300 --exec sh -c "$test" >"$red_out" 2>&1 || red_rc=$?
+# private lane like GREEN: no model runs, and only it lends WORKER_VENV/WORKER_DEPS (a public RED "failed" on a
+# missing pytest, expert-horde horde-7wr.1 2026-11-08)
+"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane private --timeout 300 --exec sh -c "$test" >"$red_out" 2>&1 || red_rc=$?
 cat "$red_out" >&2
 if [ $red_rc -eq 0 ]; then
   die "test already passes — not a RED commit"
