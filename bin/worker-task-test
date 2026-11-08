@@ -70,7 +70,9 @@ if grep -q DECOMPOSER "$WORKER_TASK_LOG"; then echo "FAIL  worker-chosen path ke
 else echo "PASS  worker-chosen path kept out of WORKER_TASK_LOG"; fi
 unset WORKER_TASK_LOG
 run "worker that never ran is infra (rc 4)" 'rm ok; exit 1' rc4
-run "worker that ran and did nothing is the model (rc 2)" 'rm ok' rc2
+run "worker that replied but changed nothing is the model (rc 2)" 'rm ok; echo I cannot' rc2
+run "empty reply with no changes is infra (rc 4)" 'rm ok' rc4
+run "blank reply with no changes is infra (rc 4)" 'rm ok; printf "  \\n\\n"' rc4
 run "worker timeout is the model (rc 2)" 'rm ok; exit 124' rc2
 # a test runner that crashes at startup (nd-8am: vitest EROFS on a ro node_modules) is infra, not a valid RED/GREEN
 # failure: rc 4 before the worker runs (RED), or rc 4 instead of blaming the model (GREEN)
