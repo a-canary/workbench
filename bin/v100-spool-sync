@@ -16,7 +16,18 @@
 #   V100_ARCHIVE   remote finished-payload dir       (default: /var/lib/v100job/archive)
 #   V100_OUTMAX    result payload cap, bytes         (default: 200 MB)    V100_MAXFILES  result file cap (default 10000)
 #   V100_STATE     per-job attempt counters          (default: ${XDG_STATE_HOME:-~/.local/state}/v100-spool-sync)
+#   V100_CKPTMAX   checkpoint tar cap, bytes         (default: 2 GiB)     V100_CKPT_END_BY  the relay is cut off at this tick second (default 60)
+#   V100_CKPT_TOTALMAX  remote checkpoint store cap  (default: 20 GiB)    V100_CKPT_TTL_DAYS  checkpoint key lifetime since its newest tar (default 14)
 # Layout: spool ready/<name>/run.sh -> remote $V100_WORK/3-rnd-<name>/ + queue token $V100_Q/ready/3-rnd-<name>/.
+# Checkpoints: spool ckpt/<key>/<N>.tar (key ^[a-z0-9][a-z0-9._-]{0,80}$, N = increasing step; the agent renames a complete
+# tar into place) is relayed to remote $V100_Q/ckpt/<key>/<N>.tar, at most one tar per tick (the one waiting longest), size-checked
+# before it lands; the GPU host keeps the 2 highest N, the spool only the highest unsent one. ckpt/<key>/DONE drops the key on both sides.
+# The relay runs first in a tick, so a job submitted in the same tick seeds from the fresh tar. Bounds: a tar over V100_CKPTMAX is kept
+# but never sent (logged each tick); an upload that would push the remote store past V100_CKPT_TOTALMAX is refused and retried;
+# a key whose newest tar is older than V100_CKPT_TTL_DAYS is deleted, on the GPU host (upload time) and in the spool (file mtime).
+# A job whose dir holds ckpt_key (one line, a key) is seeded at submit, before its token exists: the highest N tar of that key,
+# if it lists only regular files named [<safe dirs>/]_rdj_ckpt.pt, is extracted as the job user into $V100_WORK/3-rnd-<name>/out/.
+# A seed failure only warns: the job is submitted unseeded.
 # The 3-rnd- priority prefix is forced here, never chosen by the agent. Tools: GNU tar/find/du, base64, sha256sum.
 # Idempotency: a submit is identified by the sha256 of the staged tar, stored in the token dir as .sha, so a lost
 # ack is recognised next tick instead of being rejected as a duplicate. A result is delivered into a hidden
@@ -47,6 +58,8 @@ OUTMAX=${V100_OUTMAX:-209715200}
 MAXFILES=${V100_MAXFILES:-10000}
 STATE=${V100_STATE:-${XDG_STATE_HOME:-${HOME:?set V100_STATE or HOME}/.local/state}/v100-spool-sync}
 WORKTRIES=3 LOGTRIES=10 INFRATRIES=${V100_INFRATRIES:-30}
+CKPTMAX=${V100_CKPTMAX:-2147483648} CKPT_END_BY=${V100_CKPT_END_BY:-60}
+CKPT_TOTALMAX=${V100_CKPT_TOTALMAX:-21474836480} CKPT_TTL=${V100_CKPT_TTL_DAYS:-14}
 if [ -z "${SPOOL:-}" ]; then
   h=$(getent passwd agent-pub | cut -d: -f6) || true
   [ -n "${h:-}" ] || die "SPOOL unset and no agent-pub home"
@@ -54,6 +67,7 @@ if [ -z "${SPOOL:-}" ]; then
 fi
 
 NAME_RE='^[a-z0-9][a-z0-9-]{0,40}$'
+CKEY_RE='^[a-z0-9][a-z0-9._-]{0,80}$'
 MAXB=52428800                          # 50 MB staged job
 CAPB=$((MAXB + 10485760))              # archive read cap: job + tar overhead, bounds the staging disk use
 STREAMCAP=$((OUTMAX + OUTMAX / 20 + 1048576))   # result stream cap: payload + tar overhead
@@ -110,6 +124,30 @@ $RUN mkdir -- "$i"
 $RUN tar -C "$i" --no-same-owner --no-same-permissions -xf "$f"
 $RUN rm -f -- "$f"
 $RUN sh -c '"'"'printf %s "$1" >"$2"'"'"' _ "$sha" "$i/.v100-submit-sha"
+# seed KEY: highest-N checkpoint tar of KEY -> $i/out as the job user, before the token exists. Exit 0 + tar name,
+# 2 = no checkpoint, 1 + reason = refused or failed (anything extracted is removed again)
+seed() (
+  set +e -o pipefail
+  d=$Q/ckpt/$1 o=$i/out
+  [ -d "$d" ] || exit 2
+  t=$(ls -- "$d" | grep -xE "[0-9]+\.tar" | sort -n | tail -n 1)
+  [ -n "$t" ] || exit 2
+  names=$(tar -tf "$d/$t") && types=$(tar -tvf "$d/$t" | cut -c1) && [ -n "$names" ] || { echo "unreadable $t"; exit 1; }
+  if printf "%s\n" "$names" | grep -qvxE "([A-Za-z0-9_][A-Za-z0-9._-]*/)*_rdj_ckpt\.pt"; then echo "unsafe path in $t"; exit 1; fi
+  # ponytail: sparse members list as "-" and pass; extracted as the job user into this job, they only hurt the agent own job
+  if printf "%s\n" "$types" | grep -qvx -- -; then echo "non-regular entry in $t"; exit 1; fi
+  [ "$(printf "%s\n" "$names" | wc -l)" = "$(printf "%s\n" "$types" | wc -l)" ] || { echo "listing mismatch in $t"; exit 1; }
+  $RUN mkdir -p -- "$o" || { echo "mkdir out failed"; exit 1; }
+  if ! cat -- "$d/$t" | $RUN tar -C "$o" --no-same-owner -xf -; then
+    printf "%s\n" "$names" | while IFS= read -r m; do $RUN rm -f -- "$o/$m"; done
+    echo "extract of $t failed"; exit 1
+  fi
+  echo "$t"
+)
+if [ -n "$4" ]; then
+  r=0; s=$(seed "$4") || r=$?
+  case $r in 0) echo "seeded $s" ;; 2) echo "noseed" ;; *) echo "seedfail $s" ;; esac
+fi
 $RUN mv -T -- "$i" "$W/$n"; moved=1
 mkdir -p -- "$Q/ready"
 mkdir -- "$Q/ready/.$n"; tok=1
@@ -154,6 +192,33 @@ case $p in
 esac
 c=$Q/collected/$n; if [ -e "$c" ]; then c=$c.$(date +%s); fi
 mkdir -p -- "$Q/collected"; mv -T -- "$t" "$c"'
+R_CKPUT="$(pre ckput)"'
+set -e
+d=$Q/ckpt/$1 f=$2 sz=$3
+p=$d/.$f.part
+trap '"'"'rm -f -- "$p"'"'"' EXIT
+mkdir -p -- "$d"
+rm -f -- "$d"/.*.part
+# the store cap counts everything already held (fail closed: an unreadable size is a failure, not zero)
+used=$(du -sb -- "$Q/ckpt"); used=${used%%[!0-9]*}
+[ -n "$used" ] || exit 1
+if [ $((used + sz)) -gt "$4" ]; then echo "full $used"; exit 3; fi
+cat >"$p"
+got=$(stat -c %s -- "$p")
+[ "$got" = "$sz" ] || { echo "ckpt size $got, want $sz" >&2; exit 1; }
+mv -f -- "$p" "$d/$f"
+ls -- "$d" | grep -xE "[0-9]+\.tar" | sort -n | head -n -2 | while IFS= read -r o; do rm -f -- "$d/$o"; done
+echo "$got"'
+R_CKDEL="$(pre ckdel)"'
+rm -rf -- "$Q/ckpt/$1"'
+R_CKSWEEP="$(pre cksweep)"'
+# drop keys with no tar uploaded in the last $1 days (abandoned jobs never send DONE); print each dropped key
+for d in "$Q/ckpt"/*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  [ -z "$(find "$d" -maxdepth 1 -type f -name "*.tar" -mtime -"$1" -print -quit)" ] || continue
+  rm -rf -- "$d" && echo "${d##*/}"
+done
+exit 0'
 
 mkdir -p -- "$STATE" || die "cannot create state dir"
 stage=$(mktemp -d "${TMPDIR:-/tmp}/v100-sync.XXXXXX")
@@ -189,7 +254,7 @@ aside() {
 
 J=
 submit_job() {
-  local name=$1 d bad sz rc=0 sha
+  local name=$1 d bad sz rc=0 sha ck out
   [[ $name =~ $NAME_RE ]] || { reject "$name" "name must match $NAME_RE"; return 0; }
   J=$(mktemp -d "$stage/j.XXXXXX") || return 1
   d=$J/x/$name; mkdir "$J/x" || return 1
@@ -217,6 +282,12 @@ submit_job() {
   if [ -e "$d/.v100-submit-sha" ] || [ -L "$d/.v100-submit-sha" ]; then reject "$name" "reserved name .v100-submit-sha in job"; return 0; fi
   sz=$(du -sb -- "$d" | cut -f1) || { reject "$name" "size check failed"; return 0; }
   if [ "$sz" -gt "$MAXB" ]; then reject "$name" "job larger than 50 MB"; return 0; fi
+  # an optional checkpoint key to seed from; a bad one only costs the seed, never the job
+  ck=
+  if [ -e "$d/ckpt_key" ]; then
+    ck=$(head -c 100 -- "$d/ckpt_key" 2>/dev/null) || ck=
+    [[ $ck =~ $CKEY_RE ]] || { log "WARN $name: ckpt_key is not one line matching $CKEY_RE, submitting unseeded"; ck=; }
+  fi
   # the shipped bytes are the staged tar; its sha256 is the job's content id
   tar --sort=name --owner=0 --group=0 --numeric-owner -C "$d" -cf "$J/out.tar" . || { fail "stage tar of $name failed"; return 0; }
   sha=$(sha256sum "$J/out.tar") || { fail "sha of $name failed"; return 0; }
@@ -228,7 +299,12 @@ submit_job() {
     3) aside "$name"; log "$name already submitted (same content), moved aside"; return 0 ;;
     *) fail "remote check of $name failed (rc $rc), retry next tick"; return 0 ;;
   esac
-  if ! rsh "$R_SUBMIT" "$name" "$sha" "$TOKEN_STUB" <"$J/out.tar"; then fail "remote submit of $name failed, retry next tick"; return 0; fi
+  if ! out=$(rsh "$R_SUBMIT" "$name" "$sha" "$TOKEN_STUB" "$ck" <"$J/out.tar"); then fail "remote submit of $name failed, retry next tick"; return 0; fi
+  case $out in
+    "seeded "*) log "seeded $name from $ck/${out#seeded }" ;;
+    noseed) log "$name: no checkpoint for $ck yet, submitted unseeded" ;;
+    "seedfail "*) log "WARN seeding $name from $ck failed (${out#seedfail }), submitted unseeded" ;;
+  esac
   aside "$name"
   log "submitted $name as 3-rnd-$name"
 }
@@ -323,7 +399,64 @@ collect() {
   log "collected $s/$name"
 }
 
-pub mkdir -p -- "$SPOOL/ready" "$SPOOL/done" "$SPOOL/failed" || die "cannot prepare spool"
+# relay: spool ckpt/<key>/<N>.tar -> remote $Q/ckpt/<key>/. First the remote TTL sweep. Per key: DONE drops it both
+# sides, a key past the TTL is dropped here, else all but the highest N are deleted here. Then ONE tar is sent (the one
+# waiting longest, skipping any over the cap), size-checked remotely before it lands; on any failure the local file stays.
+relay() {
+  local c=$SPOOL/ckpt key k f p sz rc out t0 mt st now best= bt= tars left fs
+  rsh "$R_CKSWEEP" "$CKPT_TTL" </dev/null >"$stage/swept" || { fail "ckpt sweep failed, relay skipped this tick"; return 0; }
+  while IFS= read -r key; do log "ckpt $key: no tar in ${CKPT_TTL}d, dropped on the GPU host"; done <"$stage/swept"
+  pub find "$c" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' >"$stage/ckeys" || { fail "cannot list ckpt spool"; return 0; }
+  now=$(date +%s)
+  while IFS= read -r -d '' -u 3 key; do
+    k=$c/$key
+    if ! [[ $key =~ $CKEY_RE ]] || ! pub test -d "$k"; then log "ignoring ckpt entry $(printf %q "$key")"; continue; fi
+    if pub test -e "$k/DONE"; then
+      rsh "$R_CKDEL" "$key" </dev/null || { fail "ckpt $key: remote delete failed, retry next tick"; continue; }
+      wipe "$k" || { fail "ckpt $key: local delete failed"; continue; }
+      rm -f -- "$STATE/ckpt-fail.$key"
+      log "ckpt $key: DONE, dropped"; continue
+    fi
+    pub find "$k" -mindepth 1 -maxdepth 1 -type f -printf '%f\0' >"$stage/ctars" || { fail "cannot list ckpt $key"; continue; }
+    mapfile -t -d '' tars < <(grep -zxE '[0-9]+\.tar' "$stage/ctars" | sort -zn)
+    [ "${#tars[@]}" -gt 0 ] || continue
+    f=${tars[-1]}
+    st=$(pub stat -c '%Y %s' -- "$k/$f") && mt=${st% *} sz=${st#* } && [[ $mt =~ ^[0-9]+$ && $sz =~ ^[0-9]+$ ]] || { fail "ckpt $key/$f: cannot stat"; continue; }
+    if [ $((now - mt)) -gt $((CKPT_TTL * 86400)) ]; then
+      wipe "$k" && rm -f -- "$STATE/ckpt-fail.$key" && log "ckpt $key: newest tar older than ${CKPT_TTL}d, dropped" || fail "ckpt $key: local delete failed"; continue
+    fi
+    for p in "${tars[@]:0:${#tars[@]}-1}"; do pub rm -f -- "$k/$p" || fail "ckpt $key: cannot drop $p"; done
+    # kept (it may be valuable) but never a candidate, so it cannot starve the other keys
+    if [ "$sz" -gt "$CKPTMAX" ]; then log "ckpt $key/$f: $sz bytes exceeds V100_CKPTMAX ($CKPTMAX), kept, not relayed"; continue; fi
+    # a key whose last relay failed waits as if staged at that failure (operator-side stamp), so it cannot wedge the others
+    fs=$(stat -c %Y -- "$STATE/ckpt-fail.$key" 2>/dev/null) && [ "$fs" -gt "$mt" ] && mt=$fs
+    if [ -z "$best" ] || [ "$mt" -lt "$bt" ]; then best=$key/$f bt=$mt; fi
+  done 3<"$stage/ckeys"
+  [ -n "$best" ] || return 0
+  # the whole relay ends by CKPT_END_BY so submit/collect always get the rest of the cron's 110 s
+  left=$((CKPT_END_BY - SECONDS))
+  if [ "$left" -lt 10 ]; then log "ckpt $best: tick at ${SECONDS}s, relay deferred"; return 0; fi
+  key=${best%%/*} f=${best#*/} p=$c/$best
+  sz=$(pub stat -c %s -- "$p") && [[ $sz =~ ^[0-9]+$ ]] || { fail "ckpt $best: cannot stat"; return 0; }
+  if [ "$sz" -gt "$CKPTMAX" ]; then log "ckpt $best: $sz bytes exceeds V100_CKPTMAX ($CKPTMAX), kept, not relayed"; return 0; fi
+  # head bounds the stream at what was measured: a file still growing fails the size check instead of filling the host
+  t0=$SECONDS rc=0
+  # a put cut off by the timeout fails like any other: local tar kept, the next put clears the remote .part
+  touch -- "$STATE/ckpt-fail.$key" || true
+  out=$(pub cat -- "$p" | head -c $((sz + 1)) | REMOTE="timeout -k 5 $left $REMOTE" rsh "$R_CKPUT" "$key" "$f" "$sz" "$CKPT_TOTALMAX") || rc=$?
+  if [ "$rc" = 3 ] && [[ $out == "full "* ]]; then
+    fail "ckpt $best: GPU host store full (${out#full } bytes held + $sz > V100_CKPT_TOTALMAX $CKPT_TOTALMAX), kept, retry next tick"; return 0
+  fi
+  if [ "$rc" != 0 ] || [ "$out" != "$sz" ]; then fail "ckpt $best: relay failed (rc $rc), kept, retry next tick"; return 0; fi
+  rm -f -- "$STATE/ckpt-fail.$key"
+  pub rm -f -- "$p" || fail "ckpt $best: relayed, but the local copy could not be deleted"
+  log "ckpt relayed $best: $sz bytes in $((SECONDS - t0))s"
+}
+
+pub mkdir -p -- "$SPOOL/ready" "$SPOOL/done" "$SPOOL/failed" "$SPOOL/ckpt" || die "cannot prepare spool"
+
+# relay first: a job submitted this tick seeds from a checkpoint staged this tick. Bounded (one tar, start deadline), so submit follows.
+relay || fail "checkpoint relay aborted"
 
 pub find "$SPOOL/ready" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\0' >"$stage/names" || die "cannot list spool"
 while IFS= read -r -d '' -u 3 name; do submit_one "$name" || fail "submit of $(printf %q "$name") aborted"; done 3<"$stage/names"
