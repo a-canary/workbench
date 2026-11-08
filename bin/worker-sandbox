@@ -102,7 +102,8 @@ need_public() {
       awk -v n="$name" '$1 == n { f = 1 } END { exit !f }' "$WORKER_PREPUBLIC" ||
       die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC${2:+ or listed in WORKER_PREPUBLIC})"
   fi
-  local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache | head -3)
+  local other; other=$(git -C "$wt" ls-files -o --directory --no-empty-directory -x __pycache__ -x .pytest_cache | head -3)
+  # --no-empty-directory: the empty .venv/node_modules mountpoint a lent RED run leaves (bwrap) carries nothing
   [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"
 }
 # research can fetch any URL, so whatever it reads can leave in a query string: it may read a PUBLIC

@@ -226,6 +226,11 @@ mkdir -p "$wt/node_modules/.cache"; touch "$wt/node_modules/.cache/x"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "FAIL  public lane refuses node_modules"; fail=1; else echo "PASS  public lane refuses node_modules"; fi
 unlink "$wt/node_modules/.cache/x"; rmdir "$wt/node_modules/.cache" "$wt/node_modules"
+# ...but not the empty mountpoint a WORKER_VENV/WORKER_DEPS RED run leaves behind (bwrap): it carries nothing
+mkdir "$wt/.venv"
+if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
+then echo "PASS  public lane allows an empty mountpoint"; else echo "FAIL  public lane allows an empty mountpoint"; fail=1; fi
+rmdir "$wt/.venv"
 mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
