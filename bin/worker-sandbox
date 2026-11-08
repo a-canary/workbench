@@ -102,10 +102,14 @@ need_public() {
       awk -v n="$name" '$1 == n { f = 1 } END { exit !f }' "$WORKER_PREPUBLIC" ||
       die "$1 refused: repo visibility '${vis:-unknown}' (need PUBLIC${2:+ or listed in WORKER_PREPUBLIC})"
   fi
-  # the empty .venv/node_modules mountpoint a lent RED run leaves (bwrap) carries nothing; only it is exempt
-  # (not --no-empty-directory: that also hides a dir git cannot read, PR #101 review). ls on an unreadable dir errs: kept
-  local other; other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache | while read -r f; do
-    case $f in .venv/ | node_modules/) [ -z "$(ls -A "$wt/$f" 2>&1)" ] && continue ;; esac; echo "$f"; done | head -3)
+  # the empty .venv/node_modules mountpoint a lent RED run leaves (bwrap) carries nothing: exempt exactly the root
+  # dir, by an anchored exclude, never by parsing names (PR #101 reviews: --no-empty-directory hid a dir git cannot
+  # read; a `read` loop took " .venv/" for ".venv/"). ls on an unreadable dir errs, so that one stays listed.
+  local d ex=() other
+  for d in .venv node_modules; do
+    if [ -d "$wt/$d" ] && [ ! -L "$wt/$d" ] && [ -z "$(ls -A "$wt/$d" 2>&1)" ]; then ex+=(-x "/$d/"); fi
+  done
+  other=$(git -C "$wt" ls-files -o --directory -x __pycache__ -x .pytest_cache "${ex[@]}" | head -3)
   [ -z "$other" ] || die "$1 refused: untracked/ignored files would leave the host: $(echo $other)"
 }
 # research can fetch any URL, so whatever it reads can leave in a query string: it may read a PUBLIC
