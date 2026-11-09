@@ -2,7 +2,7 @@
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
 #   lane-run [--repo DIR]... [--label lane:v100] [--lane private] [--once] [--idle 600]
-#   (the public 9router lane is retired on home-lab-1: 9router moved to ai-lab-02, repos-mxu8 A, 2026-10-31)
+#   (the public 9router lane is retired on this host: 9router moved to another lab host, repos-mxu8 A, 2026-10-31)
 #   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
 # The decomposer (a frontier model, used sparingly) turns work into ~10-minute tasks a local
