@@ -9,10 +9,19 @@ const CARD = `<decide><q>Ship the <b>thing</b>?</q><context>Tests pass.</context
 
 Evidence: run 12`;
 
+// `calls` records writes only. The `show` lookup made before any write is answered with a waiting card.
 const recorder = (fail?: (a: string[]) => boolean) => {
   const calls: string[][] = [];
-  const run: Run = async (a) => { calls.push(a); return { code: fail?.(a) ? 1 : 0, out: "[]" }; };
-  return { calls, run };
+  const shows: string[][] = [];
+  const run: Run = async (a) => {
+    if (a[2] === "show") {
+      shows.push(a);
+      return { code: 0, out: JSON.stringify([{ id: a[3], labels: ["human"], description: CARD }]) };
+    }
+    calls.push(a);
+    return { code: fail?.(a) ? 1 : 0, out: "[]" };
+  };
+  return { calls, shows, run };
 };
 
 test("parseDecide: question, context, options and the recommendation; null without a card; error when malformed", () => {
@@ -92,7 +101,7 @@ test("applyDecision reject, reply and skip", async () => {
 });
 
 test("applyDecision refuses bad input without calling bd, and stops at the first failed step", async () => {
-  const { calls, run } = recorder();
+  const { calls, shows, run } = recorder();
   expect(await applyDecision({ dir: "/elsewhere", id: "x-1", action: "accept", text: "" }, ["/a"], run)).toBe("unknown workspace");
   expect(await applyDecision({ dir: "/a", id: "--help", action: "accept", text: "" }, ["/a"], run)).toBe("bad bead id");
   expect(await applyDecision({ dir: "/a", id: "x 1; rm", action: "accept", text: "" }, ["/a"], run)).toBe("bad bead id");
@@ -102,6 +111,7 @@ test("applyDecision refuses bad input without calling bd, and stops at the first
   // There is no free-form comment action: every write is a verdict in the DECISION format.
   expect(await applyDecision({ dir: "/a", id: "x-1", action: "comment", text: "DECISION accept A" }, ["/a"], run)).toBe("bad action");
   expect(calls.length).toBe(0);
+  expect(shows.length).toBe(0);
 
   const broken = recorder((a) => a[2] === "comments");
   const err = await applyDecision({ dir: "/a", id: "x-1", action: "accept:A", text: "" }, ["/a"], broken.run);
