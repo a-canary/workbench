@@ -398,6 +398,7 @@ export function shell(
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow-x:hidden}
 body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #places{position:fixed;left:0;top:0;bottom:0;width:140px;background:var(--nav-bg);display:flex;flex-direction:column;padding:1rem;gap:.5rem}
 #places a{color:inherit;text-decoration:none;padding:.4rem;border-radius:4px}
 #places a[aria-current="page"]{font-weight:700}
