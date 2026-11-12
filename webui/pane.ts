@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 // Control pane shell (slice B1). Public framework: no repo, seat or
 // mission names in code; personal paths come from <config dir>/pane.json.
 
+// cards with a verdict being written right now, so two submits at the same moment write one verdict
+const inFlight = new Set<string>();
+
 export const PLACES = ["inbox", "feed", "seats", "work", "vision"] as const;
 
 export type Run = (args: string[]) => Promise<{ code: number; out: string }>;
@@ -254,75 +257,85 @@ export async function applyDecision(
     return "bad option";
   const text = input.text.trim().slice(0, 4000);
 
-  // The verdict is checked against the card as it is now, so a second submit or a changed card
-  // cannot write a stray verdict.
-  const show = await run(["-C", input.dir, "show", input.id, "--json"]);
-  if (show.code !== 0) return "card not found";
-  let parsed: unknown;
+  const key = `${input.dir}\n${input.id}`;
+  if (inFlight.has(key)) return "card is being decided";
+  inFlight.add(key);
+
   try {
-    parsed = JSON.parse(show.out);
-  } catch {
-    return "card not found";
-  }
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    parsed[0] === null ||
-    typeof parsed[0] !== "object"
-  )
-    return "card not found";
-  const card = parsed[0] as Record<string, unknown>;
-  if (
-    !Array.isArray(card.labels) ||
-    !card.labels.includes("human")
-  )
-    return "card is no longer waiting";
-  const decide = parseDecide(
-    typeof card.description === "string" ? card.description : ""
-  );
-  const hasOptions = decide !== null && !("error" in decide);
-  if (verb === "accept") {
-    if (hasOptions) {
-      if (option === undefined) return "pick one of the card's options";
-      if (!decide.options.some((o) => o.id === option))
-        return "not one of this card's options";
-    } else if (option !== undefined) {
-      return "not one of this card's options";
+    // The verdict is checked against the card as it is now, so a second submit or a changed card
+    // cannot write a stray verdict.
+    const show = await run(["-C", input.dir, "show", input.id, "--json"]);
+    if (show.code !== 0) return "card not found";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(show.out);
+    } catch {
+      return "card not found";
     }
-  }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      parsed[0] === null ||
+      typeof parsed[0] !== "object"
+    )
+      return "card not found";
+    const card = parsed[0] as Record<string, unknown>;
+    if (
+      !Array.isArray(card.labels) ||
+      !card.labels.includes("human")
+    )
+      return "card is no longer waiting";
+    // A failed label step can leave both labels on a card; it must not take a second verdict.
+    if (card.labels.includes("decided")) return "card is already decided";
+    const decide = parseDecide(
+      typeof card.description === "string" ? card.description : ""
+    );
+    const hasOptions = decide !== null && !("error" in decide);
+    if (verb === "accept") {
+      if (hasOptions) {
+        if (option === undefined) return "pick one of the card's options";
+        if (!decide.options.some((o) => o.id === option))
+          return "not one of this card's options";
+      } else if (option !== undefined) {
+        return "not one of this card's options";
+      }
+    }
 
-  const isReply = verb === "defer" && text !== "";
-  const isSkip = verb === "defer" && text === "";
+    const isReply = verb === "defer" && text !== "";
+    const isSkip = verb === "defer" && text === "";
 
-  let body: string;
-  if (isReply) {
-    body = `DECISION reply: ${text}`;
-  } else if (isSkip) {
-    body = "DECISION skip";
-  } else {
-    body = `DECISION ${verb}`;
-    if (option !== undefined) body += ` ${option}`;
-    if (text !== "") body += `: ${text}`;
-  }
+    let body: string;
+    if (isReply) {
+      body = `DECISION reply: ${text}`;
+    } else if (isSkip) {
+      body = "DECISION skip";
+    } else {
+      body = `DECISION ${verb}`;
+      if (option !== undefined) body += ` ${option}`;
+      if (text !== "") body += `: ${text}`;
+    }
 
-  // The verdict comment is written first so a card never carries `decided` without its
-  // verdict; `human` is dropped last so a failed step leaves the card in the inbox.
-  const steps: string[][] = [];
-  if (isSkip) {
-    steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
-    steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
-  } else {
-    steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
-    steps.push(["-C", input.dir, "label", "add", input.id, "decided"]);
-    steps.push(["-C", input.dir, "label", "remove", input.id, "human"]);
-  }
+    // The verdict comment is written first so a card never carries `decided` without its
+    // verdict; `human` is dropped last so a failed step leaves the card in the inbox.
+    const steps: string[][] = [];
+    if (isSkip) {
+      steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
+      steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
+    } else {
+      steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
+      steps.push(["-C", input.dir, "label", "add", input.id, "decided"]);
+      steps.push(["-C", input.dir, "label", "remove", input.id, "human"]);
+    }
 
-  for (const step of steps) {
-    const result = await run(step);
-    if (result.code !== 0)
-      return `bd ${step[2]} failed (exit ${result.code})`;
+    for (const step of steps) {
+      const result = await run(step);
+      if (result.code !== 0)
+        return `bd ${step[2]} failed (exit ${result.code})`;
+    }
+    return null;
+  } finally {
+    inFlight.delete(key);
   }
-  return null;
 }
 
 export function inboxHtml(cards: Card[]): string {
@@ -336,6 +349,7 @@ export function inboxHtml(cards: Card[]): string {
     if (decide && !("error" in decide)) {
       body = `<p>${esc(decide.q)}</p>`;
       if (decide.context) body += `<p>${esc(decide.context)}</p>`;
+      if (decide.tail) body += `<pre class="tail">${esc(decide.tail)}</pre>`;
       const optButtons = decide.options.map((o) => {
         const rec = o.rec ? ` <span class="rec">recommended</span>` : "";
         return `<button name="action" value="accept:${o.id}">${esc(o.title)}${rec}<br>${esc(o.body)}</button>`;
