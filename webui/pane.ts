@@ -14,6 +14,7 @@ export type Card = {
   source: string;
   legacy?: boolean;
   description?: string;
+  skipped?: true;
 };
 
 export const bdRun: Run = async (args) => {
@@ -82,7 +83,8 @@ export function parsePort(v: string | undefined): number {
 
 export async function loadCards(
   dirs: string[],
-  run: Run = bdRun
+  run: Run = bdRun,
+  now: number = Date.now()
 ): Promise<{ cards: Card[]; errors: string[] }> {
   const errors: string[] = [];
   const seen = new Set<string>();
@@ -128,19 +130,37 @@ export async function loadCards(
         continue;
       }
       const item = raw as Record<string, unknown>;
-      if (item.status !== "open" && item.status !== "in_progress") continue;
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      cards.push({
-        id: item.id,
-        title: item.title,
-        priority: item.priority,
-        updated: item.updated_at,
-        source: r.dir,
-        ...(typeof item.description === "string"
-          ? { description: item.description }
-          : {}),
-      });
+      // A skipped card is deferred until now, so a due deferred card is still waiting.
+      if (item.status === "open" || item.status === "in_progress") {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        cards.push({
+          id: item.id,
+          title: item.title,
+          priority: item.priority,
+          updated: item.updated_at,
+          source: r.dir,
+          ...(typeof item.description === "string"
+            ? { description: item.description }
+            : {}),
+        });
+      } else if (item.status === "deferred" && typeof item.defer_until === "string") {
+        const until = Date.parse(item.defer_until);
+        if (Number.isNaN(until) || until > now) continue;
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        cards.push({
+          id: item.id,
+          title: item.title,
+          priority: item.priority,
+          updated: item.updated_at,
+          source: r.dir,
+          skipped: true,
+          ...(typeof item.description === "string"
+            ? { description: item.description }
+            : {}),
+        });
+      }
     }
     if (invalid > 0) {
       errors.push(`${r.dir}: ${invalid} malformed items skipped`);
@@ -148,6 +168,7 @@ export async function loadCards(
   }
 
   cards.sort((a, b) => {
+    if (a.skipped !== b.skipped) return a.skipped ? 1 : -1;
     if (a.priority !== b.priority) return a.priority - b.priority;
     return a.updated.localeCompare(b.updated);
   });
@@ -339,7 +360,8 @@ export function inboxHtml(cards: Card[]): string {
       if (c.description) body += `<p>${esc(c.description)}</p>`;
       body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><button name="action" value="accept">Accept</button><textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
     }
-    return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}</p><time>${esc(
+    const skipTag = c.skipped ? '<span class="tag">skipped</span>' : "";
+    return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}${skipTag}</p><time>${esc(
       c.updated
     )}</time>${badge}${body}</article>`;
   });
