@@ -30,7 +30,7 @@ test("applyDecision reads the card first, then writes", async () => {
   const r = await decide("accept:B", waiting(CARD));
   expect(r.err).toBeNull();
   expect(r.calls[0]).toEqual(["-C", "/a", "show", "x-1", "--json"]);
-  expect(r.writes().length).toBe(3);
+  expect(r.writes().length).toBe(2);
 });
 
 test("applyDecision: a card that cannot be read gets no verdict", async () => {

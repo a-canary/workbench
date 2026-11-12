@@ -68,13 +68,13 @@ test("inboxHtml: a card with no decide block shows its text escaped and a plain 
 });
 
 // The verdict comment is written first: a card must never carry `decided` without its verdict.
-test("applyDecision accept: writes the DECISION comment, then adds decided, only then drops human", async () => {
+// The two label changes are one command, so a card never carries both labels.
+test("applyDecision accept: writes the DECISION comment, then moves the labels in one command", async () => {
   const { calls, run } = recorder();
   expect(await applyDecision({ dir: "/a", id: "x-1", action: "accept:B", text: " go slow " }, ["/a"], run)).toBeNull();
   expect(calls).toEqual([
     ["-C", "/a", "comments", "add", "--author", "operator", "--", "x-1", "DECISION accept B: go slow"],
-    ["-C", "/a", "label", "add", "x-1", "decided"],
-    ["-C", "/a", "label", "remove", "x-1", "human"],
+    ["-C", "/a", "update", "x-1", "--add-label", "decided", "--remove-label", "human"],
   ]);
 });
 
@@ -82,14 +82,13 @@ test("applyDecision reject, reply and skip", async () => {
   const rej = recorder();
   expect(await applyDecision({ dir: "/a", id: "x-1", action: "reject", text: "" }, ["/a"], rej.run)).toBeNull();
   expect(rej.calls[0]!.at(-1)).toBe("DECISION reject");
-  expect(rej.calls.length).toBe(3);
+  expect(rej.calls.length).toBe(2);
 
   const reply = recorder(); // defer with a note is a reply: decided, leaves the inbox
   expect(await applyDecision({ dir: "/a", id: "x-1", action: "defer", text: "what about C?" }, ["/a"], reply.run)).toBeNull();
   expect(reply.calls.map((c) => c.slice(2))).toEqual([
     ["comments", "add", "--author", "operator", "--", "x-1", "DECISION reply: what about C?"],
-    ["label", "add", "x-1", "decided"],
-    ["label", "remove", "x-1", "human"],
+    ["update", "x-1", "--add-label", "decided", "--remove-label", "human"],
   ]);
 
   const skip = recorder(); // defer with no note is a skip: stays a human card, goes to the back
@@ -118,10 +117,10 @@ test("applyDecision refuses bad input without calling bd, and stops at the first
   expect(err).toContain("comments");
   expect(broken.calls.length).toBe(1); // no label was touched: the card stays in the inbox, not marked decided
 
-  const noLabel = recorder((a) => a[2] === "label" && a[3] === "add");
+  const noLabel = recorder((a) => a[2] === "update");
   const err2 = await applyDecision({ dir: "/a", id: "x-1", action: "accept:A", text: "" }, ["/a"], noLabel.run);
-  expect(err2).toContain("label");
-  expect(noLabel.calls.some((c) => c[2] === "label" && c[3] === "remove")).toBe(false); // still a human card
+  expect(err2).toContain("update");
+  expect(noLabel.calls.length).toBe(2); // the comment, then the failed label move: still a human card
 });
 
 test("sameOrigin: browsers posting from another site are refused; clients that send neither header pass", () => {
@@ -141,7 +140,7 @@ test("handle POST /inbox/decide: applies the verdict and returns to the inbox; r
   const res = await handle(post({ dir: "/a", id: "x-1", action: "accept:A", text: "" }), { beadDirs: ["/a"], run: ok.run });
   expect(res.status).toBe(303);
   expect(res.headers.get("location")).toBe("/inbox");
-  expect(ok.calls.at(-1)).toEqual(["-C", "/a", "label", "remove", "x-1", "human"]);
+  expect(ok.calls.at(-1)).toEqual(["-C", "/a", "update", "x-1", "--add-label", "decided", "--remove-label", "human"]);
 
   const cross = recorder();
   const blocked = await handle(post({ dir: "/a", id: "x-1", action: "accept:A", text: "" }, { "sec-fetch-site": "cross-site" }), { beadDirs: ["/a"], run: cross.run });
