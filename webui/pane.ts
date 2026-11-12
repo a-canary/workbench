@@ -23,7 +23,7 @@ export const bdRun: Run = async (args) => {
   return { code, out };
 };
 
-export function loadConfig(dir: string): { beadDirs: string[] } {
+export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[] } {
   const path = `${dir}/pane.json`;
   let raw: string;
   try {
@@ -45,7 +45,49 @@ export function loadConfig(dir: string): { beadDirs: string[] } {
   ) {
     throw new Error(`bad pane.json: ${path}: beadDirs must be an array of strings`);
   }
-  return cfg as { beadDirs: string[] };
+  const obj = cfg as { beadDirs: string[]; hosts?: unknown };
+  if (obj.hosts !== undefined) {
+    if (!Array.isArray(obj.hosts) || obj.hosts.some((h) => typeof h !== "string")) {
+      throw new Error(`bad pane.json: ${path}: hosts must be an array of strings`);
+    }
+    return { beadDirs: obj.beadDirs, hosts: obj.hosts };
+  }
+  return { beadDirs: obj.beadDirs };
+}
+
+export function allowedHosts(
+  cfg: { hosts?: string[] },
+  host: string,
+  port: number
+): string[] {
+  if (cfg.hosts && cfg.hosts.length > 0) {
+    return cfg.hosts.map((h) => h.toLowerCase());
+  }
+  const set = new Set<string>();
+  set.add(`${host}:${port}`);
+  set.add(`localhost:${port}`);
+  set.add(`127.0.0.1:${port}`);
+  const out: string[] = [];
+  const ordered = [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`];
+  for (const h of ordered) {
+    if (set.has(h)) {
+      out.push(h);
+      set.delete(h);
+    }
+  }
+  return out;
+}
+
+export function parsePort(v: string | undefined): number {
+  if (v === undefined) return 8081;
+  if (!/^[0-9]+$/.test(v)) {
+    throw new Error(`PORT must be a number from 1 to 65535, got "${v}"`);
+  }
+  const n = Number(v);
+  if (n < 1 || n > 65535) {
+    throw new Error(`PORT must be a number from 1 to 65535, got "${v}"`);
+  }
+  return n;
 }
 
 export async function loadCards(
@@ -334,8 +376,15 @@ body{background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
 
 export async function handle(
   req: Request,
-  deps: { beadDirs: string[]; run?: Run }
+  deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
 ): Promise<Response> {
+  if (deps.hosts && deps.hosts.length > 0) {
+    const h = req.headers.get("host")?.toLowerCase();
+    if (!h || !deps.hosts.includes(h)) {
+      return new Response("wrong host", { status: 421 });
+    }
+  }
+
   const path = new URL(req.url).pathname;
 
   if (path === "/") {
