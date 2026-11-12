@@ -247,7 +247,6 @@ export async function applyDecision(
 
   const isReply = verb === "defer" && text !== "";
   const isSkip = verb === "defer" && text === "";
-  const decides = verb === "accept" || verb === "reject" || isReply;
 
   let body: string;
   if (isReply) {
