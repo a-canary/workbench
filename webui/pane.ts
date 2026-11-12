@@ -175,6 +175,141 @@ export function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+export type Landed = {
+  id: string;
+  title: string;
+  kind: string;
+  closed: string;
+  reason: string;
+  source: string;
+};
+
+export async function loadLanded(
+  dirs: string[],
+  run: Run = bdRun,
+  now: number = Date.now(),
+  days: number = 3
+): Promise<{ items: Landed[]; errors: string[] }> {
+  const since = new Date(now - days * 86400000).toISOString();
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  const items: Landed[] = [];
+
+  const results = await Promise.all(
+    dirs.map(async (dir) => {
+      try {
+        const result = await run([
+          "-C", dir, "list", "--status", "closed",
+          "--closed-after", since, "--limit", "0", "--json",
+        ]);
+        if (result.code !== 0) {
+          return { dir, error: `${dir}: bd exited ${result.code}` };
+        }
+        let rows: unknown[];
+        try {
+          rows = JSON.parse(result.out);
+          if (!Array.isArray(rows)) throw new Error("not an array");
+        } catch {
+          return { dir, error: `${dir}: bad JSON from bd` };
+        }
+        return { dir, rows };
+      } catch {
+        return { dir, error: `${dir}: bd could not run` };
+      }
+    })
+  );
+
+  for (const r of results) {
+    if ("error" in r) {
+      errors.push(r.error);
+      continue;
+    }
+    let invalid = 0;
+    for (const raw of r.rows) {
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        typeof (raw as Record<string, unknown>).id !== "string" ||
+        typeof (raw as Record<string, unknown>).title !== "string" ||
+        typeof (raw as Record<string, unknown>).closed_at !== "string" ||
+        // The feed prints the day and time straight from this value.
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test((raw as Record<string, unknown>).closed_at as string)
+      ) {
+        invalid++;
+        continue;
+      }
+      const row = raw as Record<string, unknown>;
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      items.push({
+        id: row.id,
+        title: row.title,
+        kind: typeof row.issue_type === "string" ? row.issue_type : "",
+        closed: row.closed_at,
+        reason: typeof row.close_reason === "string" ? row.close_reason : "",
+        source: r.dir,
+      });
+    }
+    if (invalid > 0) {
+      errors.push(`${r.dir}: ${invalid} malformed items skipped`);
+    }
+  }
+
+  items.sort((a, b) => b.closed.localeCompare(a.closed));
+  return { items, errors };
+}
+
+export function feedHtml(items: Landed[], place?: string): string {
+  const placeName = (s: string) => s.replace(/\/+$/, "").split("/").pop() || s;
+
+  // Build counts per place from unfiltered items
+  const counts = new Map<string, number>();
+  for (const i of items) {
+    const p = placeName(i.source);
+    counts.set(p, (counts.get(p) ?? 0) + 1);
+  }
+
+  // Filter links
+  const links: string[] = [];
+  const allActive = place === undefined;
+  links.push(
+    `<a href="/feed"${allActive ? ' aria-current="page"' : ""}>all ${items.length}</a>`
+  );
+  const placeNames = [...counts.keys()].sort();
+  for (const p of placeNames) {
+    const active = place === p;
+    links.push(
+      `<a href="/feed?place=${encodeURIComponent(p)}"${active ? ' aria-current="page"' : ""}>${esc(p)} ${counts.get(p)}</a>`
+    );
+  }
+
+  // Filter items
+  const shown = place === undefined ? items : items.filter((i) => placeName(i.source) === place);
+
+  if (shown.length === 0) {
+    return `<div class="feed-links">${links.join(" ")}</div><p>Nothing landed in the last few days</p>`;
+  }
+
+  // Group by day
+  const byDay = new Map<string, Landed[]>();
+  for (const i of shown) {
+    const day = i.closed.slice(0, 10);
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day)!.push(i);
+  }
+
+  const days = [...byDay.keys()].sort().reverse();
+  const groups = days.map((day) => {
+    const lines = byDay.get(day)!.map((i) => {
+      const time = i.closed.slice(11, 16);
+      return `<div class="feed-item"><time>${time}</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
+    });
+    return `<h2>${day}</h2>${lines.join("")}`;
+  });
+
+  return `<div class="feed-links">${links.join(" ")}</div>${groups.join("")}`;
+}
+
 export type Decide = {
   q: string;
   context: string;
@@ -405,6 +540,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #focus{margin-left:140px;margin-right:300px;padding:1.5rem;min-height:100vh}
 #assistant{position:fixed;right:0;top:0;bottom:0;width:300px;background:var(--nav-bg);padding:1.5rem;overflow:auto}
 #assistant h2{font-size:1rem;margin-bottom:.75rem}
+.feed-links{margin-bottom:1rem;line-height:1.6}
+.feed-links a{color:inherit;margin-right:.5rem;white-space:nowrap}
+.feed-links a[aria-current="page"]{font-weight:700}
+.feed-links~h2{font-size:1rem;margin:1.25rem 0 .25rem}
+.feed-item{padding:.5rem 0;border-top:1px solid var(--nav-bg);overflow-wrap:anywhere}
+.feed-item time,.feed-place,.feed-id,.feed-reason{opacity:.7;font-size:.85em}
+.feed-item b{display:block;font-weight:600}
 @media(max-width:700px){
   #places{position:fixed;bottom:0;left:0;right:0;top:auto;width:100%;flex-direction:row;justify-content:space-around;padding:.5rem}
   #focus{margin:0;padding:1rem 1rem 4rem}
@@ -507,6 +649,25 @@ async function route(
         : "";
     const html = shell("inbox", inboxHtml(cards) + errorsHtml, {
       inbox: cards.length,
+    });
+    return new Response(html, {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (path === "/feed") {
+    const [cards, landed] = await Promise.all([
+      loadCards(deps.beadDirs, deps.run),
+      loadLanded(deps.beadDirs, deps.run),
+    ]);
+    const url = new URL(req.url);
+    const place = url.searchParams.get("place") ?? undefined;
+    const errorsHtml = landed.errors
+      .map((e) => `<p class="warn">${esc(e)}</p>`)
+      .join("");
+    const html = shell("feed", feedHtml(landed.items, place) + errorsHtml, {
+      inbox: cards.cards.length,
     });
     return new Response(html, {
       status: 200,
