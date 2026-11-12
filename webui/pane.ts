@@ -131,36 +131,24 @@ export async function loadCards(
       }
       const item = raw as Record<string, unknown>;
       // A skipped card is deferred until now, so a due deferred card is still waiting.
-      if (item.status === "open" || item.status === "in_progress") {
-        if (seen.has(item.id)) continue;
-        seen.add(item.id);
-        cards.push({
-          id: item.id,
-          title: item.title,
-          priority: item.priority,
-          updated: item.updated_at,
-          source: r.dir,
-          ...(typeof item.description === "string"
-            ? { description: item.description }
-            : {}),
-        });
-      } else if (item.status === "deferred" && typeof item.defer_until === "string") {
-        const until = Date.parse(item.defer_until);
-        if (Number.isNaN(until) || until > now) continue;
-        if (seen.has(item.id)) continue;
-        seen.add(item.id);
-        cards.push({
-          id: item.id,
-          title: item.title,
-          priority: item.priority,
-          updated: item.updated_at,
-          source: r.dir,
-          skipped: true,
-          ...(typeof item.description === "string"
-            ? { description: item.description }
-            : {}),
-        });
-      }
+      const skipped =
+        item.status === "deferred" &&
+        typeof item.defer_until === "string" &&
+        Date.parse(item.defer_until) <= now;
+      if (item.status !== "open" && item.status !== "in_progress" && !skipped) continue;
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      cards.push({
+        id: item.id,
+        title: item.title,
+        priority: item.priority,
+        updated: item.updated_at,
+        source: r.dir,
+        ...(skipped ? { skipped: true as const } : {}),
+        ...(typeof item.description === "string"
+          ? { description: item.description }
+          : {}),
+      });
     }
     if (invalid > 0) {
       errors.push(`${r.dir}: ${invalid} malformed items skipped`);
