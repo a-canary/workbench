@@ -38,7 +38,7 @@ test("loadLanded: the window is a parameter; malformed rows are counted, not sho
     return { code: 0, out: JSON.stringify([{ id: "z-1" }, null, c("z-2", "2026-11-12T01:00:00Z", { close_reason: undefined })]) };
   };
   const r = await loadLanded(["/a"], run, NOW, 1);
-  expect(calls[0]![5]).toBe("2026-11-11T12:00:00.000Z");
+  expect(calls[0]![6]).toBe("2026-11-11T12:00:00.000Z");
   expect(r.items.map((i) => i.id)).toEqual(["z-2"]);
   expect(r.items[0]!.reason).toBe("");
   expect(r.errors).toEqual(["/a: 2 malformed items skipped"]);
