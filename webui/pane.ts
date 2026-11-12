@@ -231,7 +231,9 @@ export async function loadLanded(
         typeof raw !== "object" ||
         typeof (raw as Record<string, unknown>).id !== "string" ||
         typeof (raw as Record<string, unknown>).title !== "string" ||
-        typeof (raw as Record<string, unknown>).closed_at !== "string"
+        typeof (raw as Record<string, unknown>).closed_at !== "string" ||
+        // The feed prints the day and time straight from this value.
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test((raw as Record<string, unknown>).closed_at as string)
       ) {
         invalid++;
         continue;
@@ -258,7 +260,7 @@ export async function loadLanded(
 }
 
 export function feedHtml(items: Landed[], place?: string): string {
-  const placeName = (s: string) => s.split("/").pop() ?? s;
+  const placeName = (s: string) => s.replace(/\/+$/, "").split("/").pop() || s;
 
   // Build counts per place from unfiltered items
   const counts = new Map<string, number>();
@@ -300,7 +302,7 @@ export function feedHtml(items: Landed[], place?: string): string {
   const groups = days.map((day) => {
     const lines = byDay.get(day)!.map((i) => {
       const time = i.closed.slice(11, 16);
-      return `<div class="feed-item"><time>${time}</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> ${esc(i.title)}${i.reason ? ` — ${esc(i.reason)}` : ""}</div>`;
+      return `<div class="feed-item"><time>${time}</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
     });
     return `<h2>${day}</h2>${lines.join("")}`;
   });
@@ -539,6 +541,12 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #assistant{position:fixed;right:0;top:0;bottom:0;width:300px;background:var(--nav-bg);padding:1.5rem;overflow:auto}
 #assistant h2{font-size:1rem;margin-bottom:.75rem}
 .feed-links{margin-bottom:1rem;line-height:1.6}
+.feed-links a{color:inherit;margin-right:.5rem;white-space:nowrap}
+.feed-links a[aria-current="page"]{font-weight:700}
+.feed-links~h2{font-size:1rem;margin:1.25rem 0 .25rem}
+.feed-item{padding:.5rem 0;border-top:1px solid var(--nav-bg);overflow-wrap:anywhere}
+.feed-item time,.feed-place,.feed-id,.feed-reason{opacity:.7;font-size:.85em}
+.feed-item b{display:block;font-weight:600}
 @media(max-width:700px){
   #places{position:fixed;bottom:0;left:0;right:0;top:auto;width:100%;flex-direction:row;justify-content:space-around;padding:.5rem}
   #focus{margin:0;padding:1rem 1rem 4rem}

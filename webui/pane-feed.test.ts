@@ -135,3 +135,15 @@ test("GET /feed?place=: filters by place; an unknown place shows nothing landed"
   expect(miss).not.toContain("t x-2");
   expect(miss).toContain("Nothing landed");
 });
+
+test("loadLanded: a close time that is not a timestamp is malformed, so day and time are always safe to print", async () => {
+  const run: Run = async () => ({ code: 0, out: JSON.stringify([c("q-1", "<script>x"), c("q-2", "yesterday"), c("q-3", "2026-11-12T03:04:05Z")]) });
+  const r = await loadLanded(["/a"], run, NOW);
+  expect(r.items.map((i) => i.id)).toEqual(["q-3"]);
+  expect(r.errors).toEqual(["/a: 2 malformed items skipped"]);
+});
+
+test("feedHtml: a configured path with a trailing slash still gets its last part as the place name", () => {
+  const html = feedHtml([item("x-1", "2026-11-12T08:05:00Z", "/work/alpha/")]);
+  expect(html).toMatch(/href="\/feed\?place=alpha"[^>]*>alpha 1</);
+});
