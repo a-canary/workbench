@@ -63,19 +63,9 @@ export function allowedHosts(
   if (cfg.hosts && cfg.hosts.length > 0) {
     return cfg.hosts.map((h) => h.toLowerCase());
   }
-  const set = new Set<string>();
-  set.add(`${host}:${port}`);
-  set.add(`localhost:${port}`);
-  set.add(`127.0.0.1:${port}`);
-  const out: string[] = [];
-  const ordered = [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`];
-  for (const h of ordered) {
-    if (set.has(h)) {
-      out.push(h);
-      set.delete(h);
-    }
-  }
-  return out;
+  // No list configured: the bound address and this machine's local names. A pane reached by any
+  // other name (a machine name, or any address when bound to all of them) needs `hosts` in pane.json.
+  return [...new Set([`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`])];
 }
 
 export function parsePort(v: string | undefined): number {
@@ -378,6 +368,8 @@ export async function handle(
   req: Request,
   deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
 ): Promise<Response> {
+  // The pane has no login. Another site can point its own name at the pane's address and then looks
+  // same-origin to the browser; answering only to the pane's own names shuts that out.
   if (deps.hosts && deps.hosts.length > 0) {
     const h = req.headers.get("host")?.toLowerCase();
     if (!h || !deps.hosts.includes(h)) {
