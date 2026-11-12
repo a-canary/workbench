@@ -164,9 +164,9 @@ export async function applyDecision(
   if (!/^[a-z0-9][a-z0-9_.]*(-[a-z0-9_.]+)+$/i.test(input.id))
     return "bad bead id";
   const parts = input.action.split(":");
-  const verb = parts[0];
+  const verb = parts[0] ?? "";
   const option = parts.length > 1 ? parts[1] : undefined;
-  if (!["accept", "reject", "defer", "comment"].includes(verb))
+  if (parts.length > 2 || !["accept", "reject", "defer", "comment"].includes(verb))
     return "bad action";
   if (
     option !== undefined &&
@@ -324,13 +324,12 @@ export async function handle(
       return new Response("forbidden", { status: 403 });
     }
     const form = await req.formData();
-    const dir = typeof form.get("dir") === "string" ? form.get("dir") : "";
-    const id = typeof form.get("id") === "string" ? form.get("id") : "";
-    const action =
-      typeof form.get("action") === "string" ? form.get("action") : "";
-    const text = typeof form.get("text") === "string" ? form.get("text") : "";
+    const field = (k: string) => {
+      const v = form.get(k);
+      return typeof v === "string" ? v : "";
+    };
     const err = await applyDecision(
-      { dir, id, action, text },
+      { dir: field("dir"), id: field("id"), action: field("action"), text: field("text") },
       deps.beadDirs,
       deps.run
     );
