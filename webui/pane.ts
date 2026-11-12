@@ -17,7 +17,7 @@ export type Card = {
 };
 
 export const bdRun: Run = async (args) => {
-  const proc = Bun.spawn(["bd", ...args], { stdout: "pipe" });
+  const proc = Bun.spawn(["bd", ...args], { stdout: "pipe", timeout: 15000 });
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
   return { code, out };
@@ -31,11 +31,21 @@ export function loadConfig(dir: string): { beadDirs: string[] } {
   } catch {
     throw new Error(`missing config: ${path}`);
   }
-  const cfg = JSON.parse(raw);
-  if (!Array.isArray(cfg.beadDirs)) {
-    throw new Error(`bad pane.json: missing beadDirs array`);
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    throw new Error(`bad pane.json: ${path}: invalid JSON`);
   }
-  return cfg;
+  if (
+    cfg === null ||
+    typeof cfg !== "object" ||
+    !Array.isArray((cfg as { beadDirs?: unknown }).beadDirs) ||
+    (cfg as { beadDirs: unknown[] }).beadDirs.some((d) => typeof d !== "string")
+  ) {
+    throw new Error(`bad pane.json: ${path}: beadDirs must be an array of strings`);
+  }
+  return cfg as { beadDirs: string[] };
 }
 
 export async function loadCards(
@@ -46,21 +56,46 @@ export async function loadCards(
   const seen = new Set<string>();
   const cards: Card[] = [];
 
-  for (const dir of dirs) {
-    const result = await run(["-C", dir, "human", "list", "--json"]);
-    if (result.code !== 0) {
-      errors.push(`${dir}: bd exited ${result.code}`);
+  const results = await Promise.all(
+    dirs.map(async (dir) => {
+      try {
+        const result = await run(["-C", dir, "human", "list", "--json"]);
+        if (result.code !== 0) {
+          return { dir, error: `${dir}: bd exited ${result.code}` };
+        }
+        let items: unknown[];
+        try {
+          items = JSON.parse(result.out);
+          if (!Array.isArray(items)) throw new Error("not an array");
+        } catch {
+          return { dir, error: `${dir}: bad JSON from bd` };
+        }
+        return { dir, items };
+      } catch {
+        return { dir, error: `${dir}: bd could not run` };
+      }
+    })
+  );
+
+  for (const r of results) {
+    if ("error" in r) {
+      errors.push(r.error);
       continue;
     }
-    let items: unknown[];
-    try {
-      items = JSON.parse(result.out);
-      if (!Array.isArray(items)) throw new Error("not an array");
-    } catch {
-      errors.push(`${dir}: bad JSON from bd`);
-      continue;
-    }
-    for (const item of items as Record<string, unknown>[]) {
+    let invalid = 0;
+    for (const raw of r.items) {
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        typeof (raw as Record<string, unknown>).id !== "string" ||
+        typeof (raw as Record<string, unknown>).title !== "string" ||
+        typeof (raw as Record<string, unknown>).priority !== "number" ||
+        typeof (raw as Record<string, unknown>).updated_at !== "string"
+      ) {
+        invalid++;
+        continue;
+      }
+      const item = raw as Record<string, unknown>;
       if (item.status !== "open" && item.status !== "in_progress") continue;
       if (seen.has(item.id)) continue;
       seen.add(item.id);
@@ -69,11 +104,14 @@ export async function loadCards(
         title: item.title,
         priority: item.priority,
         updated: item.updated_at,
-        source: dir,
+        source: r.dir,
         ...(typeof item.description === "string"
           ? { description: item.description }
           : {}),
       });
+    }
+    if (invalid > 0) {
+      errors.push(`${r.dir}: ${invalid} malformed items skipped`);
     }
   }
 
@@ -358,7 +396,10 @@ export async function handle(
   }
 
   if (PLACES.includes(path.slice(1) as typeof PLACES[number])) {
-    const html = shell(path.slice(1), "<p>not built yet</p>", { inbox: 0 });
+    const { cards } = await loadCards(deps.beadDirs, deps.run);
+    const html = shell(path.slice(1), "<p>not built yet</p>", {
+      inbox: cards.length,
+    });
     return new Response(html, {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },
