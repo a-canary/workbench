@@ -315,16 +315,17 @@ export async function applyDecision(
       if (text !== "") body += `: ${text}`;
     }
 
-    // The verdict comment is written first so a card never carries `decided` without its
-    // verdict; `human` is dropped last so a failed step leaves the card in the inbox.
+    // The verdict comment is written first so a card never carries `decided` without its verdict;
+    // the labels move in one command so a card never carries both. If the label move fails the
+    // card is still waiting and a retry writes the verdict again: the reader only looks at cards
+    // labelled `decided` and takes the last verdict comment.
     const steps: string[][] = [];
     if (isSkip) {
       steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
       steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
     } else {
       steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
-      steps.push(["-C", input.dir, "label", "add", input.id, "decided"]);
-      steps.push(["-C", input.dir, "label", "remove", input.id, "human"]);
+      steps.push(["-C", input.dir, "update", input.id, "--add-label", "decided", "--remove-label", "human"]);
     }
 
     for (const step of steps) {
@@ -422,6 +423,18 @@ export async function handle(
   req: Request,
   deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
 ): Promise<Response> {
+  const res = await route(req, deps);
+  // The pane has no login, so another site must not be able to show it in a frame and trick a click
+  // onto a verdict button.
+  res.headers.set("x-frame-options", "DENY");
+  res.headers.set("content-security-policy", "frame-ancestors 'none'");
+  return res;
+}
+
+async function route(
+  req: Request,
+  deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
+): Promise<Response> {
   // The pane has no login. Another site can point its own name at the pane's address and then looks
   // same-origin to the browser; answering only to the pane's own names shuts that out.
   if (deps.hosts && deps.hosts.length > 0) {
@@ -466,11 +479,16 @@ export async function handle(
       const v = form.get(k);
       return typeof v === "string" ? v : "";
     };
-    const err = await applyDecision(
-      { dir: field("dir"), id: field("id"), action: field("action"), text: field("text") },
-      deps.beadDirs,
-      deps.run
-    );
+    let err: string | null;
+    try {
+      err = await applyDecision(
+        { dir: field("dir"), id: field("id"), action: field("action"), text: field("text") },
+        deps.beadDirs,
+        deps.run
+      );
+    } catch {
+      return new Response("could not write the verdict; check the card before trying again", { status: 500 });
+    }
     if (err) {
       return new Response(err, { status: 400 });
     }
