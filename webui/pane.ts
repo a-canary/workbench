@@ -245,6 +245,43 @@ export async function applyDecision(
     return "bad option";
   const text = input.text.trim().slice(0, 4000);
 
+  // The verdict is checked against the card as it is now, so a second submit or a changed card
+  // cannot write a stray verdict.
+  const show = await run(["-C", input.dir, "show", input.id, "--json"]);
+  if (show.code !== 0) return "card not found";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(show.out);
+  } catch {
+    return "card not found";
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    parsed[0] === null ||
+    typeof parsed[0] !== "object"
+  )
+    return "card not found";
+  const card = parsed[0] as Record<string, unknown>;
+  if (
+    !Array.isArray(card.labels) ||
+    !card.labels.includes("human")
+  )
+    return "card is no longer waiting";
+  const decide = parseDecide(
+    typeof card.description === "string" ? card.description : ""
+  );
+  const hasOptions = decide !== null && !("error" in decide);
+  if (verb === "accept") {
+    if (hasOptions) {
+      if (option === undefined) return "pick one of the card's options";
+      if (!decide.options.some((o) => o.id === option))
+        return "not one of this card's options";
+    } else if (option !== undefined) {
+      return "not one of this card's options";
+    }
+  }
+
   const isReply = verb === "defer" && text !== "";
   const isSkip = verb === "defer" && text === "";
 
@@ -296,7 +333,10 @@ export function inboxHtml(cards: Card[]): string {
       });
       body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}">${optButtons.join("")}<textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
     } else {
-      if (c.description) body = `<p>${esc(c.description)}</p>`;
+      if (decide && "error" in decide) {
+        body = `<p class="warn">card format problem: ${esc(decide.error)}</p>`;
+      }
+      if (c.description) body += `<p>${esc(c.description)}</p>`;
       body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><button name="action" value="accept">Accept</button><textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
     }
     return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}</p><time>${esc(
