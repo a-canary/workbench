@@ -8,9 +8,10 @@ if (!configDir) {
   process.exit(1);
 }
 
-const cfg = loadConfig(configDir);
+let cfg: ReturnType<typeof loadConfig>;
 let port: number;
 try {
+  cfg = loadConfig(configDir);
   port = parsePort(process.env.PORT);
 } catch (e) {
   console.error((e as Error).message);
