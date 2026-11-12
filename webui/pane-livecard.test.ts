@@ -42,7 +42,7 @@ test("applyDecision: a card that cannot be read gets no verdict", async () => {
 });
 
 test("applyDecision: a card that is no longer waiting gets no second verdict", async () => {
-  for (const labels of [["decided"], [], undefined, "human"]) {
+  for (const labels of [["decided"], [], null, "human"]) {
     for (const action of ["accept:A", "reject", "defer"]) {
       const r = await decide(action, waiting(CARD, labels));
       expect(r.err).toBe("card is no longer waiting");
@@ -76,8 +76,8 @@ test("applyDecision: a card with no options, or a malformed one, takes a plain a
 
 test("inboxHtml: a malformed card says so instead of looking like a plain card", () => {
   const card = { id: "x-1", title: "T", priority: 2, updated: "2026-01-01T00:00:00Z", source: "/a" };
-  const html = inboxHtml([{ ...card, description: "<decide><q>No end?</q>" }], []);
+  const html = inboxHtml([{ ...card, description: "<decide><q>No end?</q>" }]);
   expect(html).toContain("card format problem");
-  expect(inboxHtml([{ ...card, description: "just some prose" }], [])).not.toContain("card format problem");
-  expect(inboxHtml([{ ...card, description: CARD }], [])).not.toContain("card format problem");
+  expect(inboxHtml([{ ...card, description: "just some prose" }])).not.toContain("card format problem");
+  expect(inboxHtml([{ ...card, description: CARD }])).not.toContain("card format problem");
 });
