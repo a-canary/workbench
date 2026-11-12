@@ -13,6 +13,7 @@ export type Card = {
   updated: string;
   source: string;
   legacy?: boolean;
+  description?: string;
 };
 
 export const bdRun: Run = async (args) => {
@@ -69,6 +70,9 @@ export async function loadCards(
         priority: item.priority,
         updated: item.updated_at,
         source: dir,
+        ...(typeof item.description === "string"
+          ? { description: item.description }
+          : {}),
       });
     }
   }
@@ -89,15 +93,155 @@ export function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+export type Decide = {
+  q: string;
+  context: string;
+  options: { id: string; title: string; body: string; rec: boolean }[];
+  tail: string;
+};
+
+export function parseDecide(
+  desc: string
+): Decide | { error: string } | null {
+  const s = desc.indexOf("<decide>");
+  const e = desc.indexOf("</decide>");
+  if (s < 0) return null;
+  if (e < s) return { error: "no </decide>" };
+  const inner = desc.slice(s + 8, e);
+  const qs = [...inner.matchAll(/<q>([\s\S]*?)<\/q>/g)];
+  if (qs.length !== 1) return { error: `${qs.length} <q>, need exactly 1` };
+  const options = [
+    ...inner.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g),
+  ].map((m) => {
+    const at = (k: string) =>
+      new RegExp(`\\b${k}="([^"]*)"`).exec(m[1]!)?.[1] ?? "";
+    return {
+      id: at("id"),
+      title: at("title").trim(),
+      body: m[2]!.trim(),
+      rec: at("rec") === "1",
+    };
+  });
+  if (options.length < 2 || options.length > 5)
+    return { error: `${options.length} options, need 2-5` };
+  const ids = options.map((o) => o.id);
+  if (
+    ids.some((id) => !/^[A-E]$/.test(id)) ||
+    new Set(ids).size !== ids.length
+  )
+    return { error: "option ids must be unique A-E" };
+  if (options.some((o) => !o.title))
+    return { error: "every option needs a title" };
+  if (options.filter((o) => o.rec).length > 1)
+    return { error: "more than one rec" };
+  const context = /<context>([\s\S]*?)<\/context>/.exec(inner)?.[1]?.trim() ?? "";
+  return {
+    q: qs[0]![1]!.trim(),
+    context,
+    options,
+    tail: (desc.slice(0, s) + desc.slice(e + 9)).trim(),
+  };
+}
+
+export function sameOrigin(
+  h: (k: string) => string | undefined,
+  host: string | undefined
+): boolean {
+  const site = h("sec-fetch-site");
+  const origin = h("origin");
+  if (site && site !== "same-origin" && site !== "none") return false;
+  if (origin && (!host || origin.replace(/^https?:\/\//, "") !== host))
+    return false;
+  return true;
+}
+
+export async function applyDecision(
+  input: { dir: string; id: string; action: string; text: string },
+  dirs: string[],
+  run: Run = bdRun
+): Promise<string | null> {
+  if (!dirs.includes(input.dir)) return "unknown workspace";
+  if (!/^[a-z0-9][a-z0-9_.]*(-[a-z0-9_.]+)+$/i.test(input.id))
+    return "bad bead id";
+  const parts = input.action.split(":");
+  const verb = parts[0];
+  const option = parts.length > 1 ? parts[1] : undefined;
+  if (!["accept", "reject", "defer", "comment"].includes(verb))
+    return "bad action";
+  if (
+    option !== undefined &&
+    (verb !== "accept" || !/^[A-E]$/.test(option))
+  )
+    return "bad option";
+  const text = input.text.trim().slice(0, 4000);
+  if (verb === "comment" && text === "") return "comment is empty";
+
+  const isReply = verb === "defer" && text !== "";
+  const isSkip = verb === "defer" && text === "";
+  const decides = verb === "accept" || verb === "reject" || isReply;
+
+  let body: string;
+  if (verb === "comment") {
+    body = text;
+  } else if (isReply) {
+    body = `DECISION reply: ${text}`;
+  } else if (isSkip) {
+    body = "DECISION skip";
+  } else {
+    body = `DECISION ${verb}`;
+    if (option !== undefined) body += ` ${option}`;
+    if (text !== "") body += `: ${text}`;
+  }
+
+  const steps: string[][] = [];
+  if (decides)
+    steps.push(["-C", input.dir, "label", "add", input.id, "decided"]);
+  if (isSkip) steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
+  steps.push([
+    "-C",
+    input.dir,
+    "comments",
+    "add",
+    "--author",
+    "operator",
+    "--",
+    input.id,
+    body,
+  ]);
+  if (decides)
+    steps.push(["-C", input.dir, "label", "remove", input.id, "human"]);
+
+  for (const step of steps) {
+    const result = await run(step);
+    if (result.code !== 0)
+      return `bd ${step[2]} failed (exit ${result.code})`;
+  }
+  return null;
+}
+
 export function inboxHtml(cards: Card[]): string {
   if (cards.length === 0) return "<p>Nothing waiting on you</p>";
   const parts = cards.map((c) => {
     const badge = c.legacy
       ? `<span class="legacy">legacy · ${esc(c.source)} · ${esc(c.updated)}</span>`
       : "";
+    const decide = parseDecide(c.description ?? "");
+    let body = "";
+    if (decide && !("error" in decide)) {
+      body = `<p>${esc(decide.q)}</p>`;
+      if (decide.context) body += `<p>${esc(decide.context)}</p>`;
+      const optButtons = decide.options.map((o) => {
+        const rec = o.rec ? ` <span class="rec">recommended</span>` : "";
+        return `<button name="action" value="accept:${o.id}">${esc(o.title)}${rec}<br>${esc(o.body)}</button>`;
+      });
+      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}">${optButtons.join("")}<textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
+    } else {
+      if (c.description) body = `<p>${esc(c.description)}</p>`;
+      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><button name="action" value="accept">Accept</button><textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
+    }
     return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}</p><time>${esc(
       c.updated
-    )}</time>${badge}</article>`;
+    )}</time>${badge}${body}</article>`;
   });
   return parts.join("");
 }
@@ -165,6 +309,38 @@ export async function handle(
 
   if (path === "/healthz") {
     return new Response("ok");
+  }
+
+  if (path === "/inbox/decide") {
+    if (req.method !== "POST") {
+      return new Response("method not allowed", { status: 405 });
+    }
+    if (
+      !sameOrigin(
+        (k) => req.headers.get(k) ?? undefined,
+        req.headers.get("host") ?? undefined
+      )
+    ) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const form = await req.formData();
+    const dir = typeof form.get("dir") === "string" ? form.get("dir") : "";
+    const id = typeof form.get("id") === "string" ? form.get("id") : "";
+    const action =
+      typeof form.get("action") === "string" ? form.get("action") : "";
+    const text = typeof form.get("text") === "string" ? form.get("text") : "";
+    const err = await applyDecision(
+      { dir, id, action, text },
+      deps.beadDirs,
+      deps.run
+    );
+    if (err) {
+      return new Response(err, { status: 400 });
+    }
+    return new Response(null, {
+      status: 303,
+      headers: { location: "/inbox" },
+    });
   }
 
   if (path === "/inbox") {
