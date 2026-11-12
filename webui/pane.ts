@@ -236,7 +236,7 @@ export async function applyDecision(
   const parts = input.action.split(":");
   const verb = parts[0] ?? "";
   const option = parts.length > 1 ? parts[1] : undefined;
-  if (parts.length > 2 || !["accept", "reject", "defer", "comment"].includes(verb))
+  if (parts.length > 2 || !["accept", "reject", "defer"].includes(verb))
     return "bad action";
   if (
     option !== undefined &&
@@ -244,16 +244,13 @@ export async function applyDecision(
   )
     return "bad option";
   const text = input.text.trim().slice(0, 4000);
-  if (verb === "comment" && text === "") return "comment is empty";
 
   const isReply = verb === "defer" && text !== "";
   const isSkip = verb === "defer" && text === "";
   const decides = verb === "accept" || verb === "reject" || isReply;
 
   let body: string;
-  if (verb === "comment") {
-    body = text;
-  } else if (isReply) {
+  if (isReply) {
     body = `DECISION reply: ${text}`;
   } else if (isSkip) {
     body = "DECISION skip";
@@ -263,23 +260,17 @@ export async function applyDecision(
     if (text !== "") body += `: ${text}`;
   }
 
+  // The verdict comment is written first so a card never carries `decided` without its
+  // verdict; `human` is dropped last so a failed step leaves the card in the inbox.
   const steps: string[][] = [];
-  if (decides)
+  if (isSkip) {
+    steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
+    steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
+  } else {
+    steps.push(["-C", input.dir, "comments", "add", "--author", "operator", "--", input.id, body]);
     steps.push(["-C", input.dir, "label", "add", input.id, "decided"]);
-  if (isSkip) steps.push(["-C", input.dir, "defer", input.id, "--until=now"]);
-  steps.push([
-    "-C",
-    input.dir,
-    "comments",
-    "add",
-    "--author",
-    "operator",
-    "--",
-    input.id,
-    body,
-  ]);
-  if (decides)
     steps.push(["-C", input.dir, "label", "remove", input.id, "human"]);
+  }
 
   for (const step of steps) {
     const result = await run(step);
@@ -402,7 +393,12 @@ export async function handle(
     ) {
       return new Response("forbidden", { status: 403 });
     }
-    const form = await req.formData();
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      return new Response("bad form", { status: 400 });
+    }
     const field = (k: string) => {
       const v = form.get(k);
       return typeof v === "string" ? v : "";
