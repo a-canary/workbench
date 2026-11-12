@@ -65,7 +65,7 @@ export function allowedHosts(
   }
   // No list configured: the bound address and this machine's local names. A pane reached by any
   // other name (a machine name, or any address when bound to all of them) needs `hosts` in pane.json.
-  return [...new Set([`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`])];
+  return [...new Set([`${host}:${port}`.toLowerCase(), `localhost:${port}`, `127.0.0.1:${port}`])];
 }
 
 export function parsePort(v: string | undefined): number {

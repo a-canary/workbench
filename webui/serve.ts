@@ -16,9 +16,10 @@ try {
   console.error((e as Error).message);
   process.exit(1);
 }
-// The pane has no login: it listens on this machine only unless HOST names another address
+// The pane has no login: it listens on this machine only unless PANE_HOST names another address
 // (for example a private-network address to reach it from a phone).
-const host = process.env.HOST ?? "127.0.0.1";
+// The name is specific on purpose: some shells and containers export a generic HOST variable.
+const host = process.env.PANE_HOST || "127.0.0.1";
 
 const hosts = allowedHosts(cfg, host, port);
 
