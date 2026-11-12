@@ -25,5 +25,12 @@ const host = process.env.PANE_HOST || "127.0.0.1";
 const hosts = allowedHosts(cfg, host, port);
 
 // development: false keeps stack traces with file paths out of error responses.
-Bun.serve({ port, hostname: host, development: false, fetch: (req) => handle(req, { ...cfg, hosts }) });
+Bun.serve({
+  port,
+  hostname: host,
+  development: false,
+  // A verdict form is a few fields and a note of at most 4000 characters.
+  maxRequestBodySize: 64 * 1024,
+  fetch: (req) => handle(req, { ...cfg, hosts }),
+});
 console.log(`control pane listening on ${host}:${port}`);
