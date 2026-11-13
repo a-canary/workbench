@@ -38,6 +38,10 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR G
 unset GIT_TEMPLATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
 g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
 [ -e .git ] || [ -L .git ] && die "work dir is already a git repo"
+# Host-side git never walks into a repo it did not make; temp files stay outside the work dir.
+nested() { find . -mindepth 2 -name .git -print -quit 2>/dev/null; }
+[ -z "$(nested)" ] || die "work dir contains a nested git repo"
+case $(realpath -m -- "${TMPDIR:-/tmp}") in "$(pwd -P)"|"$(pwd -P)"/*) die "TMPDIR must be outside the work dir" ;; esac
 g init -q 2>/dev/null
 # The repo git finds from here must be the one just made, never one further up.
 if [ "$(cd "$(g rev-parse --absolute-git-dir 2>/dev/null)" 2>/dev/null && pwd -P)" != "$(pwd -P)/.git" ]; then
@@ -92,12 +96,15 @@ if [ -n "${FLOOR_METRICS:-}" ]; then
   jq -nc --argjson rc "$sandbox_rc" --argjson secs "$elapsed" \
       --arg wo "${way_out:-}" --arg sha "$wb_sha" \
       '{rung:"worker", sandbox_rc:$rc, way_out:(if $wo=="" then null else $wo end),
-        seconds:$secs, workbench_sha:(if $sha=="" then null else $sha end)}' >> "$FLOOR_METRICS"
+        seconds:$secs, workbench_sha:(if $sha=="" then null else $sha end)}' >> "$FLOOR_METRICS" \
+    || echo "floor-run: metrics line not written" >&2
 fi
 
 # Exit code: infra fault only when the sandbox failed and nothing changed (including committed).
 # The sandbox masks .git, so the worker cannot edit the repo's git config either.
-changed=$(g status --porcelain 2>/dev/null)
+# A repo the worker made is a change in itself, and so is anything git status complains about.
+if [ -n "$(nested)" ]; then changed=nested-repo
+else changed=$(g status --porcelain 2>&1) || changed=status-failed; fi
 if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ] || \
    [ "$(g rev-parse HEAD)" != "$base" ]; then
   exit 0

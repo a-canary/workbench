@@ -34,7 +34,7 @@ go() {
   mkdir "$wd/__pycache__" && echo junk > "$wd/__pycache__/a.cpython-312.pyc"
   [ -z "${prep:-}" ] || ( cd "$wd" && eval "$prep" )   # prep='cmds' go ... : extra setup inside the work dir
   ( cd "$wd" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS -u FLOOR_METRICS \
-      WORKER_SANDBOX="$tmp/stub" STUB_OUT="$out" "${envs[@]}" "$here/floor-run" "$@" ) > "$out/stdout" 2> "$out/stderr"
+      WORKER_SANDBOX="$tmp/stub" STUB_OUT="$out" ${envs[@]+"${envs[@]}"} "$here/floor-run" "$@" ) > "$out/stdout" 2> "$out/stderr"
   rc=$?
 }
 arg_after() { grep -x -A1 -- "$1" "$out/args" 2>/dev/null | tail -1; }
@@ -198,5 +198,30 @@ mkdir "$tmp/empty-tpl"
 go GIT_TEMPLATE_DIR="$tmp/empty-tpl" -- --rung worker 'x'
 [ "$rc" = 0 ] && [ "$(git -C "$wd" ls-files | grep -c pycache)" = 0 ] && [ "$(git -C "$wd" ls-files)" = a.py ] \
   && ok "litter stays out of the setup commit with an empty git template" || bad "litter stays out of the setup commit with an empty git template" "rc=$rc files: $(git -C "$wd" ls-files 2>&1 | tr '\n' ' ')"
+
+# 8s. a repo nested in the work dir before the run: refused, host-side git never walks into a repo it did not make
+prep='git init -q sub' go -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a work dir that holds a nested repo" || bad "refuses a work dir that holds a nested repo" "rc=$rc"
+
+# 8t. a repo the worker makes counts as its change, and git status is not run over it (one status call: the setup one)
+mkdir "$tmp/shim"
+printf '#!/usr/bin/env bash\necho "$*" >> "$GITLOG"\nexec %q "$@"\n' "$(command -v git)" > "$tmp/shim/git"; chmod +x "$tmp/shim/git"
+go PATH="$tmp/shim:$PATH" GITLOG="$tmp/gitlog" STUB_RC=1 STUB_DO='git init -q sub' -- --rung worker 'x'
+nstat=$(grep -c 'status --porcelain' "$tmp/gitlog" 2>/dev/null)
+[ "$rc" = 0 ] && [ "$nstat" = 1 ] && ok "a repo made by the worker is a change, no git status over it" || bad "a repo made by the worker is a change, no git status over it" "rc=$rc status calls=$nstat"
+
+# 8u. temp files must not land in the work dir (they would count as the worker's change, and the worker could read them)
+prep='mkdir t' go TMPDIR=t STUB_RC=1 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a TMPDIR inside the work dir" || bad "refuses a TMPDIR inside the work dir" "rc=$rc"
+
+# 8v. a directory the worker made unreadable is a change, not an infra fault
+go STUB_RC=1 STUB_DO='mkdir x && echo y > x/y && chmod 000 x' -- --rung worker 'x'
+chmod 755 "$wd/x" 2>/dev/null
+[ "$rc" = 0 ] && ok "an unreadable new directory counts as a change" || bad "an unreadable new directory counts as a change" "rc=$rc"
+
+# 8w. the way out must start the last line: a marker wrapped in markdown is not one
+go FLOOR_METRICS="$tmp/m8w" STUB_RC=1 STUB_SAY='**CANNOT-DO:** no' -- --rung worker 'x'
+cp "$tmp/m8w" "$out/metrics" 2>/dev/null
+[ "$rc" = 4 ] && [ "$(metric '.way_out')" = null ] && ok "a wrapped way-out marker is not a way out" || bad "a wrapped way-out marker is not a way out" "rc=$rc $(cat "$tmp/m8w" 2>/dev/null)"
 
 exit $fail
