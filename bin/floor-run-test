@@ -45,7 +45,7 @@ go FLOOR_METRICS="$tmp/m1" STUB_DO='echo fixed > fixed.txt' STUB_SAY='done' -- -
 cp "$tmp/m1" "$out/metrics" 2>/dev/null
 tracked=$(git -C "$wd" ls-files 2>/dev/null | tr '\n' ' ')
 commits=$(git -C "$wd" rev-list --count HEAD 2>/dev/null)
-if [ "$rc" = 0 ] && [ "$commits" = 1 ] && [ "$tracked" = "a.py " ] \
+if [ "$rc" = 0 ] && [ "$(cat "$out/stdout")" = done ] && [ "$commits" = 1 ] && [ "$tracked" = "a.py " ] \
    && [ -z "$(git -C "$wd" status --porcelain --ignored=no | grep -v '^?? fixed.txt$')" ] \
    && [ "$(arg_after --worktree)" = "$wd" ] && [ "$(arg_after --lane)" = private ] \
    && [ "$(arg_after --role)" = worker ] && [ "$(arg_after --timeout)" = 600 ] \

@@ -84,9 +84,12 @@ if [ -n "${FLOOR_METRICS:-}" ]; then
 fi
 
 # Exit code: infra fault only when the sandbox failed and nothing changed (including committed).
-changed=$(git status --porcelain 2>/dev/null)
+# The sandbox masks .git, so the worker cannot edit git config; these flags are a second lock:
+# host-side git never runs a monitor or hook the work dir could name.
+sgit() { git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
+changed=$(sgit status --porcelain 2>/dev/null)
 if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ] || \
-   [ "$(git rev-parse HEAD)" != "$base" ]; then
+   [ "$(sgit rev-parse HEAD)" != "$base" ]; then
   exit 0
 else
   exit 4
