@@ -147,4 +147,15 @@ go STUB_DO_1=litter --
   && ! grep -q 'not a git repository' "$here/lead-check" && ! grep -q 'not a git repository' "$here/worker-task" \
   && ok "crash patterns shared, not copied" || bad "crash patterns shared, not copied"
 
+# 10. the RED commit does not depend on the machine's git config (signing, hooks)
+printf '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /bin/false\n' > "$tmp/hostile"
+go GIT_CONFIG_GLOBAL="$tmp/hostile" STUB_DO_1=good STUB_SAY_1='test_new.sh fails: no 2' --
+[ "$rc" = 0 ] && [ "$(G rev-list --count HEAD)" = 2 ] && clean \
+  && ok "hostile git config: RED still committed" || bad "hostile git config: RED still committed" "$(why)"
+
+# 11. a Lead that writes files and then takes the way out leaves the repo as it was
+go STUB_DO_1=good STUB_SAY_1=$'Wrote a draft.\nCANNOT-DO: the request contradicts itself' --
+[ "$rc" = 5 ] && untouched && [ "$(j .way_out)" = CANNOT-DO ] \
+  && ok "way out after writing: repo as it was" || bad "way out after writing: repo as it was" "$(why)"
+
 exit $fail
