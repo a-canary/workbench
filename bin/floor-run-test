@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# floor-run-test — host-side contract of floor-run (the bench adapter), no LLM needed.
+# A stub replaces worker-sandbox: it records its arguments and plays the worker ($STUB_DO, $STUB_SAY, $STUB_RC).
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+[ -x "$here/floor-run" ] || { echo "FAIL: bin/floor-run missing or not executable"; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_OUT/args"
+while [ $# -gt 0 ]; do
+  case $1 in --worktree) wt=$2 ;; --task) cp "$2" "$STUB_OUT/task-seen"; echo "$2" > "$STUB_OUT/task-path" ;; esac
+  shift
+done
+cd "$wt" || exit 9
+eval "${STUB_DO:-}"
+[ -z "${STUB_SAY:-}" ] || printf '%s\n' "$STUB_SAY"
+exit "${STUB_RC:-0}"
+EOF
+chmod +x "$tmp/stub"
+
+ok()  { echo "ok   $1"; }
+bad() { echo "FAIL $1"; shift; printf '     %s\n' "$@"; fail=1; }
+
+# A fresh bench work dir: one source file and python litter. Sets $wd, $out, $rc.
+# Usage: go [VAR=val ...] -- floor-run args...
+go() {
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+  wd=$(mktemp -d "$tmp/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
+  echo 'print(1)' > "$wd/a.py"
+  mkdir "$wd/__pycache__" && echo junk > "$wd/__pycache__/a.cpython-312.pyc"
+  ( cd "$wd" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS -u FLOOR_METRICS \
+      WORKER_SANDBOX="$tmp/stub" STUB_OUT="$out" "${envs[@]}" "$here/floor-run" "$@" ) > "$out/stdout" 2> "$out/stderr"
+  rc=$?
+}
+arg_after() { grep -x -A1 -- "$1" "$out/args" 2>/dev/null | tail -1; }
+metric() { jq -r "$1" "$out/metrics" 2>/dev/null; }
+
+# 1. happy path: repo made, litter excluded, worker seat called on the private lane, one metrics line
+go FLOOR_METRICS="$tmp/m1" STUB_DO='echo fixed > fixed.txt' STUB_SAY='done' -- --rung worker 'make a.py print 2'
+cp "$tmp/m1" "$out/metrics" 2>/dev/null
+tracked=$(git -C "$wd" ls-files 2>/dev/null | tr '\n' ' ')
+commits=$(git -C "$wd" rev-list --count HEAD 2>/dev/null)
+if [ "$rc" = 0 ] && [ "$commits" = 1 ] && [ "$tracked" = "a.py " ] \
+   && [ -z "$(git -C "$wd" status --porcelain --ignored=no | grep -v '^?? fixed.txt$')" ] \
+   && [ "$(arg_after --worktree)" = "$wd" ] && [ "$(arg_after --lane)" = private ] \
+   && [ "$(arg_after --role)" = worker ] && [ "$(arg_after --timeout)" = 600 ] \
+   && grep -qF 'make a.py print 2' "$out/task-seen" \
+   && case $(cat "$out/task-path") in "$wd"/*) false ;; *) true ;; esac \
+   && [ "$(wc -l < "$tmp/m1")" = 1 ] \
+   && [ "$(metric '[.rung, .sandbox_rc, .way_out, (.seconds|type), (.workbench_sha|type)] | @csv')" != "" ] \
+   && [ "$(metric '.rung')" = worker ] && [ "$(metric '.sandbox_rc')" = 0 ] && [ "$(metric '.way_out')" = null ] \
+   && [ "$(metric '.seconds|type')" = number ]; then ok "worker rung: repo, excludes, sandbox args, metrics"
+else bad "worker rung: repo, excludes, sandbox args, metrics" "rc=$rc commits=$commits tracked=[$tracked]" \
+     "args: $(tr '\n' ' ' < "$out/args" 2>/dev/null)" "metrics: $(cat "$tmp/m1" 2>/dev/null)" "stderr: $(tail -3 "$out/stderr")"; fi
+
+# 2. the commit identity is fixed (a bench HOME has no git config)
+who=$(git -C "$wd" log -1 --format='%an <%ae>' 2>/dev/null)
+[ "$who" = "floor-run <floor-run@localhost>" ] && ok "fixed commit identity" || bad "fixed commit identity" "got: $who"
+
+# 3. a foreign port is refused before the sandbox starts
+go WORKER_PRIVATE_PORT=8093 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a foreign WORKER_PRIVATE_PORT" || bad "refuses a foreign WORKER_PRIVATE_PORT" "rc=$rc"
+go WORKER_PRIVATE_PORT=8099 -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && ok "accepts the local port" || bad "accepts the local port" "rc=$rc $(tail -2 "$out/stderr")"
+
+# 4. bad usage: unknown rung, no instruction
+go -- --rung nope 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses an unknown rung" || bad "refuses an unknown rung" "rc=$rc"
+go -- --rung worker
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a missing instruction" || bad "refuses a missing instruction" "rc=$rc"
+
+# 5. the worker's time limit sits under the bench's task limit
+go BENCH_TASK_TIMEOUT_MS=180000 -- --rung worker 'x'
+[ "$(arg_after --timeout)" = 165 ] && ok "timeout = task limit - 15 s" || bad "timeout = task limit - 15 s" "got $(arg_after --timeout)"
+go BENCH_TASK_TIMEOUT_MS=20000 -- --rung worker 'x'
+[ "$(arg_after --timeout)" = 30 ] && ok "timeout floor 30 s" || bad "timeout floor 30 s" "got $(arg_after --timeout)"
+
+# 6. any model outcome exits 0 (the bench's verify gives the verdict): a timeout, a failure that left changes
+go FLOOR_METRICS="$tmp/m6" STUB_RC=124 -- --rung worker 'x'
+cp "$tmp/m6" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.sandbox_rc')" = 124 ] && ok "sandbox timeout is a model outcome" || bad "sandbox timeout is a model outcome" "rc=$rc $(cat "$tmp/m6" 2>/dev/null)"
+go STUB_RC=1 STUB_DO='echo half > half.txt' -- --rung worker 'x'
+[ "$rc" = 0 ] && ok "failure with changes is a model outcome" || bad "failure with changes is a model outcome" "rc=$rc"
+
+# 7. an infra fault is not a model outcome: the sandbox failed and nothing changed
+go FLOOR_METRICS="$tmp/m7" STUB_RC=1 -- --rung worker 'x'
+cp "$tmp/m7" "$out/metrics" 2>/dev/null
+[ "$rc" = 4 ] && [ "$(metric '.sandbox_rc')" = 1 ] && ok "sandbox failure with no change exits 4" || bad "sandbox failure with no change exits 4" "rc=$rc"
+
+# 8. the way out is recorded, and is never an infra fault
+go FLOOR_METRICS="$tmp/m8" STUB_RC=1 STUB_SAY=$'I looked.\nCANNOT-DO: no compiler in the jail' -- --rung worker 'x'
+cp "$tmp/m8" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = CANNOT-DO ] && ok "way-out line recorded" || bad "way-out line recorded" "rc=$rc $(cat "$tmp/m8" 2>/dev/null)"
+go FLOOR_METRICS="$tmp/m8b" STUB_SAY=$'TOOL-FAULT: edit tool broke\nso I used bash instead, done' -- --rung worker 'x'
+cp "$tmp/m8b" "$out/metrics" 2>/dev/null
+[ "$(metric '.way_out')" = null ] && ok "way out counts only as the last line" || bad "way out counts only as the last line" "$(cat "$tmp/m8b" 2>/dev/null)"
+
+exit $fail
