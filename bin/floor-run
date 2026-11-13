@@ -40,7 +40,7 @@ git add -A 2>/dev/null
 git -c user.name=floor-run -c user.email=floor-run@localhost \
     -c commit.gpgsign=false -c core.hooksPath=/dev/null \
     commit -q --allow-empty -m setup >/dev/null 2>&1
-if ! git rev-parse -q --verify HEAD || [ -n "$(git status --porcelain)" ]; then
+if ! git rev-parse -q --verify HEAD >/dev/null || [ -n "$(git status --porcelain)" ]; then
   echo "floor-run: setup commit failed" >&2
   exit 4
 fi
