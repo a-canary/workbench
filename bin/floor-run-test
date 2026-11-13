@@ -2,6 +2,7 @@
 # floor-run-test — host-side contract of floor-run (the bench adapter), no LLM needed.
 # A stub replaces worker-sandbox: it records its arguments and plays the worker ($STUB_DO, $STUB_SAY, $STUB_RC).
 set -uo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 [ -x "$here/floor-run" ] || { echo "FAIL: bin/floor-run missing or not executable"; exit 1; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -129,8 +130,9 @@ go GIT_CONFIG_GLOBAL="$tmp/hostile.gitconfig" -- --rung worker 'x'
 # 8f. a setup that cannot commit everything is an infra fault before the worker starts
 #     (otherwise the old files look like the worker's changes and exit 4 can never fire)
 prep='echo s > locked; chmod 000 locked' go STUB_RC=1 -- --rung worker 'x'
-[ "$(id -u)" = 0 ] && rc=4 && rm -f "$out/args"   # root can read the file: nothing to check
+if [ "$(id -u)" = 0 ]; then echo "skip (root can read the file)"; else
 [ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "failed setup commit exits 4 before the sandbox" || bad "failed setup commit exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+fi
 
 # 8g. work the worker committed itself still counts as a change
 go STUB_RC=1 STUB_DO='echo z > z.txt; git add z.txt; git -c user.name=w -c user.email=w@localhost commit -qm w' -- --rung worker 'x'
@@ -173,9 +175,10 @@ wdroot="$tmp/outer1" prep='ln -s /nonexistent/x .git' go -- --rung worker 'x'
 git init -q "$tmp/outer2"
 wdroot="$tmp/outer2" prep='chmod 555 .' go STUB_RC=1 -- --rung worker 'x'
 chmod 755 "$wd"
-[ "$(id -u)" = 0 ] && rc=4 && rm -f "$out/args"   # root can write anyway: nothing to check
+if [ "$(id -u)" = 0 ]; then echo "skip (root can write anyway)"; else
 [ "$rc" = 4 ] && [ ! -e "$out/args" ] && ! git -C "$tmp/outer2" rev-parse -q --verify HEAD >/dev/null 2>&1 \
   && ok "failed git init exits 4, repo further up untouched" || bad "failed git init exits 4, repo further up untouched" "rc=$rc outer: $(git -C "$tmp/outer2" log --oneline 2>&1 | head -1)"
+fi
 
 # 8o. the infra-fault decision does not depend on the caller's git config (file or environment)
 printf '[status]\n\tshowUntrackedFiles = no\n' > "$tmp/quiet.gitconfig"
@@ -223,5 +226,16 @@ chmod 755 "$wd/x" 2>/dev/null
 go FLOOR_METRICS="$tmp/m8w" STUB_RC=1 STUB_SAY='**CANNOT-DO:** no' -- --rung worker 'x'
 cp "$tmp/m8w" "$out/metrics" 2>/dev/null
 [ "$rc" = 4 ] && [ "$(metric '.way_out')" = null ] && ok "a wrapped way-out marker is not a way out" || bad "a wrapped way-out marker is not a way out" "rc=$rc $(cat "$tmp/m8w" 2>/dev/null)"
+
+# 8x. the metrics line lands where the path pointed at the start, even if the worker repoints a link on the way
+wdx=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outx" "$tmp/real1" "$tmp/real2"; ln -s "$tmp/real1" "$wdx/link"
+( cd "$wdx" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outx" \
+    STUB_DO="ln -sfn '$tmp/real2' link" FLOOR_METRICS="$wdx/link/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rx=$?
+[ "$rx" = 0 ] && [ -s "$tmp/real1/m.jsonl" ] && [ ! -e "$tmp/real2/m.jsonl" ] \
+  && ok "metrics path is resolved once, a repointed link changes nothing" || bad "metrics path is resolved once, a repointed link changes nothing" "rc=$rx real1=$(ls "$tmp/real1") real2=$(ls "$tmp/real2")"
+
+# 8y. no temp file, no run: an infra fault before the sandbox starts
+go TMPDIR=/nonexistent/floor-run-test STUB_RC=1 -- --rung worker 'x'
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "a failed mktemp exits 4 before the sandbox" || bad "a failed mktemp exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
 
 exit $fail

@@ -16,7 +16,8 @@ done
 # The metrics file must not sit in the work dir, where it would count as the worker's change.
 if [ -n "${FLOOR_METRICS:-}" ]; then
   case $FLOOR_METRICS in /*) ;; *) die "FLOOR_METRICS must be an absolute path" ;; esac
-  case $(realpath -m -- "$FLOOR_METRICS") in "$(pwd -P)"/*) die "FLOOR_METRICS must be outside the work dir" ;; esac
+  FLOOR_METRICS=$(realpath -m -- "$FLOOR_METRICS")   # resolved once: the check and the write use the same path
+  case $FLOOR_METRICS in "$(pwd -P)"/*) die "FLOOR_METRICS must be outside the work dir" ;; esac
 fi
 
 if [ -n "${WORKER_PRIVATE_PORT:-}" ] && [ "$WORKER_PRIVATE_PORT" != 8099 ]; then
@@ -41,7 +42,8 @@ g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor= -
 # Host-side git never walks into a repo it did not make; temp files stay outside the work dir.
 nested() { find . -mindepth 2 -name .git -print -quit 2>/dev/null; }
 [ -z "$(nested)" ] || die "work dir contains a nested git repo"
-case $(realpath -m -- "${TMPDIR:-/tmp}") in "$(pwd -P)"|"$(pwd -P)"/*) die "TMPDIR must be outside the work dir" ;; esac
+TMPDIR=$(realpath -m -- "${TMPDIR:-/tmp}"); export TMPDIR   # resolved once, as above
+case $TMPDIR in "$(pwd -P)"|"$(pwd -P)"/*) die "TMPDIR must be outside the work dir" ;; esac
 g init -q 2>/dev/null
 # The repo git finds from here must be the one just made, never one further up.
 if [ "$(cd "$(g rev-parse --absolute-git-dir 2>/dev/null)" 2>/dev/null && pwd -P)" != "$(pwd -P)/.git" ]; then
@@ -65,7 +67,7 @@ fi
 base=$(g rev-parse HEAD)
 
 # Task file outside workdir
-taskfile=$(mktemp)
+taskfile=$(mktemp) || { echo "floor-run: setup failed: no temp file" >&2; exit 4; }
 trap 'rm -f "$taskfile" "${outfile:-}"' EXIT
 {
   printf '%s\n' "$instruction"
@@ -74,7 +76,7 @@ trap 'rm -f "$taskfile" "${outfile:-}"' EXIT
 } > "$taskfile"
 
 # Run sandbox
-outfile=$(mktemp)
+outfile=$(mktemp) || { echo "floor-run: setup failed: no temp file" >&2; exit 4; }
 start=$SECONDS
 "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$PWD" --lane private \
     --task "$taskfile" --role worker --timeout "$limit" | tee "$outfile"
@@ -103,6 +105,7 @@ fi
 # Exit code: infra fault only when the sandbox failed and nothing changed (including committed).
 # The sandbox masks .git, so the worker cannot edit the repo's git config either.
 # A repo the worker made is a change in itself, and so is anything git status complains about.
+# Changes only in ignored paths (the litter list, or the task's own .gitignore) do not count.
 if [ -n "$(nested)" ]; then changed=nested-repo
 else changed=$(g status --porcelain 2>&1) || changed=status-failed; fi
 if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ] || \
