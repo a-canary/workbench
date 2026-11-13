@@ -4,17 +4,20 @@ set -uo pipefail
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 die() { echo "floor-run: $*" >&2; exit 2; }
 
-rung=; instruction=
+rung=; instruction=; have=
 while [ $# -gt 0 ]; do
   case $1 in
     --rung) rung=${2:-}; shift; [ $# -eq 0 ] || shift ;;
-    *) [ -z "${have:-}" ] || die "more than one instruction"; have=1; instruction="$1"; shift ;;
+    *) [ -z "$have" ] || die "more than one instruction"; have=1; instruction="$1"; shift ;;
   esac
 done
 [ "$rung" = worker ] || die "unknown rung: $rung"
 [ -n "$instruction" ] || die "missing instruction"
 # The metrics file must not sit in the work dir, where it would count as the worker's change.
-case ${FLOOR_METRICS:-/} in "$PWD"/*) die "FLOOR_METRICS must be outside the work dir" ;; /*) ;; *) die "FLOOR_METRICS must be an absolute path" ;; esac
+if [ -n "${FLOOR_METRICS:-}" ]; then
+  case $FLOOR_METRICS in /*) ;; *) die "FLOOR_METRICS must be an absolute path" ;; esac
+  case $(realpath -m -- "$FLOOR_METRICS") in "$(pwd -P)"/*) die "FLOOR_METRICS must be outside the work dir" ;; esac
+fi
 
 if [ -n "${WORKER_PRIVATE_PORT:-}" ] && [ "$WORKER_PRIVATE_PORT" != 8099 ]; then
   die "foreign WORKER_PRIVATE_PORT: $WORKER_PRIVATE_PORT"
@@ -31,23 +34,31 @@ fi
 
 # floor-run only commits into a repo it made itself: no git redirection from the caller, no existing repo.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
-[ -e .git ] && die "work dir is already a git repo"
-git init -q 2>/dev/null
+# Its own git calls read no git config from the machine or the caller, and run no hook or monitor.
+unset GIT_TEMPLATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
+[ -e .git ] || [ -L .git ] && die "work dir is already a git repo"
+g init -q 2>/dev/null
+# The repo git finds from here must be the one just made, never one further up.
+if [ "$(cd "$(g rev-parse --absolute-git-dir 2>/dev/null)" 2>/dev/null && pwd -P)" != "$(pwd -P)/.git" ]; then
+  echo "floor-run: setup failed: the work dir has no repo of its own" >&2
+  exit 4
+fi
+mkdir -p .git/info
 { echo '__pycache__/'
   echo '*.pyc'
   echo 'node_modules/'
   echo '.pytest_cache/'
   echo '.venv/'
 } >> .git/info/exclude
-git add -A 2>/dev/null
-git -c user.name=floor-run -c user.email=floor-run@localhost \
-    -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+g add -A 2>/dev/null
+g -c user.name=floor-run -c user.email=floor-run@localhost -c commit.gpgsign=false \
     commit -q --allow-empty -m setup >/dev/null 2>&1
-if ! git rev-parse -q --verify HEAD >/dev/null || [ -n "$(git status --porcelain)" ]; then
+if ! g rev-parse -q --verify HEAD >/dev/null || [ -n "$(g status --porcelain)" ]; then
   echo "floor-run: setup commit failed" >&2
   exit 4
 fi
-base=$(git rev-parse HEAD)
+base=$(g rev-parse HEAD)
 
 # Task file outside workdir
 taskfile=$(mktemp)
@@ -71,15 +82,13 @@ way_out=
 lastline=$(grep -v '^[[:space:]]*$' "$outfile" | tail -1)
 if [[ "$lastline" == CANNOT-DO:* ]]; then
   way_out=CANNOT-DO
-elif [[ "$lastline" == CANNOT-JUDGE:* ]]; then
-  way_out=CANNOT-JUDGE
 elif [[ "$lastline" == TOOL-FAULT:* ]]; then
   way_out=TOOL-FAULT
 fi
 
 # Metrics
 if [ -n "${FLOOR_METRICS:-}" ]; then
-  wb_sha=$(git -C "$here" rev-parse HEAD 2>/dev/null) || wb_sha=
+  wb_sha=$(g -C "$here" rev-parse HEAD 2>/dev/null) || wb_sha=
   jq -nc --argjson rc "$sandbox_rc" --argjson secs "$elapsed" \
       --arg wo "${way_out:-}" --arg sha "$wb_sha" \
       '{rung:"worker", sandbox_rc:$rc, way_out:(if $wo=="" then null else $wo end),
@@ -87,12 +96,10 @@ if [ -n "${FLOOR_METRICS:-}" ]; then
 fi
 
 # Exit code: infra fault only when the sandbox failed and nothing changed (including committed).
-# The sandbox masks .git, so the worker cannot edit git config; these flags are a second lock:
-# host-side git never runs a monitor or hook the work dir could name.
-sgit() { git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
-changed=$(sgit status --porcelain 2>/dev/null)
+# The sandbox masks .git, so the worker cannot edit the repo's git config either.
+changed=$(g status --porcelain 2>/dev/null)
 if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ] || \
-   [ "$(sgit rev-parse HEAD)" != "$base" ]; then
+   [ "$(g rev-parse HEAD)" != "$base" ]; then
   exit 0
 else
   exit 4

@@ -29,7 +29,7 @@ bad() { echo "FAIL $1"; shift; printf '     %s\n' "$@"; fail=1; }
 go() {
   local envs=()
   while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  wd=$(mktemp -d "$tmp/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
+  wd=$(mktemp -d "${wdroot:-$tmp}/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
   echo 'print(1)' > "$wd/a.py"
   mkdir "$wd/__pycache__" && echo junk > "$wd/__pycache__/a.cpython-312.pyc"
   [ -z "${prep:-}" ] || ( cd "$wd" && eval "$prep" )   # prep='cmds' go ... : extra setup inside the work dir
@@ -150,7 +150,7 @@ go GIT_DIR="$tmp/other/.git" -- --rung worker 'x'
 # 8j. the metrics file must be an absolute path outside the work dir (inside, it would count as the worker's change)
 go FLOOR_METRICS=m.jsonl -- --rung worker 'x'; rj1=$rc; aj1=$(ls "$out/args" 2>/dev/null)
 wdj=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outj"
-( cd "$wdj" && WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outj" FLOOR_METRICS="$wdj/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rj2=$?
+( cd "$wdj" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outj" FLOOR_METRICS="$wdj/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rj2=$?
 [ "$rj1" = 2 ] && [ -z "$aj1" ] && [ "$rj2" = 2 ] && [ ! -e "$tmp/outj/args" ] \
   && ok "refuses a metrics path that is relative or inside the work dir" || bad "refuses a metrics path that is relative or inside the work dir" "rc=$rj1,$rj2"
 
@@ -162,5 +162,41 @@ go -- --rung worker 'fix a' 'and b'
 go FLOOR_METRICS="$tmp/m8l" STUB_RC=1 STUB_SAY=$'tried twice\nTOOL-FAULT: edit tool broke' -- --rung worker 'x'
 cp "$tmp/m8l" "$out/metrics" 2>/dev/null
 [ "$rc" = 0 ] && [ "$(metric '.way_out')" = TOOL-FAULT ] && ok "final TOOL-FAULT line recorded, exit 0" || bad "final TOOL-FAULT line recorded, exit 0" "rc=$rc $(cat "$tmp/m8l" 2>/dev/null)"
+
+# 8m. a work dir whose .git is a dangling link, inside another repo: refused, nothing lands in the repo further up
+git init -q "$tmp/outer1"
+wdroot="$tmp/outer1" prep='ln -s /nonexistent/x .git' go -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ! git -C "$tmp/outer1" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "refuses a dangling .git link, repo further up untouched" || bad "refuses a dangling .git link, repo further up untouched" "rc=$rc outer: $(git -C "$tmp/outer1" log --oneline 2>&1 | head -1)"
+
+# 8n. git init fails (work dir not writable) inside another repo: infra fault, nothing lands in the repo further up
+git init -q "$tmp/outer2"
+wdroot="$tmp/outer2" prep='chmod 555 .' go STUB_RC=1 -- --rung worker 'x'
+chmod 755 "$wd"
+[ "$(id -u)" = 0 ] && rc=4 && rm -f "$out/args"   # root can write anyway: nothing to check
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ! git -C "$tmp/outer2" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "failed git init exits 4, repo further up untouched" || bad "failed git init exits 4, repo further up untouched" "rc=$rc outer: $(git -C "$tmp/outer2" log --oneline 2>&1 | head -1)"
+
+# 8o. the infra-fault decision does not depend on the caller's git config (file or environment)
+printf '[status]\n\tshowUntrackedFiles = no\n' > "$tmp/quiet.gitconfig"
+go GIT_CONFIG_GLOBAL="$tmp/quiet.gitconfig" STUB_RC=1 STUB_DO='echo new > new.txt' -- --rung worker 'x'; ro1=$rc
+go GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no STUB_RC=1 STUB_DO='echo new > new.txt' -- --rung worker 'x'
+[ "$ro1" = 0 ] && [ "$rc" = 0 ] && ok "a new file counts as a change whatever the caller's git config" || bad "a new file counts as a change whatever the caller's git config" "rc=$ro1,$rc"
+
+# 8p. a variable named like floor-run's own flag in the caller's environment changes nothing
+go have=1 -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && ok "exported 'have' does not refuse the instruction" || bad "exported 'have' does not refuse the instruction" "rc=$rc $(tail -1 "$out/stderr")"
+
+# 8q. a metrics path that only looks outside the work dir (.. segments) is refused too
+wdq=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outq" "$wdq/sub"
+( cd "$wdq" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outq" \
+    FLOOR_METRICS="$tmp/outq/../$(basename "$wdq")/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rq=$?
+[ "$rq" = 2 ] && [ ! -e "$tmp/outq/args" ] && ok "refuses a metrics path that resolves into the work dir" || bad "refuses a metrics path that resolves into the work dir" "rc=$rq"
+
+# 8r. an empty git template from the caller does not put python litter into the setup commit
+mkdir "$tmp/empty-tpl"
+go GIT_TEMPLATE_DIR="$tmp/empty-tpl" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ "$(git -C "$wd" ls-files | grep -c pycache)" = 0 ] && [ "$(git -C "$wd" ls-files)" = a.py ] \
+  && ok "litter stays out of the setup commit with an empty git template" || bad "litter stays out of the setup commit with an empty git template" "rc=$rc files: $(git -C "$wd" ls-files 2>&1 | tr '\n' ' ')"
 
 exit $fail
