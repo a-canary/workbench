@@ -68,7 +68,7 @@ base=$(g rev-parse HEAD)
 
 if [ "$rung" = flow ]; then
   export WORKER_REVIEW_TIMEOUT=${WORKER_REVIEW_TIMEOUT:-120}
-  scratch=$(mktemp -d)
+  scratch=$(mktemp -d) || { echo "floor-run: setup failed: no temp dir" >&2; exit 4; }
   trap 'rm -rf "$scratch"' EXIT
   printf '%s\n' "$instruction" > "$scratch/request"
   lead_tmo=$(( limit / 4 ))
@@ -110,7 +110,7 @@ if [ "$rung" = flow ]; then
           verdict=FAIL
         fi
         g reset -q --hard
-        g clean -fdq
+        g clean -ffdq   # -ff: a repo the worker made goes too
       fi
     fi
   elif [ "$lead_rc" != 3 ] && [ "$lead_rc" != 5 ]; then

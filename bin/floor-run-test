@@ -281,6 +281,7 @@ while [ $# -gt 0 ]; do
 done
 rc=${WT_RC:-0}
 echo 'print(2)' > "$wt/a.py"; git -C "$wt" add a.py
+eval "${WT_DO:-:}"
 if [ "$rc" = 0 ]; then git -C "$wt" -c user.name=pi-worker -c user.email=w@localhost commit -q -m green
 else [ -z "${WT_SAY:-}" ] || echo "$WT_SAY" >> "$WORKER_TASK_LOG"; fi
 exit "$rc"
@@ -350,5 +351,13 @@ r7=$rc; flow WT_RC=4 --
 # 13. the foreign-port guard covers the flow rung too
 flow WORKER_PRIVATE_PORT=8093 --
 [ "$rc" = 2 ] && [ ! -e "$out/lead-args" ] && ok "flow rung refuses a foreign port" || bad "flow rung refuses a foreign port" "rc=$rc"
+
+# 14. no scratch dir is a setup fault: the Lead's check is never started
+flow TMPDIR=/nonexistent/floor-run-test --
+[ "$rc" = 4 ] && [ ! -e "$out/lead-args" ] && ok "flow rung without a temp dir exits 4 before the Lead's check" || bad "flow rung without a temp dir exits 4 before the Lead's check" "rc=$rc"
+
+# 15. a failed worker's nested repo is removed with the rest of its work
+flow WT_RC=7 WT_DO='git init -q "$wt/sub"; echo x > "$wt/sub/f"' --
+[ "$rc" = 0 ] && clean_at_start && [ ! -e "$wd/sub" ] && ok "failed worker's nested repo removed" || bad "failed worker's nested repo removed" "rc=$rc $(ls -a "$wd" | tr '\n' ' ')"
 
 exit $fail
