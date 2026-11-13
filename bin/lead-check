@@ -27,7 +27,7 @@ done
 [ -n "$request" ] && [ -f "$request" ] || die "missing --request or not a file"
 [ -n "$out" ] || die "missing --out"
 
-g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false "$@"; }
+g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false -c commit.gpgsign=false "$@"; }
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane private "$@"; }
 . "$here/red-crash.sh"
 
@@ -35,8 +35,7 @@ sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane privat
 mkdir -p "$out"
 
 taskf=$(mktemp); replyf=$(mktemp); testoutf=$(mktemp)
-used=0
-trap 'rm -f "$taskf" "$replyf" "$testoutf"; [ $used -eq 1 ] || exit' EXIT
+trap 'rm -f "$taskf" "$replyf" "$testoutf"' EXIT
 cleanup() { g reset -q --hard; g clean -fdq; }
 write_json() { # $1=valid $2=tries $3=way_out $4=reused
   jq -nc --arg v "$1" --argjson t "$2" --arg w "$3" --argjson r "$4" \
@@ -60,14 +59,14 @@ for ((i=1; i<=tries; i++)); do
   case $last in
     CANNOT-DO:*|CANNOT-JUDGE:*|TOOL-FAULT:*)
       echo "$last"
-      used=1
+      cleanup
       write_json false $i "${last%%:*}" 0
       exit 5 ;;
   esac
   # infra fault: sandbox failed and nothing written
   if [ $wrc -ne 0 ] && [ $wrc -ne 124 ] && [ -z "$(g status --porcelain)" ]; then
     echo "lead-check: sandbox failed (rc $wrc) with nothing written" >&2
-    cleanup; used=1
+    cleanup
     write_json false $i "" 0
     exit 4
   fi
@@ -108,9 +107,12 @@ for ((i=1; i<=tries; i++)); do
     printf '%s\n' "$cmd" > "$out/test"
     rm -f "$wt/LEAD-TASK.md"
     g add -- "$newfile"
-    g -c user.name=lead-check -c user.email=lead-check@localhost commit -q --no-verify -m "test: RED from lead-check"
+    if ! g -c user.name=lead-check -c user.email=lead-check@localhost commit -q --no-verify -m "test: RED from lead-check"; then
+      echo "lead-check: could not commit the test" >&2
+      cleanup; write_json false $i "" $reused_verifier
+      exit 4
+    fi
     g clean -fdq
-    used=1
     write_json true $i "" $reused_verifier
     exit 0
   fi
