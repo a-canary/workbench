@@ -7,7 +7,7 @@ die() { echo "floor-run: $*" >&2; exit 2; }
 rung=; instruction=
 while [ $# -gt 0 ]; do
   case $1 in
-    --rung) rung=$2; shift 2 ;;
+    --rung) rung=${2:-}; shift; [ $# -eq 0 ] || shift ;;
     *) instruction="$1"; shift ;;
   esac
 done
@@ -18,36 +18,42 @@ if [ -n "${WORKER_PRIVATE_PORT:-}" ] && [ "$WORKER_PRIVATE_PORT" != 8099 ]; then
   die "foreign WORKER_PRIVATE_PORT: $WORKER_PRIVATE_PORT"
 fi
 
-# Make workdir a git repo if needed
-if [ ! -d .git ]; then
-  git init -q 2>/dev/null
-  { echo '__pycache__/'
-    echo '*.pyc'
-    echo 'node_modules/'
-    echo '.pytest_cache/'
-    echo '.venv/'
-  } >> .git/info/exclude
+# Task limit: must be a whole number of milliseconds, at least 30 s, before anything runs.
+if [ -n "${BENCH_TASK_TIMEOUT_MS:-}" ]; then
+  [[ "$BENCH_TASK_TIMEOUT_MS" =~ ^[0-9]+$ ]] && [ "$BENCH_TASK_TIMEOUT_MS" -ge 30000 ] \
+    || die "BENCH_TASK_TIMEOUT_MS must be an integer >= 30000, got: ${BENCH_TASK_TIMEOUT_MS:-unset}"
+  limit=$(( BENCH_TASK_TIMEOUT_MS / 1000 - 15 ))
+else
+  limit=600
 fi
+
+# floor-run only commits into a repo it made itself.
+[ -e .git ] && die "work dir is already a git repo"
+git init -q 2>/dev/null
+{ echo '__pycache__/'
+  echo '*.pyc'
+  echo 'node_modules/'
+  echo '.pytest_cache/'
+  echo '.venv/'
+} >> .git/info/exclude
 git add -A 2>/dev/null
 git -c user.name=floor-run -c user.email=floor-run@localhost \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null \
     commit -q --allow-empty -m setup >/dev/null 2>&1
+if ! git rev-parse -q --verify HEAD || [ -n "$(git status --porcelain)" ]; then
+  echo "floor-run: setup commit failed" >&2
+  exit 4
+fi
+base=$(git rev-parse HEAD)
 
 # Task file outside workdir
 taskfile=$(mktemp)
 trap 'rm -f "$taskfile" "${outfile:-}"' EXIT
 {
-  echo "$instruction"
+  printf '%s\n' "$instruction"
   echo ""
   echo "If you cannot do this, end your reply with one last line starting with CANNOT-DO: and the reason. If a tool is broken, start that last line with TOOL-FAULT:."
 } > "$taskfile"
-
-# Timeout
-if [ -n "${BENCH_TASK_TIMEOUT_MS:-}" ]; then
-  limit=$(( BENCH_TASK_TIMEOUT_MS / 1000 - 15 ))
-  [ "$limit" -lt 30 ] && limit=30
-else
-  limit=600
-fi
 
 # Run sandbox
 outfile=$(mktemp)
@@ -57,7 +63,7 @@ start=$SECONDS
 sandbox_rc=${PIPESTATUS[0]}
 elapsed=$(( SECONDS - start ))
 
-# Way out: last non-empty line
+# A way out (even TOOL-FAULT) is the worker's own report, so it is a model outcome: exit 0, recorded in the metrics line.
 way_out=
 lastline=$(grep -v '^[[:space:]]*$' "$outfile" | tail -1)
 if [[ "$lastline" == CANNOT-DO:* ]]; then
@@ -77,9 +83,10 @@ if [ -n "${FLOOR_METRICS:-}" ]; then
         seconds:$secs, workbench_sha:(if $sha=="" then null else $sha end)}' >> "$FLOOR_METRICS"
 fi
 
-# Exit code
+# Exit code: infra fault only when the sandbox failed and nothing changed (including committed).
 changed=$(git status --porcelain 2>/dev/null)
-if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ]; then
+if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ] || \
+   [ "$(git rev-parse HEAD)" != "$base" ]; then
   exit 0
 else
   exit 4
