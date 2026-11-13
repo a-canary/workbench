@@ -60,7 +60,7 @@ mkdir -p .git/info
 g add -A 2>/dev/null
 g -c user.name=floor-run -c user.email=floor-run@localhost -c commit.gpgsign=false \
     commit -q --allow-empty -m setup >/dev/null 2>&1
-if ! g rev-parse -q --verify HEAD >/dev/null || [ -n "$(g status --porcelain)" ]; then
+if ! g rev-parse -q --verify HEAD >/dev/null || [ -n "$(g status --porcelain 2>&1)" ]; then   # same test as after the run
   echo "floor-run: setup commit failed" >&2
   exit 4
 fi
@@ -85,7 +85,7 @@ elapsed=$(( SECONDS - start ))
 
 # A way out (even TOOL-FAULT) is the worker's own report, so it is a model outcome: exit 0, recorded in the metrics line.
 way_out=
-lastline=$(grep -v '^[[:space:]]*$' "$outfile" | tail -1)
+lastline=$(grep -av '^[[:space:]]*$' "$outfile" | tail -1)
 if [[ "$lastline" == CANNOT-DO:* ]]; then
   way_out=CANNOT-DO
 elif [[ "$lastline" == TOOL-FAULT:* ]]; then

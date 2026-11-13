@@ -238,4 +238,16 @@ wdx=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outx" "$tmp/real1" "$tmp/real2"; 
 go TMPDIR=/nonexistent/floor-run-test STUB_RC=1 -- --rung worker 'x'
 [ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "a failed mktemp exits 4 before the sandbox" || bad "a failed mktemp exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
 
+# 8z. a directory git cannot read before the run is a setup fault (after the run its warning would always count as a change)
+prep='mkdir d; echo s > d/f; chmod 000 d' go STUB_RC=1 -- --rung worker 'x'
+chmod 755 "$wd/d" 2>/dev/null
+if [ "$(id -u)" = 0 ]; then echo "skip (root can read the directory)"; else
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "an unreadable directory before the run exits 4 before the sandbox" || bad "an unreadable directory before the run exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+fi
+
+# 9a. a NUL byte in the worker's output does not hide its way out
+go FLOOR_METRICS="$tmp/m9a" STUB_RC=1 STUB_DO='printf "a\0b\n"' STUB_SAY='CANNOT-DO: no' -- --rung worker 'x'
+cp "$tmp/m9a" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = CANNOT-DO ] && ok "way out found in output with a NUL byte" || bad "way out found in output with a NUL byte" "rc=$rc $(cat "$tmp/m9a" 2>/dev/null)"
+
 exit $fail
