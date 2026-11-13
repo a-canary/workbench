@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# floor-run — bench adapter: run one worker seat on an instruction inside the jail.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+die() { echo "floor-run: $*" >&2; exit 2; }
+
+rung=; instruction=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --rung) rung=$2; shift 2 ;;
+    *) instruction="$1"; shift ;;
+  esac
+done
+[ "$rung" = worker ] || die "unknown rung: $rung"
+[ -n "$instruction" ] || die "missing instruction"
+
+if [ -n "${WORKER_PRIVATE_PORT:-}" ] && [ "$WORKER_PRIVATE_PORT" != 8099 ]; then
+  die "foreign WORKER_PRIVATE_PORT: $WORKER_PRIVATE_PORT"
+fi
+
+# Make workdir a git repo if needed
+if [ ! -d .git ]; then
+  git init -q 2>/dev/null
+  { echo '__pycache__/'
+    echo '*.pyc'
+    echo 'node_modules/'
+    echo '.pytest_cache/'
+    echo '.venv/'
+  } >> .git/info/exclude
+fi
+git add -A 2>/dev/null
+git -c user.name=floor-run -c user.email=floor-run@localhost \
+    commit -q --allow-empty -m setup >/dev/null 2>&1
+
+# Task file outside workdir
+taskfile=$(mktemp)
+trap 'rm -f "$taskfile" "${outfile:-}"' EXIT
+{
+  echo "$instruction"
+  echo ""
+  echo "If you cannot do this, end your reply with one last line starting with CANNOT-DO: and the reason. If a tool is broken, start that last line with TOOL-FAULT:."
+} > "$taskfile"
+
+# Timeout
+if [ -n "${BENCH_TASK_TIMEOUT_MS:-}" ]; then
+  limit=$(( BENCH_TASK_TIMEOUT_MS / 1000 - 15 ))
+  [ "$limit" -lt 30 ] && limit=30
+else
+  limit=600
+fi
+
+# Run sandbox
+outfile=$(mktemp)
+start=$SECONDS
+"${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$PWD" --lane private \
+    --task "$taskfile" --role worker --timeout "$limit" > "$outfile" 2>&1 | tee /dev/stderr
+sandbox_rc=${PIPESTATUS[0]}
+elapsed=$(( SECONDS - start ))
+
+# Way out: last non-empty line
+way_out=
+lastline=$(grep -v '^[[:space:]]*$' "$outfile" | tail -1)
+if [[ "$lastline" == CANNOT-DO:* ]]; then
+  way_out=CANNOT-DO
+elif [[ "$lastline" == CANNOT-JUDGE:* ]]; then
+  way_out=CANNOT-JUDGE
+elif [[ "$lastline" == TOOL-FAULT:* ]]; then
+  way_out=TOOL-FAULT
+fi
+
+# Metrics
+if [ -n "${FLOOR_METRICS:-}" ]; then
+  wb_sha=$(git -C "$here" rev-parse HEAD 2>/dev/null) || wb_sha=
+  jq -nc --argjson rc "$sandbox_rc" --argjson secs "$elapsed" \
+      --arg wo "${way_out:-}" --arg sha "$wb_sha" \
+      '{rung:"worker", sandbox_rc:$rc, way_out:(if $wo=="" then null else $wo end),
+        seconds:$secs, workbench_sha:(if $sha=="" then null else $sha end)}' >> "$FLOOR_METRICS"
+fi
+
+# Exit code
+changed=$(git status --porcelain 2>/dev/null)
+if [ "$sandbox_rc" = 0 ] || [ "$sandbox_rc" = 124 ] || [ -n "$way_out" ] || [ -n "$changed" ]; then
+  exit 0
+else
+  exit 4
+fi
