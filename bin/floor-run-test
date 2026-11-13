@@ -129,10 +129,38 @@ go GIT_CONFIG_GLOBAL="$tmp/hostile.gitconfig" -- --rung worker 'x'
 # 8f. a setup that cannot commit everything is an infra fault before the worker starts
 #     (otherwise the old files look like the worker's changes and exit 4 can never fire)
 prep='echo s > locked; chmod 000 locked' go STUB_RC=1 -- --rung worker 'x'
+[ "$(id -u)" = 0 ] && rc=4 && rm -f "$out/args"   # root can read the file: nothing to check
 [ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "failed setup commit exits 4 before the sandbox" || bad "failed setup commit exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
 
 # 8g. work the worker committed itself still counts as a change
 go STUB_RC=1 STUB_DO='echo z > z.txt; git add z.txt; git -c user.name=w -c user.email=w@localhost commit -qm w' -- --rung worker 'x'
 [ "$rc" = 0 ] && ok "failure after the worker's own commit is a model outcome" || bad "failure after the worker's own commit is a model outcome" "rc=$rc"
+
+# 8h. a limit with leading zeros is refused (the shell would read it as octal and hand out a wrong limit)
+go BENCH_TASK_TIMEOUT_MS=0300000 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a task limit with leading zeros" || bad "refuses a task limit with leading zeros" "rc=$rc timeout=$(arg_after --timeout)"
+
+# 8i. git redirection inherited from the caller is ignored: the setup commit lands in the work dir's own repo
+git init -q "$tmp/other"
+go GIT_DIR="$tmp/other/.git" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ "$(git -C "$wd" rev-list --count HEAD 2>/dev/null)" = 1 ] && [ -d "$wd/.git" ] \
+  && ! git -C "$tmp/other" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "inherited GIT_DIR is ignored" || bad "inherited GIT_DIR is ignored" "rc=$rc other: $(git -C "$tmp/other" log --oneline 2>&1 | head -1)"
+
+# 8j. the metrics file must be an absolute path outside the work dir (inside, it would count as the worker's change)
+go FLOOR_METRICS=m.jsonl -- --rung worker 'x'; rj1=$rc; aj1=$(ls "$out/args" 2>/dev/null)
+wdj=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outj"
+( cd "$wdj" && WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outj" FLOOR_METRICS="$wdj/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rj2=$?
+[ "$rj1" = 2 ] && [ -z "$aj1" ] && [ "$rj2" = 2 ] && [ ! -e "$tmp/outj/args" ] \
+  && ok "refuses a metrics path that is relative or inside the work dir" || bad "refuses a metrics path that is relative or inside the work dir" "rc=$rj1,$rj2"
+
+# 8k. two instructions are a usage error, not a silent drop of the first
+go -- --rung worker 'fix a' 'and b'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a second instruction" || bad "refuses a second instruction" "rc=$rc"
+
+# 8l. a final TOOL-FAULT line is recorded and is a model outcome
+go FLOOR_METRICS="$tmp/m8l" STUB_RC=1 STUB_SAY=$'tried twice\nTOOL-FAULT: edit tool broke' -- --rung worker 'x'
+cp "$tmp/m8l" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = TOOL-FAULT ] && ok "final TOOL-FAULT line recorded, exit 0" || bad "final TOOL-FAULT line recorded, exit 0" "rc=$rc $(cat "$tmp/m8l" 2>/dev/null)"
 
 exit $fail

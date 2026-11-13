@@ -8,11 +8,13 @@ rung=; instruction=
 while [ $# -gt 0 ]; do
   case $1 in
     --rung) rung=${2:-}; shift; [ $# -eq 0 ] || shift ;;
-    *) instruction="$1"; shift ;;
+    *) [ -z "${have:-}" ] || die "more than one instruction"; have=1; instruction="$1"; shift ;;
   esac
 done
 [ "$rung" = worker ] || die "unknown rung: $rung"
 [ -n "$instruction" ] || die "missing instruction"
+# The metrics file must not sit in the work dir, where it would count as the worker's change.
+case ${FLOOR_METRICS:-/} in "$PWD"/*) die "FLOOR_METRICS must be outside the work dir" ;; /*) ;; *) die "FLOOR_METRICS must be an absolute path" ;; esac
 
 if [ -n "${WORKER_PRIVATE_PORT:-}" ] && [ "$WORKER_PRIVATE_PORT" != 8099 ]; then
   die "foreign WORKER_PRIVATE_PORT: $WORKER_PRIVATE_PORT"
@@ -20,14 +22,15 @@ fi
 
 # Task limit: must be a whole number of milliseconds, at least 30 s, before anything runs.
 if [ -n "${BENCH_TASK_TIMEOUT_MS:-}" ]; then
-  [[ "$BENCH_TASK_TIMEOUT_MS" =~ ^[0-9]+$ ]] && [ "$BENCH_TASK_TIMEOUT_MS" -ge 30000 ] \
+  [[ "$BENCH_TASK_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] && [ "$BENCH_TASK_TIMEOUT_MS" -ge 30000 ] \
     || die "BENCH_TASK_TIMEOUT_MS must be an integer >= 30000, got: ${BENCH_TASK_TIMEOUT_MS:-unset}"
   limit=$(( BENCH_TASK_TIMEOUT_MS / 1000 - 15 ))
 else
   limit=600
 fi
 
-# floor-run only commits into a repo it made itself.
+# floor-run only commits into a repo it made itself: no git redirection from the caller, no existing repo.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
 [ -e .git ] && die "work dir is already a git repo"
 git init -q 2>/dev/null
 { echo '__pycache__/'
