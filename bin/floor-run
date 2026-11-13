@@ -53,7 +53,7 @@ fi
 outfile=$(mktemp)
 start=$SECONDS
 "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$PWD" --lane private \
-    --task "$taskfile" --role worker --timeout "$limit" > "$outfile" 2>&1 | tee /dev/stderr
+    --task "$taskfile" --role worker --timeout "$limit" | tee "$outfile"
 sandbox_rc=${PIPESTATUS[0]}
 elapsed=$(( SECONDS - start ))
 
