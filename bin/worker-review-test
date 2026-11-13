@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# worker-review-test — worker-review against a stub model server: streams, reassembles, times out, fails loudly.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); pid=
+trap '[ -z "$pid" ] || kill "$pid" 2>/dev/null; rm -rf "$tmp"' EXIT
+fails=0
+ok() { echo "PASS  $1"; }
+no() { echo "FAIL  $1"; fails=1; }
+
+# stub: MODE=pass|empty|error|hang; writes the request body to $tmp/req and its port to $tmp/port
+cat > "$tmp/stub.js" <<'EOF'
+const http = require('http'), fs = require('fs');
+const [dir, mode] = process.argv.slice(2);
+const chunk = (s) => 'data: ' + JSON.stringify({ choices: [{ delta: { content: s } }] }) + '\n\n';
+const srv = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => (body += d));
+  req.on('end', () => {
+    fs.writeFileSync(dir + '/req', body);
+    if (mode === 'hang') return;
+    if (mode === 'error') { res.writeHead(500); return res.end('boom'); }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: ' + JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] }) + '\n\n');
+    if (mode === 'pass') { res.write(chunk('PA')); res.write(chunk('SS\nlooks')); res.write(chunk(' right')); }
+    res.end('data: [DONE]\n\n');
+  });
+});
+srv.listen(0, '127.0.0.1', () => fs.writeFileSync(dir + '/port', String(srv.address().port)));
+EOF
+
+serve() { # $1 mode
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null
+  rm -f "$tmp/port" "$tmp/req"
+  node "$tmp/stub.js" "$tmp" "$1" & pid=$!
+  for _ in $(seq 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done
+  port=$(cat "$tmp/port")
+}
+review() { printf 'the task\n\ndiff --git a/x b/x\n' | WORKER_PRIVATE_PORT=$port WORKER_PRIVATE_MODEL=stub-model "$@" "$here/worker-review"; }
+
+serve pass
+out=$(review env 2>"$tmp/err"); rc=$?
+[ $rc -eq 0 ] && [ "$(head -1 <<<"$out")" = PASS ] && ok "verdict reassembled from stream chunks" || no "verdict reassembled from stream chunks (rc=$rc out=$out)"
+[ "$out" = $'PASS\nlooks right' ] && ok "whole reply printed" || no "whole reply printed ($out)"
+[ "$(jq -r '.stream' "$tmp/req")" = true ] && ok "request asks for a stream" || no "request asks for a stream"
+[ "$(jq -r '.model' "$tmp/req")" = stub-model ] && jq -e '.messages[1].content | test("the task")' "$tmp/req" >/dev/null \
+  && ok "request carries model and input" || no "request carries model and input"
+
+serve empty
+out=$(review env 2>/dev/null); rc=$?
+[ $rc -ne 0 ] && [ -z "$out" ] && ok "empty reply is a failure" || no "empty reply is a failure (rc=$rc)"
+
+serve error
+out=$(review env 2>/dev/null); rc=$?
+[ $rc -ne 0 ] && ok "server error is a failure" || no "server error is a failure (rc=$rc)"
+
+serve hang
+s=$SECONDS
+out=$(review env WORKER_REVIEW_TIMEOUT=1 2>/dev/null); rc=$?
+[ $rc -ne 0 ] && [ $((SECONDS - s)) -le 5 ] && ok "a hang ends at WORKER_REVIEW_TIMEOUT" || no "a hang ends at WORKER_REVIEW_TIMEOUT (rc=$rc, $((SECONDS - s))s)"
+
+exit $fails
