@@ -32,6 +32,7 @@ go() {
   wd=$(mktemp -d "$tmp/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
   echo 'print(1)' > "$wd/a.py"
   mkdir "$wd/__pycache__" && echo junk > "$wd/__pycache__/a.cpython-312.pyc"
+  [ -z "${prep:-}" ] || ( cd "$wd" && eval "$prep" )   # prep='cmds' go ... : extra setup inside the work dir
   ( cd "$wd" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS -u FLOOR_METRICS \
       WORKER_SANDBOX="$tmp/stub" STUB_OUT="$out" "${envs[@]}" "$here/floor-run" "$@" ) > "$out/stdout" 2> "$out/stderr"
   rc=$?
@@ -76,8 +77,14 @@ go -- --rung worker
 # 5. the worker's time limit sits under the bench's task limit
 go BENCH_TASK_TIMEOUT_MS=180000 -- --rung worker 'x'
 [ "$(arg_after --timeout)" = 165 ] && ok "timeout = task limit - 15 s" || bad "timeout = task limit - 15 s" "got $(arg_after --timeout)"
+go BENCH_TASK_TIMEOUT_MS=30000 -- --rung worker 'x'
+[ "$(arg_after --timeout)" = 15 ] && ok "shortest task limit: 30 s gives the worker 15 s" || bad "shortest task limit: 30 s gives the worker 15 s" "got $(arg_after --timeout)"
+# a limit under 30 s leaves the worker no room, and a limit that is not a whole number is never evaluated
 go BENCH_TASK_TIMEOUT_MS=20000 -- --rung worker 'x'
-[ "$(arg_after --timeout)" = 30 ] && ok "timeout floor 30 s" || bad "timeout floor 30 s" "got $(arg_after --timeout)"
+r5=$rc; a5=$([ -e "$out/args" ] && echo ran)
+go "BENCH_TASK_TIMEOUT_MS=a[\$(touch $tmp/pwned)]" -- --rung worker 'x'
+[ "$r5" = 2 ] && [ -z "$a5" ] && [ "$rc" = 2 ] && [ ! -e "$out/args" ] && [ ! -e "$tmp/pwned" ] \
+  && ok "refuses a task limit under 30 s or not a number" || bad "refuses a task limit under 30 s or not a number" "rc=$r5,$rc ran=$a5 pwned=$(ls "$tmp/pwned" 2>/dev/null)"
 
 # 6. any model outcome exits 0 (the bench's verify gives the verdict): a timeout, a failure that left changes
 go FLOOR_METRICS="$tmp/m6" STUB_RC=124 -- --rung worker 'x'
@@ -98,5 +105,34 @@ cp "$tmp/m8" "$out/metrics" 2>/dev/null
 go FLOOR_METRICS="$tmp/m8b" STUB_SAY=$'TOOL-FAULT: edit tool broke\nso I used bash instead, done' -- --rung worker 'x'
 cp "$tmp/m8b" "$out/metrics" 2>/dev/null
 [ "$(metric '.way_out')" = null ] && ok "way out counts only as the last line" || bad "way out counts only as the last line" "$(cat "$tmp/m8b" 2>/dev/null)"
+
+# 8c. --rung with no value is a usage error; an instruction that looks like an echo flag reaches the worker as written
+go -- 'x' --rung
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses --rung with no value" || bad "refuses --rung with no value" "rc=$rc $(tail -1 "$out/stderr")"
+go -- --rung worker '-n'
+[ "$(head -1 "$out/task-seen" 2>/dev/null)" = '-n' ] && ok "instruction written verbatim" || bad "instruction written verbatim" "got: $(head -1 "$out/task-seen" 2>/dev/null)"
+
+# 8d. floor-run only ever commits into a repo it made: a work dir that already has a .git (dir or file) is refused
+prep='git init -q' go -- --rung worker 'x'
+rd=$rc; ad=$([ -e "$out/args" ] && echo ran); nd=$(git -C "$wd" rev-list --all --count 2>/dev/null)
+prep='echo "gitdir: /nonexistent" > .git' go -- --rung worker 'x'
+[ "$rd" = 2 ] && [ -z "$ad" ] && [ "$nd" = 0 ] && [ "$rc" = 2 ] && [ ! -e "$out/args" ] \
+  && ok "refuses a work dir that is already a git repo" || bad "refuses a work dir that is already a git repo" "rc=$rd,$rc ran=$ad commits=$nd"
+
+# 8e. the setup commit does not depend on the machine's git config (signing, hooks)
+mkdir -p "$tmp/hooks"; printf '#!/bin/sh\nexit 1\n' > "$tmp/hooks/pre-commit"; chmod +x "$tmp/hooks/pre-commit"
+printf '[commit]\n\tgpgsign = true\n[core]\n\thooksPath = %s\n' "$tmp/hooks" > "$tmp/hostile.gitconfig"
+go GIT_CONFIG_GLOBAL="$tmp/hostile.gitconfig" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && [ "$(git -C "$wd" rev-list --count HEAD 2>/dev/null)" = 1 ] && [ -z "$(git -C "$wd" status --porcelain)" ] \
+  && ok "setup commit ignores signing and hook config" || bad "setup commit ignores signing and hook config" "rc=$rc $(tail -2 "$out/stderr")"
+
+# 8f. a setup that cannot commit everything is an infra fault before the worker starts
+#     (otherwise the old files look like the worker's changes and exit 4 can never fire)
+prep='echo s > locked; chmod 000 locked' go STUB_RC=1 -- --rung worker 'x'
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "failed setup commit exits 4 before the sandbox" || bad "failed setup commit exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+
+# 8g. work the worker committed itself still counts as a change
+go STUB_RC=1 STUB_DO='echo z > z.txt; git add z.txt; git -c user.name=w -c user.email=w@localhost commit -qm w' -- --rung worker 'x'
+[ "$rc" = 0 ] && ok "failure after the worker's own commit is a model outcome" || bad "failure after the worker's own commit is a model outcome" "rc=$rc"
 
 exit $fail
