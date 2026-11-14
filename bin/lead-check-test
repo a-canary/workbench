@@ -27,6 +27,7 @@ no_taskfile() { script test_new.sh 'false'; }
 litter()      { script test_new.sh 'touch litter.tmp; grep -q 2 a.py'; task 'sh test_new.sh'; }
 nothing()     { :; }
 nul_way_out() { printf 'bin\0ary\nCANNOT-DO: no such module\n'; }
+dotfile()     { script .x 'false'; task 'sh ./verify.sh'; }
 dirties()     { script test_new.sh 'echo junk >> a.py; grep -q 2 a.py'; task 'sh test_new.sh'; }
 EOF
 
@@ -116,6 +117,7 @@ go STUB_DO_1=passes_now STUB_DO_2=good --
 rejected "two new files" two_files
 rejected "Test: runs an existing verifier, not the new file" reuses
 [ "$(j .reused_verifier)" = 1 ] && ok "reused verifier is counted" || bad "reused verifier is counted" "$(why)"
+rejected "dot-named new file with the old verifier (empty stem)" dotfile
 rejected "test fails on a syntax error" syntax
 rejected "test command not runnable" norun
 rejected "test only fails by timeout" slow LEAD_RED_TIMEOUT=1
