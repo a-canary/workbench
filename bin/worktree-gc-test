@@ -65,4 +65,35 @@ check "dirty file survives"     "$(cat "$root/dirty/wip" 2>/dev/null)" wip
 check "held log survives" "$(cat "$root/logs/run.log" 2>/dev/null)" trade
 check "open still on disk"      "$(test -d "$root/open" && echo y)" y
 
+# --park-days N (off unless given): an open worktree idle for N days or more is parked. Parking is lossless:
+# it applies only when HEAD is exactly a remote ref's commit, the tree is clean and no ignored file other than
+# a build cache is present. The worktree directory is removed; the local branch and the remote branch stay.
+# Verdict parked (dry-run: would-park). Anything else about an open worktree keeps the verdict open.
+old() { find "$root/$1" -exec touch -h -d '3 days ago' {} +; }
+mk ahead;   commit ahead p; g -C "$root/ahead" push origin ahead; commit ahead q   # second commit is local only
+mk opendata; printf '*.log\n' >"$root/opendata/.gitignore"; commit opendata r; g -C "$root/opendata" push origin opendata
+echo trade >"$root/opendata/run.log"
+g -C "$tmp/main" fetch origin
+out=$("$gc" --root "$root" --dry-run --min-idle 0 --park-days 1 2>&1)
+check "park: fresh open worktree stays open" "$(verdict "$out" open)" open
+old open; old ahead; old opendata
+out=$("$gc" --root "$root" --dry-run --min-idle 0 2>&1)
+check "park is off unless asked" "$(verdict "$out" open)" open
+out=$("$gc" --root "$root" --dry-run --min-idle 0 --park-days 1 2>&1)
+check "dry-run: old open would park" "$(verdict "$out" open)" would-park
+check "dry-run: open still on disk" "$(test -d "$root/open" && echo y)" y
+check "local-only commit is unpushed, never parked" "$(verdict "$out" ahead)" unpushed
+check "open with an ignored log stays open" "$(verdict "$out" opendata)" open
+out=$("$gc" --root "$root" --min-idle 0 --park-days 5 2>&1)
+check "younger than park-days stays open" "$(verdict "$out" open)" open
+out=$("$gc" --root "$root" --min-idle 0 --park-days 1 2>&1)
+check "old open parked" "$(verdict "$out" open)" parked
+check "parked dir gone" "$(test -e "$root/open" && echo y || echo n)" n
+check "parked local branch kept" "$(git -C "$tmp/main" rev-parse -q --verify refs/heads/open >/dev/null && echo y || echo n)" y
+check "parked remote branch kept" "$(git -C "$tmp/origin.git" rev-parse -q --verify refs/heads/open >/dev/null && echo y || echo n)" y
+check "ahead commit survives" "$(git -C "$root/ahead" log -1 --format=%s 2>/dev/null)" q
+check "open data survives" "$(cat "$root/opendata/run.log" 2>/dev/null)" trade
+check "one held check, shared by both paths" "$(grep -c 'ls-files --others --ignored' "$gc")" 1
+out=$("$gc" --root "$root" --dry-run --park-days x 2>&1); check "non-numeric park-days is a usage error" "$?" 1
+
 exit $fails
