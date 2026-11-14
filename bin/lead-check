@@ -91,7 +91,7 @@ for ((i=1; i<=tries; i++)); do
   # stem check: command must name the new file's stem as a whole word
   stem=$(basename "$newfile"); stem=${stem%%.*}
   words=" $(tr -c '[:alnum:]_-' ' ' <<<"$cmd") "
-  if [[ $words != *" $stem "* ]]; then
+  if [ -z "$stem" ] || [[ $words != *" $stem "* ]]; then
     reason="your test command must run the new test file ($stem)"; reused_verifier=$((reused_verifier+1)); cleanup; continue
   fi
   # run the test: it must fail, not crash
