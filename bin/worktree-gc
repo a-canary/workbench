@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# worktree-gc — prune merged git worktrees under a root directory.
+#
+# For each direct child of --root that is a git worktree, print exactly one
+# line: "<verdict> <path>". Verdicts:
+#   active       - any file touched within --min-idle minutes; kept
+#   dirty        - uncommitted or untracked changes; kept
+#   unpushed     - HEAD has commits on no remote ref; kept
+#   removed      - clean, pushed, merged into origin default; worktree + branch deleted
+#   would-remove - same as removed but --dry-run; nothing deleted
+#   open         - pushed but not merged; kept
+#
+# Non-git children are skipped silently. Never uses --force on worktree remove.
+set -u
+
+ROOT="${HOME}/worktrees"
+DRY_RUN=0
+MIN_IDLE=60
+
+usage() {
+    echo "Usage: worktree-gc [--root DIR] [--dry-run] [--min-idle MIN]"
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root)
+            ROOT="$2"; shift 2 ;;
+        --dry-run)
+            DRY_RUN=1; shift ;;
+        --min-idle)
+            MIN_IDLE="$2"; shift 2 ;;
+        *)
+            usage ;;
+    esac
+done
+
+# Resolve root to absolute path
+ROOT=$(cd "$ROOT" 2>/dev/null && pwd) || { echo "error: root '$ROOT' not found" >&2; exit 1; }
+
+# Determine the origin default branch for a worktree.
+# Falls back to origin/main, then origin/master.
+get_base() {
+    local wt="$1"
+    local base
+    base=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+    if [ -n "$base" ]; then
+        echo "$base"
+        return 0
+    fi
+    for ref in origin/main origin/master; do
+        if git -C "$wt" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+            echo "$ref"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check if HEAD's changes are already in base (by content, not ancestry).
+# Uses merge-tree: if merging HEAD into base produces base's tree unchanged,
+# the content is already there (catches squash merges).
+is_merged() {
+    local wt="$1" base="$2"
+    local base_tree merged_tree
+    base_tree=$(git -C "$wt" rev-parse "${base}^{tree}" 2>/dev/null) || return 1
+    merged_tree=$(git -C "$wt" merge-tree --write-tree "$base" HEAD 2>/dev/null) || return 1
+    [ -n "$merged_tree" ] && [ "$merged_tree" = "$base_tree" ]
+}
+
+# Check if any file (excluding .git) was modified within MIN_IDLE minutes.
+is_active() {
+    local wt="$1"
+    [ "$MIN_IDLE" -le 0 ] && return 1
+    if find "$wt" \
+        -not -path "$wt/.git" \
+        -not -path "*/.git/*" \
+        -type f \
+        -mmin -"$MIN_IDLE" \
+        -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    return 1
+}
+
+for wt in "$ROOT"/*/; do
+    [ -d "$wt" ] || continue
+    wt="${wt%/}"
+
+    # Skip if not a git worktree
+    if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+        continue
+    fi
+
+    # 1. Dirty check
+    if git -C "$wt" status --porcelain 2>/dev/null | grep -q .; then
+        echo "dirty $wt"
+        continue
+    fi
+
+    # 2. Active check (recent file activity)
+    if is_active "$wt"; then
+        echo "active $wt"
+        continue
+    fi
+
+    # 3. Unpushed check
+    if git -C "$wt" rev-list HEAD --not --remotes 2>/dev/null | grep -q .; then
+        echo "unpushed $wt"
+        continue
+    fi
+
+    # 4. Merged check
+    base=$(get_base "$wt") || { echo "open $wt"; continue; }
+    if ! is_merged "$wt" "$base"; then
+        echo "open $wt"
+        continue
+    fi
+
+    # 5. Safe to remove
+    branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+    # Find the main repo to run worktree remove from
+    common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null)
+    if [ -z "$common" ]; then
+        echo "open $wt"
+        continue
+    fi
+    if [[ "$common" != /* ]]; then
+        common="$wt/$common"
+    fi
+    common=$(cd "$common" 2>/dev/null && pwd) || { echo "open $wt"; continue; }
+    main_repo=$(dirname "$common")
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "would-remove $wt"
+    else
+        # Remove the worktree (no --force; we verified it's clean)
+        if git -C "$main_repo" worktree remove "$wt" 2>/dev/null; then
+            # Delete the local branch
+            if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+                git -C "$main_repo" branch -D "$branch" 2>/dev/null
+            fi
+            echo "removed $wt"
+        else
+            echo "open $wt"
+        fi
+    fi
+done

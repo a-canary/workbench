@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# worktree-gc-test — hermetic: a bare origin, one main clone, five worktrees under a scratch root.
+# Contract for bin/worktree-gc [--root DIR] [--dry-run]: one line "<verdict> <path>" per worktree, where
+#   removed / would-remove : clean, nothing unpushed, and merging HEAD into the origin default branch
+#                            changes nothing (catches squash merges, not just ancestry)
+#   dirty                  : uncommitted or untracked changes; kept
+#   unpushed               : HEAD has commits on no remote ref; kept, never dropped
+#   open                   : pushed but not merged; kept (caller parks or follows up)
+#   active                 : any file touched within --min-idle minutes (default 60); kept, checked first
+#                            after dirty, so a worker mid-run is never reaped (KE worktree-reaper-race)
+# --dry-run removes nothing. Removal = git worktree remove + delete the local branch.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+gc=$here/worktree-gc
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/worktree-gc-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+g() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@" >/dev/null 2>&1; }
+
+g init --bare "$tmp/origin.git"
+g clone "$tmp/origin.git" "$tmp/main"
+echo base >"$tmp/main/f"; g -C "$tmp/main" add f; g -C "$tmp/main" commit -m base; g -C "$tmp/main" push origin HEAD:main
+g -C "$tmp/main" remote set-head origin main
+root=$tmp/wt; mkdir -p "$root"
+mk() { g -C "$tmp/main" worktree add -b "$1" "$root/$1" origin/main; }
+commit() { echo "$2" >"$root/$1/$1.txt"; g -C "$root/$1" add -A; g -C "$root/$1" commit -m "$2"; }
+
+# squashed: two commits, pushed, then squash-merged into main by content (no ancestry).
+mk squashed; commit squashed a; commit squashed b; g -C "$root/squashed" push origin squashed
+cp "$root/squashed/squashed.txt" "$tmp/main/"; g -C "$tmp/main" add -A; g -C "$tmp/main" commit -m squash; g -C "$tmp/main" push origin HEAD:main
+mk dirty;    commit dirty x; g -C "$root/dirty" push origin dirty; echo wip >"$root/dirty/wip"
+mk unpushed; commit unpushed y
+mk open;     commit open z; g -C "$root/open" push origin open
+g -C "$tmp/main" fetch origin
+
+verdict() { echo "$1" | awk -v p="$root/$2" '$2==p {print $1}'; }
+
+out=$("$gc" --root "$root" --dry-run 2>&1)
+check "default min-idle: fresh merged worktree is active" "$(verdict "$out" squashed)" active
+out=$("$gc" --root "$root" --dry-run --min-idle 0 2>&1)
+check "dry-run: squashed would go"  "$(verdict "$out" squashed)" would-remove
+check "dry-run: squashed still on disk" "$(test -d "$root/squashed" && echo y)" y
+check "dirty kept"    "$(verdict "$out" dirty)" dirty
+check "unpushed kept" "$(verdict "$out" unpushed)" unpushed
+check "open kept"     "$(verdict "$out" open)" open
+
+out=$("$gc" --root "$root" --min-idle 0 2>&1)
+check "squashed removed"        "$(verdict "$out" squashed)" removed
+check "squashed dir gone"       "$(test -e "$root/squashed" && echo y || echo n)" n
+check "squashed local branch gone" "$(git -C "$tmp/main" rev-parse -q --verify refs/heads/squashed >/dev/null && echo y || echo n)" n
+check "unpushed commit survives" "$(git -C "$root/unpushed" log -1 --format=%s 2>/dev/null)" y
+check "dirty file survives"     "$(cat "$root/dirty/wip" 2>/dev/null)" wip
+check "open still on disk"      "$(test -d "$root/open" && echo y)" y
+
+exit $fails
