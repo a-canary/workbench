@@ -34,6 +34,7 @@ bd() { echo "$*" >>"$calls"
   case " $* " in
     *" ready "*) echo "warning: beads.role not configured" >&2
       [ -z "${READY_FAIL:-}" ] || { echo "database locked" >&2; return 1; }; printf '%s\n' "$READY_JSON" ;;
+    *" list "*) [ -z "${LIST_FAIL:-}" ] || return 1; printf '%s\n' "${LIST_JSON:-[]}" ;;
     *" --claim "*) [ -z "${CLAIM_FAIL:-}" ] || return 1 ;;
     *" close "*) [ -z "${CLOSE_FAIL:-}" ] || return 1 ;;
   esac; return 0; }
@@ -221,4 +222,22 @@ check "trailing space in Branch: ok"   "$(field Branch "$(jq -r '.[0].descriptio
 bead $'Test: true\n---\nx'
 check "malformed bead fails"           "$(go 2>/dev/null; grep -c 'label add X-1 qwen-failed' "$calls")" $'rc=0 down=0\n1'
 check "worktrees cleaned"              "$(git -C "$tmp/r" worktree list | wc -l)" 1
+# repos-ym97: --lint names labelled beads the drainer could never run (6 sat undrainable while both GPUs idled)
+check "lint: good bead is silent"      "$(lint_desc "$tmp/r" $'Branch: lane/x-1\nTest: true\n---\nx')" ""
+check "lint: no header"                "$(lint_desc "$tmp/r" $'just prose')" "lacks Branch:/Test:/--- task"
+check "lint: no body"                  "$(lint_desc "$tmp/r" $'Branch: lane/x-1\nTest: true')" "lacks Branch:/Test:/--- task"
+check "lint: unsafe branch"            "$(lint_desc "$tmp/r" $'Branch: main\nTest: true\n---\nx')" "Branch: must be lane/* or v100/* (got 'main')"
+check "lint: branch not pushed"        "$(lint_desc "$tmp/r" $'Branch: lane/nope\nTest: true\n---\nx')" "branch lane/nope is not on origin"
+lb() { jq -nc --arg i "$1" --arg d "$2" --argjson l "$3" '{id:$i,description:$d,labels:$l}'; }
+LIST_JSON=$(jq -sc . <<<"$(lb G-1 $'Branch: lane/x-1\nTest: true\n---\nx' '["lane:v100"]')
+$(lb B-1 'prose only' '["lane:v100"]')
+$(lb B-2 $'Branch: lane/nope\nTest: true\n---\nx' '["lane:v100"]')
+$(lb F-1 'prose only' '["lane:v100","qwen-failed"]')
+$(lb H-1 'prose only' '["lane:v100","human"]')")
+check "lint: repo lists only bad open beads" "$(repo=$tmp/r; lint_repo 2>/dev/null; echo "rc=$?")" \
+  $'B-1: lacks Branch:/Test:/--- task\nB-2: branch lane/nope is not on origin\nrc=1'
+LIST_JSON=$(jq -sc . <<<"$(lb G-1 $'Branch: lane/x-1\nTest: true\n---\nx' '["lane:v100"]')")
+check "lint: clean repo rc=0"          "$(repo=$tmp/r; lint_repo 2>/dev/null; echo "rc=$?")" "rc=0"
+check "lint: bd outage is not clean"   "$(repo=$tmp/r; LIST_FAIL=1 lint_repo 2>/dev/null; echo "rc=$?")" "rc=2"
+check "lint: flag is wired"            "$(grep -c -- '--lint)' "$here/lane-run")" 1
 exit $fails

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lane-run — drain local-model beads through worker-task (sandboxed pi on the private lane).
 #
-#   lane-run [--repo DIR]... [--label lane:v100] [--lane private] [--once] [--idle 600]
+#   lane-run [--repo DIR]... [--label lane:v100] [--lane private] [--once] [--idle 600] [--lint]
+#   --lint: read-only; names undrainable beads; claims nothing
 #   (the public 9router lane is retired on this host: 9router moved to another lab host, repos-mxu8 A, 2026-10-31)
 #   --repo repeats; each pass drains one bead per repo in turn (default: $PWD).
 #
@@ -19,7 +20,7 @@
 set -uo pipefail
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-repos=() label=lane:v100 lane=private once= idle=600
+repos=() label=lane:v100 lane=private once= idle=600 lint=
 while [ $# -gt 0 ]; do
   case $1 in
     --repo) repos+=("$(readlink -f "$2")"); shift 2 ;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
     --lane) lane=$2; shift 2 ;;
     --once) once=1; shift ;;
     --idle) idle=$2; shift 2 ;;
+    --lint) lint=1; shift ;;
     -h|--help) sed -n '2,6s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "lane-run: unknown arg $1" >&2; exit 2 ;;
   esac
@@ -258,7 +260,62 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   [ -z "$down" ]
 }
 
+# lint_desc <repo> <description> — one reason line if the bead can't be run, nothing if it can
+lint_desc() {
+  local desc=$2 b branch test body_text
+  desc=${desc//$'\r'/}
+  b=$(field Branch "$desc"); branch=$b
+  test=$(field Test "$desc")
+  body_text=$(body "$desc")
+  if [ -z "$b" ] || [ -z "$test" ] || [ -z "$body_text" ]; then
+    echo "lacks Branch:/Test:/--- task"
+    return 0
+  fi
+  if ! safe_branch "$branch"; then
+    echo "Branch: must be lane/* or v100/* (got '$branch')"
+    return 0
+  fi
+  if ! git -C "$1" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    echo "branch $branch is not on origin"
+    return 0
+  fi
+}
+
+# lint_repo — list open beads for $label in $repo; print "<id>: <reason>" for each undrainable one
+lint_repo() {
+  local j ids i id desc reason printed=0
+  j=$(bd -C "$repo" list -l "$label" --status open --json) || { log "lint: bd list failed in $repo"; return 2; }
+  if ! jq -e 'type == "array"' <<<"$j" >/dev/null 2>&1; then
+    log "lint: bd list returned non-JSON in $repo"
+    return 2
+  fi
+  mapfile -t ids < <(jq -c '.[]' <<<"$j")
+  for i in "${ids[@]}"; do
+    if jq -e '.labels[] | select(. == "qwen-failed" or . == "human" or . == "lane-infra")' <<<"$i" >/dev/null 2>&1; then
+      continue
+    fi
+    id=$(jq -r '.id' <<<"$i")
+    desc=$(jq -r '.description // ""' <<<"$i")
+    reason=$(lint_desc "$repo" "$desc")
+    if [ -n "$reason" ]; then
+      echo "$id: $reason"
+      printed=1
+    fi
+  done
+  if [ "$printed" = "1" ]; then return 1; fi
+  return 0
+}
+
 [ "${LANE_RUN_LIB:-}" ] && return 0 2>/dev/null  # sourced by the test
+if [ -n "$lint" ]; then
+  rc=0
+  for repo in "${repos[@]}"; do
+    lint_repo
+    r=$?
+    [ "$r" -gt "$rc" ] && rc=$r
+  done
+  exit $rc
+fi
 gc_logs
 while :; do
   did= down=
