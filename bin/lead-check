@@ -36,7 +36,7 @@ mkdir -p "$out"
 
 taskf=$(mktemp); replyf=$(mktemp); testoutf=$(mktemp)
 trap 'rm -f "$taskf" "$replyf" "$testoutf"' EXIT
-cleanup() { g reset -q --hard; g clean -fdq; }
+cleanup() { g reset -q --hard; g clean -ffdq; }
 write_json() { # $1=valid $2=tries $3=way_out $4=reused
   jq -nc --arg v "$1" --argjson t "$2" --arg w "$3" --argjson r "$4" \
     '{"valid":($v=="true"),"tries":$t,"way_out":(if $w=="" then null else $w end),"reused_verifier":$r}' \
@@ -55,7 +55,7 @@ for ((i=1; i<=tries; i++)); do
   wrc=0; sbx --task "$taskf" --role lead --timeout "$tmo" > "$replyf" 2>&1 || wrc=$?
   cat "$replyf" >&2
   # way out
-  last=$(grep -v '^[[:space:]]*$' "$replyf" | tail -n1)
+  last=$(grep -a -v '^[[:space:]]*$' "$replyf" | tail -n1)
   case $last in
     CANNOT-DO:*|CANNOT-JUDGE:*|TOOL-FAULT:*)
       echo "$last"
@@ -112,7 +112,7 @@ for ((i=1; i<=tries; i++)); do
       cleanup; write_json false $i "" $reused_verifier
       exit 4
     fi
-    g clean -fdq
+    g reset -q --hard; g clean -ffdq
     write_json true $i "" $reused_verifier
     exit 0
   fi
