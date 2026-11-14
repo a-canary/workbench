@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# waker-test — hermetic contract for bin/waker (control-pane spec section 7; epic repos-dg7w items 6-9, 11).
+#
+# bin/waker [--dry-run] runs ONE tick: no model, no loop. It prints one line per seat file,
+#   seat=<name> <verdict> [bead=<id>] [reason]
+# and exits 0. Verdicts:
+#   started      a Lead session was started on its top ready bead (--dry-run: would-start, nothing run)
+#   running      the seat already has a live session; nothing started
+#   idle         no ready bead
+#   budget-stop  Claude use is at 90% or more, or pace is above the seat's pace_max, or the meter is unreadable
+#   claude-down  the file claude.down exists in the seat folder
+#   no-slot      every Claude slot is taken by seats of higher priority
+#   bad-seat     the seat file failed validation; it is named, skipped, and never stops the tick
+# Off switch: while <seats>/waker.off exists the tick prints "waker: off" and does nothing else (exit 0).
+#
+# Seat file <seats>/<seat>.json:
+#   {"seat":"<stem>","kind":"lead","repo":"<dir>","label":"<bead label>","priority":<int, 1 first>,
+#    "pace_max":<number>,"env":["NAME",...],"start":"<shell command>"}
+# The start command runs with ONLY the variables named in env (plus WAKER_SEAT and WAKER_BEAD): the per-seat
+# secrets allowlist. Everything else in the waker's environment is dropped.
+#
+# Seams (env, all optional; defaults are the live commands):
+#   WAKER_SEATS       seat folder                      (default ~/vault/director/seats)
+#   WAKER_BUDGET      folder holding ignore-until      (default ~/vault/director/.budget)
+#   WAKER_METER_CMD   prints "<util> <pace>" as fractions, or "? ?" when unreadable
+#   WAKER_READY_CMD   "<cmd> <repo> <label>" prints the top ready bead id, or nothing
+#   WAKER_ALIVE_CMD   "<cmd> <seat>" exits 0 when the seat has a live session
+#   WAKER_CLAUDE_SLOTS  live Lead sessions allowed at once (default 2)
+#   WAKER_DRAIN_CMD   run once at the end of every tick that is not off (the worker drainer); "" = none
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+waker=$here/waker
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/waker-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+pre() { if grep -q -- "^$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no line starting '$3' in:"; sed 's/^/      /' "$2"; fails=1; fi; }
+has() { if grep -qxF -- "$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no line '$3' in:"; sed 's/^/      /' "$2"; fails=1; fi; }
+
+# --- stubs: every seam is a small script reading files under $tmp/w ---
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/meter" <<'EOF'
+#!/bin/bash
+cat "$W/meter" 2>/dev/null || echo "? ?"
+EOF
+cat >"$tmp/bin/ready" <<'EOF'
+#!/bin/bash
+cat "$W/ready/$(basename "$1").$2" 2>/dev/null
+EOF
+cat >"$tmp/bin/alive" <<'EOF'
+#!/bin/bash
+[ -e "$W/alive/$1" ]
+EOF
+cat >"$tmp/bin/drain" <<'EOF'
+#!/bin/bash
+echo drained >>"$W/drain.log"
+EOF
+chmod +x "$tmp"/bin/*
+
+# fresh world: three valid Lead seats (trading 1, ndv 2, stack 3), meter calm, nothing ready
+world() {
+  W=$tmp/w; command rm -rf "$W"; mkdir -p "$W"/{seats,budget,ready,alive,repos/trading,repos/ndv,repos/stack}
+  echo "0.50 0.50" >"$W/meter"
+  seat trading 1 1.0; seat ndv 2 1.1; seat stack 3 0.9
+}
+# seat <name> <priority> <pace_max>: start command records the seat, the bead and its whole environment
+seat() {
+  cat >"$W/seats/$1.json" <<EOF
+{"seat":"$1","kind":"lead","repo":"$W/repos/$1","label":"lead","priority":$2,"pace_max":$3,
+ "env":["KEEP_ME"],"start":"echo \$WAKER_SEAT \$WAKER_BEAD >>$W/started; env >$W/env.$1"}
+EOF
+}
+ready() { echo "$2" >"$W/ready/$1.lead"; }
+tick() {
+  env W="$W" KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
+    WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+    WAKER_DRAIN_CMD="$tmp/bin/drain" "$@" "$waker" >"$W/out" 2>"$W/err"; echo $? >"$W/rc"
+}
+started() { sort "$W/started" 2>/dev/null | tr '\n' ',' ; }
+
+# 1. nothing ready: every seat idle, nothing started, drainer still runs, exit 0
+world; tick
+check "1 exit 0" "$(cat "$W/rc")" 0
+has "1 trading idle" "$W/out" "seat=trading idle"
+has "1 stack idle" "$W/out" "seat=stack idle"
+check "1 nothing started" "$(started)" ""
+check "1 drainer ran once" "$(wc -l <"$W/drain.log" 2>/dev/null)" 1
+
+# 2. one ready bead: that seat starts on exactly that bead
+world; ready ndv ndv-12; tick
+has "2 ndv started" "$W/out" "seat=ndv started bead=ndv-12"
+check "2 start saw seat and bead" "$(started)" "ndv ndv-12,"
+
+# 3. secrets allowlist: the start command sees the named variable and not the others
+check "3 allowlisted variable kept" "$(grep -c '^KEEP_ME=kept$' "$W/env.ndv")" 1
+check "3 other variables dropped" "$(grep -c 'SECRET_TOKEN' "$W/env.ndv")" 0
+check "3 the waker's own seams dropped" "$(grep -c '^WAKER_METER_CMD=' "$W/env.ndv")" 0
+
+# 4. live session: running, not started again
+world; ready ndv ndv-12; touch "$W/alive/ndv"; tick
+has "4 ndv running" "$W/out" "seat=ndv running"
+check "4 nothing started" "$(started)" ""
+
+# 5. hard budget stop, per seat: pace 0.95 stops stack (0.9) but not trading (1.0) or ndv (1.1)
+world; echo "0.50 0.95" >"$W/meter"; ready trading t-1; ready ndv n-1; ready stack s-1; tick WAKER_CLAUDE_SLOTS=3
+pre "5 stack stopped" "$W/out" "seat=stack budget-stop bead=s-1 pace "
+check "5 the other two started" "$(started)" "ndv n-1,trading t-1,"
+
+# 6. use at 90% stops every seat, whatever the pace
+world; echo "0.90 0.10" >"$W/meter"; ready trading t-1; tick
+pre "6 trading stopped at 90%" "$W/out" "seat=trading budget-stop bead=t-1 use "
+check "6 nothing started" "$(started)" ""
+
+# 7. unreadable meter fails closed
+world; echo "? ?" >"$W/meter"; ready trading t-1; tick
+has "7 meter unreadable" "$W/out" "seat=trading budget-stop bead=t-1 meter unreadable"
+check "7 nothing started" "$(started)" ""
+
+# 8. operator override: ignore-until in the future lifts the pace and use stops; in the past it does nothing
+world; echo "0.95 3.00" >"$W/meter"; ready trading t-1; echo $(( $(date +%s) + 600 )) >"$W/budget/ignore-until"; tick
+check "8 future override starts" "$(started)" "trading t-1,"
+world; echo "0.95 3.00" >"$W/meter"; ready trading t-1; echo $(( $(date +%s) - 600 )) >"$W/budget/ignore-until"; tick
+check "8 expired override does not" "$(started)" ""
+
+# 9. strict priority: one slot, three ready seats: the highest priority takes it
+world; ready trading t-1; ready ndv n-1; ready stack s-1; tick WAKER_CLAUDE_SLOTS=1
+check "9 only trading started" "$(started)" "trading t-1,"
+has "9 ndv no-slot" "$W/out" "seat=ndv no-slot bead=n-1"
+has "9 stack no-slot" "$W/out" "seat=stack no-slot bead=s-1"
+
+# 10. a live session holds its slot: stack is running, one slot, so trading waits
+world; ready trading t-1; touch "$W/alive/stack"; tick WAKER_CLAUDE_SLOTS=1
+has "10 trading no-slot" "$W/out" "seat=trading no-slot bead=t-1"
+check "10 nothing started" "$(started)" ""
+
+# 11. a seat stopped by budget does not take a slot from a lower-priority seat
+world; echo "0.50 1.05" >"$W/meter"; ready trading t-1; ready ndv n-1; tick WAKER_CLAUDE_SLOTS=1
+pre "11 trading stopped" "$W/out" "seat=trading budget-stop bead=t-1 pace "
+check "11 ndv took the slot" "$(started)" "ndv n-1,"
+
+# 12. claude.down: no Lead starts; the drainer still runs
+world; ready trading t-1; touch "$W/seats/claude.down"; tick
+has "12 claude-down" "$W/out" "seat=trading claude-down bead=t-1"
+check "12 nothing started" "$(started)" ""
+check "12 drainer ran" "$(wc -l <"$W/drain.log" 2>/dev/null)" 1
+
+# 13. off switch: one file stops everything, the drainer included
+world; ready trading t-1; touch "$W/seats/waker.off"; tick
+check "13 exit 0" "$(cat "$W/rc")" 0
+check "13 says off" "$(cat "$W/out")" "waker: off"
+check "13 nothing started" "$(started)" ""
+check "13 drainer not run" "$([ -e "$W/drain.log" ] && echo ran || echo no)" no
+
+# 14. --dry-run: says would-start, runs nothing
+world; ready trading t-1; tick; : >"$W/started"; command rm -f "$W/drain.log"
+env W="$W" WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" \
+  WAKER_ALIVE_CMD="$tmp/bin/alive" WAKER_DRAIN_CMD="$tmp/bin/drain" "$waker" --dry-run >"$W/out" 2>"$W/err"
+has "14 would-start" "$W/out" "seat=trading would-start bead=t-1"
+check "14 nothing started" "$(started)" ""
+check "14 drainer not run" "$([ -e "$W/drain.log" ] && echo ran || echo no)" no
+
+# 15. bad seat files are named and skipped; good seats still run
+world; ready ndv n-1
+echo '{not json' >"$W/seats/broken.json"
+echo '{"seat":"other","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":[],"start":"true"}' >"$W/seats/misnamed.json"
+echo '{"seat":"badenv","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":["A B; rm"],"start":"true"}' >"$W/seats/badenv.json"
+echo '{"seat":"norepo","kind":"lead","repo":"'"$W"'/repos/missing","label":"lead","priority":1,"pace_max":1,"env":[],"start":"true"}' >"$W/seats/norepo.json"
+echo '{"seat":"nostart","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":[]}' >"$W/seats/nostart.json"
+echo '{"seat":"badprio","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":"high","pace_max":1,"env":[],"start":"true"}' >"$W/seats/badprio.json"
+tick
+check "15 exit 0" "$(cat "$W/rc")" 0
+for s in broken misnamed badenv norepo nostart badprio; do
+  check "15 $s is bad-seat" "$(grep -c "^seat=$s bad-seat" "$W/out")" 1
+done
+check "15 good seat still started" "$(started)" "ndv n-1,"
+
+# 16. a worker seat file is valid and left to the drainer: listed, never started by the waker
+world
+echo '{"seat":"qwen","kind":"worker","repo":"'"$W"'/repos/stack","label":"lane:v100","priority":9,"pace_max":0,"env":[],"start":"true"}' >"$W/seats/qwen.json"
+echo x >"$W/ready/stack.lane:v100"; tick
+has "16 worker seat goes to the drainer" "$W/out" "seat=qwen drainer"
+check "16 nothing started" "$(started)" ""
+
+# 17. a start command that fails is reported and does not stop the tick
+world; ready trading t-1; ready ndv n-1
+sed -i 's|"start":"[^"]*"|"start":"exit 3"|' "$W/seats/trading.json"; tick
+has "17 start failure named" "$W/out" "seat=trading start-failed bead=t-1 rc=3"
+check "17 ndv still started" "$(started)" "ndv n-1,"
+check "17 exit 0" "$(cat "$W/rc")" 0
+
+[ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
+exit $fails
