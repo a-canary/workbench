@@ -245,6 +245,24 @@ mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/x.pyc"
 if WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1
 then echo "PASS  public lane allows __pycache__"; else echo "FAIL  public lane allows __pycache__"; fail=1; fi
 unlink "$wt/__pycache__/x.pyc"; rmdir "$wt/__pycache__"
+# repos-26ux: a cache dir's name must not hide other content; only *.pyc under __pycache__ is exempt
+pubrun() { WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec true >/dev/null 2>&1; }
+mkdir -p "$wt/__pycache__"; touch "$wt/__pycache__/notes.txt"
+if pubrun; then echo "FAIL  public lane refuses a non-pyc file in __pycache__"; fail=1; else echo "PASS  public lane refuses a non-pyc file in __pycache__"; fi
+unlink "$wt/__pycache__/notes.txt"; rmdir "$wt/__pycache__"
+mkdir -p "$wt/bin/__pycache__/sub"; touch "$wt/bin/__pycache__/sub/k.pyc"
+if pubrun; then echo "FAIL  public lane refuses a dir inside __pycache__"; fail=1; else echo "PASS  public lane refuses a dir inside __pycache__"; fi
+unlink "$wt/bin/__pycache__/sub/k.pyc"; rmdir "$wt/bin/__pycache__/sub" "$wt/bin/__pycache__"
+mkdir -p "$wt/.pytest_cache"; touch "$wt/.pytest_cache/secrets.env"
+if pubrun; then echo "FAIL  public lane refuses .pytest_cache content"; fail=1; else echo "PASS  public lane refuses .pytest_cache content"; fi
+unlink "$wt/.pytest_cache/secrets.env"; rmdir "$wt/.pytest_cache"
+mkdir -p "$wt/bin/__pycache__"; touch "$wt/bin/__pycache__/m.cpython-312.pyc"
+if pubrun; then echo "PASS  public lane allows a nested .pyc"; else echo "FAIL  public lane allows a nested .pyc"; fail=1; fi
+unlink "$wt/bin/__pycache__/m.cpython-312.pyc"; rmdir "$wt/bin/__pycache__"
+# a symlink named like a cache file is not a cache file
+mkdir -p "$wt/__pycache__"; ln -s /etc/hostname "$wt/__pycache__/l.pyc"
+if pubrun; then echo "FAIL  public lane refuses a .pyc symlink"; fail=1; else echo "PASS  public lane refuses a .pyc symlink"; fi
+unlink "$wt/__pycache__/l.pyc"; rmdir "$wt/__pycache__"
 # WORKER_DEPS is lent to the private lane only: a public jail never sees host deps
 deps=$(mktemp -d); touch "$deps/marker"
 if WORKER_DEPS=$deps WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=$kport "$here/worker-sandbox" --worktree "$wt" --lane public --timeout 60 --exec sh -c '[ ! -e /work/node_modules/marker ]' >/dev/null 2>&1
