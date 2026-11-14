@@ -73,8 +73,11 @@ has "failed landed check wakes" "$out" "failures=1"
 has "failed check is named" "$(cat "$d/wakes")" "feed-watch: landed check failed rc=7"
 command rm "$d/landed.rc"; out=$(run)
 has "a-9 is new once the check works" "$out" "feed-watch: woke landed=1 failures=0"
+echo 'svc: webui down' >"$d/failing"; run >/dev/null; before=$(wakes)
 echo 2 >"$d/failing.rc"; out=$(run); has "failed failures check wakes" "$(cat "$d/wakes")" "feed-watch: failures check failed rc=2"
 command rm "$d/failing.rc"; run >/dev/null
+ok "a failure held before the check broke does not wake again" "$(( $(wakes) - before ))" 1
+: >"$d/failing"; run >/dev/null
 
 # a failed wake keeps the state, so the next tick retries
 before=$(wakes); printf 'a-1 x\na-2 x\na-9 x\nb-1 retry me\n' >"$d/landed"; echo 1 >"$d/wake.rc"

@@ -31,10 +31,10 @@ if [ -n "$FAIL_CMD" ]; then
         [ -n "$out" ] && cur_fails="${cur_fails:+$cur_fails
 }$out"
     else
-        rc=$?
-        if [ -n "$cur_fails" ]; then cur_fails="$cur_fails
-feed-watch: failures check failed rc=$rc"
-        else cur_fails="feed-watch: failures check failed rc=$rc"; fi
+        rc=$?  # the previous set is carried over, so failures it held do not wake again when the check recovers
+        cur_fails="${cur_fails:+$cur_fails
+}feed-watch: failures check failed rc=$rc${prev_fails:+
+$prev_fails}"
     fi
 fi
 new_landed=""; landed_count=0
