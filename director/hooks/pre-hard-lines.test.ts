@@ -47,6 +47,7 @@ test("blocks force push in every spelling", () => {
   blocked("git -c user.name=x -C /repo push --force");
   blocked("FOO=1 git push -f");
   blocked("git commit -m x && git push -f");
+  blocked("git --git-dir /repo/.git push -f");
 });
 
 test("blocks repo visibility, access and deletion", () => {
@@ -106,4 +107,6 @@ test("non-Bash tools and malformed input pass; unbalanced quotes fail closed", (
   expect(r.status).toBe(0);
   blocked("git push -f 'unterminated");
   allowed("echo 'unterminated");
+  blocked("echo $(echo $(echo $(echo $(echo $(echo $(true))))))"); // past the depth limit: fail closed
+  blocked("gh api graphql -f query='mutation { updateRepository(input: {visibility: PUBLIC}) { clientMutationId } }'");
 });

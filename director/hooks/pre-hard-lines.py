@@ -60,7 +60,7 @@ def git_push_force(words):
     i = 1
     while i < len(words):
         w = words[i]
-        if w == "-C" or w == "-c":
+        if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
             i += 2
         elif w.startswith("-"):
             i += 1
@@ -102,7 +102,8 @@ def check_hard_line(words):
 
     # c. gh api visibility/private/collaborators
     if w0 == "gh" and len(words) > 1 and words[1] == "api":
-        if any(w.startswith("private=") or w.startswith("visibility=") for w in words):
+        # ponytail: a body sent with --input FILE is not read; branch protection and the prose rule cover that path
+        if any(w.startswith(("private=", "visibility=")) or "updateRepository" in w for w in words):
             return "repo visibility or access"
         if any("/collaborators/" in w for w in words):
             method = None
@@ -185,8 +186,8 @@ def blocked_cmd(words):
 
 def blocked(cmd, depth=0):
     """Check a command string. Return hard line name or None."""
-    if depth > 4:
-        return None
+    if depth > 4:  # fail closed, as pre-host-agent does
+        return "command nested too deep to check"
     for sub in substs(cmd):
         res = blocked(sub, depth + 1)
         if res:
