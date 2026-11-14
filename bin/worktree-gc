@@ -130,10 +130,12 @@ for wt in "$ROOT"/*/; do
         remaining=0
         while IFS= read -r line; do
             [ -z "$line" ] && continue
+            # cache names count only for directories: a plain file called build or dist is data
+            isdir=0; [[ "$line" == */ ]] && isdir=1
             line="${line%/}"; base="${line##*/}"
             is_cache=0
             for cache in $IGNORED_CACHES; do
-                if [ "$base" = "$cache" ]; then
+                if [ "$isdir" -eq 1 ] && [ "$base" = "$cache" ]; then
                     is_cache=1
                     break
                 fi
