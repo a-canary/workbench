@@ -26,7 +26,7 @@ prev_seen=""; [ -f "$SEEN" ] && prev_seen=$(cat "$SEEN")
 prev_fails=""; [ -f "$LAST" ] && prev_fails=$(cat "$LAST")
 landed_lines=""; cur_fails=""
 if [ -n "$LANDED_CMD" ]; then
-    if out=$("$LANDED_CMD" 2>/dev/null 9>&-); then landed_lines=$out
+    if out=$("$LANDED_CMD" 2>/dev/null 9>&-); then landed_lines=$(awk 'NF && !s[$1]++' <<<"$out")  # blank lines and repeated ids are not items
     else rc=$?; cur_fails="feed-watch: landed check failed rc=$rc"; fi
 fi
 if [ -n "$FAIL_CMD" ]; then
@@ -84,5 +84,6 @@ if [ -n "$WAKE_CMD" ]; then
     if ! "$WAKE_CMD" "$msg" 9>&-; then echo "feed-watch: wake failed"; exit 0; fi
 fi
 write_state
-[ -n "$WAKE_CMD" ] && echo "feed-watch: woke landed=$landed_count failures=$fail_count"
+[ -n "$WAKE_CMD" ] && verb=woke || verb=recorded  # recorded: no wake command, state still advances
+echo "feed-watch: $verb landed=$landed_count failures=$fail_count"
 exit 0

@@ -85,6 +85,9 @@ command rm "$d/failing.rc"; run >/dev/null
 # ids split on any whitespace; a line starting with a dash or holding a backslash is still data
 before=$(wakes); printf 't-1\ttabbed title\n  s-1 leading spaces\n-n dash\\tid\n' >>"$d/landed"; run >/dev/null; run >/dev/null
 ok "tab, leading space and dash ids wake once" "$(( $(wakes) - before ))" 1
+before=$(wakes); printf '   \t \nw-1 once\nw-1 twice\n' >>"$d/landed"; out=$(run); run >/dev/null; run >/dev/null
+has "blank line and repeated id count once" "$out" "feed-watch: woke landed=1 failures=0"
+ok "a whitespace-only line never wakes again" "$(( $(wakes) - before ))" 1
 has "dash id stored verbatim" "$(cat "$d/state/landed.seen")" "-n"
 echo '-e back\\nslash' >"$d/failing"; run >/dev/null
 ok "failure line stored verbatim" "$(cat "$d/state/failures.last")" '-e back\\nslash'
