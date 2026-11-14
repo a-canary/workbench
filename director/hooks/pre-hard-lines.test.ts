@@ -88,6 +88,16 @@ test("blocks through string wrappers, find -exec and nested shells", () => {
   blocked("git -calias.p='push -f' p");
   blocked("gh api -X DELETE https://api.github.com/repos/o/r");
   blocked("gh api -X DELETE 'repos/o/r?x=1'");
+  // bash runs these, the tokenizer cannot read them: refused because they name a hard-line tool
+  blocked("# don't forget\ngh repo delete o/r --yes");
+  blocked("# it's fine\ngit push origin +main");
+  blocked("cat <<EOF\nit's\nEOF\nbun tools/order.ts buy SPY 1");
+  blocked("# don't\ngh api -X DELETE repos/o/r");
+  allowed("# don't forget\nls -la");
+  blocked('su aaron -c "git push -f"');
+  blocked("strace git push -f");
+  for (const input of ['{"tool_name":"Bash","tool_input":{}}', '{"tool_name":"Bash"}'])
+    expect(spawnSync("bash", [HOOK], { input, encoding: "utf8" }).status).toBe(2);
   const odd = spawnSync("bash", [HOOK], { input: '{"tool_name":"Bash","tool_input":"x"}', encoding: "utf8" });
   expect(odd.status).toBe(2); // a command the hook cannot read is refused, not waved through
   allowed("find . -name '*.ts' -exec grep -n push {} +");

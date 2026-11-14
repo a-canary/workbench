@@ -18,7 +18,7 @@ import shlex
 import sys
 
 WRAPPERS = {"nohup", "env", "time", "timeout", "nice", "ionice", "sudo", "doas", "exec", "command",
-            "builtin", "xargs", "stdbuf", "setsid", "chrt", "taskset", "unbuffer", "flock", "watch"}
+            "builtin", "xargs", "su", "script", "strace", "ltrace", "chronic", "ts", "stdbuf", "setsid", "chrt", "taskset", "unbuffer", "flock", "watch"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 CONTROL = {";", ";;", "|", "||", "&", "&&", "|&", "(", ")", "\n"}
 KEYWORDS = {"{", "}", "!", "if", "then", "elif", "else", "while", "until", "do", "done", "fi"}
@@ -223,13 +223,11 @@ def blocked(cmd, depth=0):
         lex.whitespace_split = True
         toks = list(lex)
     except ValueError:
-        # fail closed with raw regex
-        if re.search(r"git\s[^\n]*push[^\n]*\s(-f|--force|--mirror)", cmd):
-            return "force push"
-        if re.search(r"(^|\s)gh(\s[^\n]*)?\s--admin", cmd):
-            return "--admin"
-        if re.search(r"--execute", cmd) and re.search(r"(rebalance-calc|m1-execute)", cmd):
-            return "live order path"
+        # The tokenizer gave up (an apostrophe in a # comment or a heredoc body does that, and bash runs
+        # those). Fail closed: an unreadable command that names any hard-line tool is refused.
+        if re.search(r"\bgit\b[^\n]*\bpush\b|\bgh\s+(repo|api)\b|--admin\b|rebalance-calc|m1-execute|"
+                     r"trade-rebalance-active|\border(\.(ts|js|mjs|cjs))?\s", cmd):
+            return "command the checker cannot parse (fix the quoting) that names a hard-line tool"
         return None
     words = []
     for t in toks + ["\n"]:
