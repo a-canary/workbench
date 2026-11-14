@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# floor-run-test — host-side contract of floor-run (the bench adapter), no LLM needed.
+# floor-run-test — host-side contract of floor-run (the bench adapter): worker rung and flow rung, no LLM needed.
 # A stub replaces worker-sandbox: it records its arguments and plays the worker ($STUB_DO, $STUB_SAY, $STUB_RC).
 set -uo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
@@ -249,5 +249,115 @@ fi
 go FLOOR_METRICS="$tmp/m9a" STUB_RC=1 STUB_DO='printf "a\0b\n"' STUB_SAY='CANNOT-DO: no' -- --rung worker 'x'
 cp "$tmp/m9a" "$out/metrics" 2>/dev/null
 [ "$rc" = 0 ] && [ "$(metric '.way_out')" = CANNOT-DO ] && ok "way out found in output with a NUL byte" || bad "way out found in output with a NUL byte" "rc=$rc $(cat "$tmp/m9a" 2>/dev/null)"
+
+# ---- flow rung: Lead check, then worker-task --review. Stubs stand in for lead-check and worker-task. ----
+cat > "$tmp/lead-stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_OUT/lead-args"
+while [ $# -gt 0 ]; do
+  case $1 in --worktree) wt=$2 ;; --request) cp "$2" "$STUB_OUT/lead-request" ;; --out) o=$2 ;; esac
+  shift
+done
+rc=${LEAD_RC:-0}
+case $rc in
+  0) mkdir -p "$o"; echo 'grep -q 2 a.py' > "$wt/test_new.sh"
+     git -C "$wt" add test_new.sh
+     git -C "$wt" -c user.name=lead-check -c user.email=lead-check@localhost commit -q -m red
+     echo 'LEADTASK make a.py print 2' > "$o/task.md"; echo 'sh test_new.sh' > "$o/test"
+     echo '{"valid":true,"tries":1,"way_out":null,"reused_verifier":0}' > "$o/lead.json" ;;
+  3) mkdir -p "$o"; echo '{"valid":false,"tries":2,"way_out":null,"reused_verifier":1}' > "$o/lead.json" ;;
+  5) mkdir -p "$o"; echo 'CANNOT-JUDGE: no speed target given'
+     echo '{"valid":false,"tries":1,"way_out":"CANNOT-JUDGE","reused_verifier":0}' > "$o/lead.json" ;;
+esac
+exit "$rc"
+EOF
+cat > "$tmp/wt-stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_OUT/wt-args"
+echo "${WORKER_REVIEW_TIMEOUT:-unset}" > "$STUB_OUT/wt-review-timeout"
+while [ $# -gt 0 ]; do
+  case $1 in --worktree) wt=$2 ;; --task) cp "$2" "$STUB_OUT/wt-task" ;; esac
+  shift
+done
+rc=${WT_RC:-0}
+echo 'print(2)' > "$wt/a.py"; git -C "$wt" add a.py
+eval "${WT_DO:-:}"
+if [ "$rc" = 0 ]; then git -C "$wt" -c user.name=pi-worker -c user.email=w@localhost commit -q -m green
+else [ -z "${WT_SAY:-}" ] || echo "$WT_SAY" >> "$WORKER_TASK_LOG"; fi
+exit "$rc"
+EOF
+chmod +x "$tmp/lead-stub" "$tmp/wt-stub"
+flow() { # flow [VAR=val ...] -- sets $wd $out $rc and copies the metrics line to $out/metrics
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  go LEAD_CHECK="$tmp/lead-stub" WORKER_TASK="$tmp/wt-stub" FLOOR_METRICS="$tmp/mf" "${envs[@]}" -- --rung flow 'REQUEST make a.py print 2'
+  cp "$tmp/mf" "$out/metrics" 2>/dev/null; lines=$(cat "$tmp/mf" 2>/dev/null | wc -l); rm -f "$tmp/mf"
+}
+larg() { grep -x -A1 -- "$1" "$out/lead-args" 2>/dev/null | tail -1; }
+warg() { grep -x -A1 -- "$1" "$out/wt-args" 2>/dev/null | tail -1; }
+clean_at_start() { [ -z "$(git -C "$wd" status --porcelain 2>/dev/null)" ] && [ "$(cat "$wd/a.py")" = 'print(1)' ]; }
+
+# 9. the whole flow: the Lead's check, then a reviewed worker run on the Lead's task plus the original request
+flow --
+if [ "$rc" = 0 ] && [ "$lines" = 1 ] && [ "$(larg --worktree)" = "$wd" ] && [ "$(larg --timeout)" = 150 ] \
+   && grep -qF 'REQUEST make a.py print 2' "$out/lead-request" \
+   && case $(larg --out) in "$wd"|"$wd"/*|'') false ;; *) true ;; esac \
+   && [ "$(warg --worktree)" = "$wd" ] && [ "$(warg --lane)" = private ] && [ "$(warg --test)" = 'sh test_new.sh' ] \
+   && grep -qx -- --review "$out/wt-args" && ! grep -qx -- --push "$out/wt-args" \
+   && grep -qF 'LEADTASK make a.py print 2' "$out/wt-task" && grep -qx 'Original request:' "$out/wt-task" \
+   && grep -qF 'REQUEST make a.py print 2' "$out/wt-task" \
+   && [ "$(cat "$wd/a.py")" = 'print(2)' ] && [ "$(git -C "$wd" rev-list --count HEAD)" = 3 ] \
+   && [ "$(metric '[.rung,.lead_rc,.lead_check_valid,.lead_tries,.lead_reused_verifier,.worker_rc,.review_verdict,.way_out,.out_of_time] | @csv')" = '"flow",0,true,1,0,0,"PASS",,false' ] \
+   && [ "$(metric '[.lead_seconds,.worker_seconds,.seconds] | map(type) | unique | @csv')" = '"number"' ]; then ok "flow rung: Lead check, reviewed worker run, metrics"
+else bad "flow rung: Lead check, reviewed worker run, metrics" "rc=$rc lines=$lines" "lead: $(tr '\n' ' ' < "$out/lead-args" 2>/dev/null)" \
+     "worker: $(tr '\n' ' ' < "$out/wt-args" 2>/dev/null)" "metrics: $(cat "$out/metrics" 2>/dev/null)" "stderr: $(tail -3 "$out/stderr")"; fi
+
+# 10. stage limits: Lead gets a quarter of the task limit (300 s at most) per try; the worker gets what is left
+#     after the Lead, less 150 s kept for the review and test runs; the reviewer's own limit is 120 s
+[ "$(warg --timeout)" -ge 448 ] 2>/dev/null && [ "$(warg --timeout)" -le 450 ] && [ "$(cat "$out/wt-review-timeout")" = 120 ] \
+  && ok "default limits: Lead 150, worker 450, review 120" || bad "default limits: Lead 150, worker 450, review 120" "worker $(warg --timeout) review $(cat "$out/wt-review-timeout" 2>/dev/null)"
+flow BENCH_TASK_TIMEOUT_MS=900000 --
+[ "$(larg --timeout)" = 221 ] && [ "$(warg --timeout)" -ge 733 ] 2>/dev/null && [ "$(warg --timeout)" -le 735 ] \
+  && ok "limits follow the task limit" || bad "limits follow the task limit" "lead $(larg --timeout) worker $(warg --timeout)"
+flow BENCH_TASK_TIMEOUT_MS=3000000 --
+[ "$(larg --timeout)" = 300 ] && ok "Lead limit capped at 300 s" || bad "Lead limit capped at 300 s" "lead $(larg --timeout)"
+flow BENCH_TASK_TIMEOUT_MS=200000 --
+[ "$rc" = 0 ] && [ ! -e "$out/wt-args" ] && [ "$(metric '[.out_of_time,.worker_rc] | @csv')" = 'true,' ] \
+  && ok "under 60 s left for the worker: no worker run" || bad "under 60 s left for the worker: no worker run" "rc=$rc $(cat "$out/metrics" 2>/dev/null)"
+
+# 11. no check, no work: an invalid check or a way out ends the run as a model outcome
+flow LEAD_RC=3 --
+[ "$rc" = 0 ] && [ ! -e "$out/wt-args" ] && [ "$(metric '[.lead_rc,.lead_check_valid,.lead_tries,.lead_reused_verifier,.worker_rc] | @csv')" = '3,false,2,1,' ] \
+  && ok "no valid check: no worker run" || bad "no valid check: no worker run" "rc=$rc $(cat "$out/metrics" 2>/dev/null)"
+flow LEAD_RC=5 --
+[ "$rc" = 0 ] && [ ! -e "$out/wt-args" ] && [ "$(metric '.way_out')" = CANNOT-JUDGE ] \
+  && ok "Lead's way out recorded, no worker run" || bad "Lead's way out recorded, no worker run" "rc=$rc $(cat "$out/metrics" 2>/dev/null)"
+flow LEAD_RC=4 --
+r4=$rc; l4=$lines; flow LEAD_RC=2 --
+[ "$r4" = 4 ] && [ "$l4" = 1 ] && [ "$rc" = 4 ] && [ ! -e "$out/wt-args" ] && ok "lead-check infra fault exits 4" || bad "lead-check infra fault exits 4" "rc=$r4,$rc"
+
+# 12. a worker run that does not finish delivers nothing: the work dir goes back to the Lead's commit
+flow WT_RC=2 WT_SAY='test still fails after worker' --
+[ "$rc" = 0 ] && clean_at_start && [ "$(metric '[.worker_rc,.review_verdict] | @csv')" = '2,' ] && metric .worker_reason | grep -q 'test still fails' \
+  && ok "failed worker run: work dir reset, reason recorded" || bad "failed worker run: work dir reset, reason recorded" "rc=$rc $(cat "$out/metrics" 2>/dev/null)" "$(git -C "$wd" status --porcelain 2>/dev/null)"
+flow WT_RC=2 WT_SAY='review FAIL: FAIL: does more than asked' --
+[ "$rc" = 0 ] && clean_at_start && [ "$(metric .review_verdict)" = FAIL ] && ok "review FAIL: work dir reset" || bad "review FAIL: work dir reset" "rc=$rc $(cat "$out/metrics" 2>/dev/null)"
+flow WT_RC=2 WT_SAY='review FAIL: reviewer error' --
+[ "$rc" = 0 ] && [ "$(metric .review_verdict)" = error ] && ok "reviewer error told apart from FAIL" || bad "reviewer error told apart from FAIL" "$(cat "$out/metrics" 2>/dev/null)"
+flow WT_RC=7 --
+r7=$rc; flow WT_RC=4 --
+[ "$r7" = 0 ] && [ "$rc" = 4 ] && [ "$(metric .worker_rc)" = 4 ] && ok "worker-task rc 7 is a model outcome, rc 4 is infra" || bad "worker-task rc 7 is a model outcome, rc 4 is infra" "rc=$r7,$rc"
+
+# 13. the foreign-port guard covers the flow rung too
+flow WORKER_PRIVATE_PORT=8093 --
+[ "$rc" = 2 ] && [ ! -e "$out/lead-args" ] && ok "flow rung refuses a foreign port" || bad "flow rung refuses a foreign port" "rc=$rc"
+
+# 14. no scratch dir is a setup fault: the Lead's check is never started
+flow TMPDIR=/nonexistent/floor-run-test --
+[ "$rc" = 4 ] && [ ! -e "$out/lead-args" ] && ok "flow rung without a temp dir exits 4 before the Lead's check" || bad "flow rung without a temp dir exits 4 before the Lead's check" "rc=$rc"
+
+# 15. a failed worker's nested repo is removed with the rest of its work
+flow WT_RC=7 WT_DO='git init -q "$wt/sub"; echo x > "$wt/sub/f"' --
+[ "$rc" = 0 ] && clean_at_start && [ ! -e "$wd/sub" ] && ok "failed worker's nested repo removed" || bad "failed worker's nested repo removed" "rc=$rc $(ls -a "$wd" | tr '\n' ' ')"
 
 exit $fail

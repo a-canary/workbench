@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# lead-check — run the Lead on a request, judge the failing test it writes, commit it if good.
+#
+#   lead-check --worktree DIR --request FILE --out DIR [--tries 2] [--timeout 300]
+#
+# The Lead writes LEAD-TASK.md ("Test: <cmd>\n---\n<task>") and a new test file.
+# lead-check validates the check, runs it (must fail, not crash), commits the test
+# as the RED commit, and writes the task and test command to <out>/task.md and
+# <out>/test. Exit 0 = good check committed.
+set -uo pipefail
+
+die() { echo "lead-check: $*" >&2; exit 2; }
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+wt= request= out= tries=2 tmo=300
+while [ $# -gt 0 ]; do
+  case $1 in
+    --worktree) wt=$2; shift 2 ;;
+    --request) request=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    --tries) tries=$2; shift 2 ;;
+    --timeout) tmo=$2; shift 2 ;;
+    *) die "unknown arg $1" ;;
+  esac
+done
+[ -n "$wt" ] && [ -d "$wt" ] || die "missing --worktree or not a directory"
+[ -n "$request" ] && [ -f "$request" ] || die "missing --request or not a file"
+[ -n "$out" ] || die "missing --out"
+
+g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false -c commit.gpgsign=false "$@"; }
+sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane private "$@"; }
+. "$here/red-crash.sh"
+
+[ -z "$(g status --porcelain)" ] || die "worktree not clean"
+mkdir -p "$out"
+
+taskf=$(mktemp); replyf=$(mktemp); testoutf=$(mktemp)
+trap 'rm -f "$taskf" "$replyf" "$testoutf"' EXIT
+cleanup() { g reset -q --hard; g clean -ffdq; }
+write_json() { # $1=valid $2=tries $3=way_out $4=reused
+  jq -nc --arg v "$1" --argjson t "$2" --arg w "$3" --argjson r "$4" \
+    '{"valid":($v=="true"),"tries":$t,"way_out":(if $w=="" then null else $w end),"reused_verifier":$r}' \
+    > "$out/lead.json"
+}
+reused_verifier=0
+started=0
+reason=
+for ((i=1; i<=tries; i++)); do
+  started=$i
+  [ -n "$reason" ] && printf '\nYour last check was rejected: %s\n' "$reason" >> "$taskf" || :
+  # write task: request text first (on first try), plus rejection reason on retries
+  if [ $i -eq 1 ]; then
+    cat "$request" > "$taskf"
+  fi
+  wrc=0; sbx --task "$taskf" --role lead --timeout "$tmo" > "$replyf" 2>&1 || wrc=$?
+  cat "$replyf" >&2
+  # way out
+  last=$(grep -a -v '^[[:space:]]*$' "$replyf" | tail -n1)
+  case $last in
+    CANNOT-DO:*|CANNOT-JUDGE:*|TOOL-FAULT:*)
+      echo "$last"
+      cleanup
+      write_json false $i "${last%%:*}" 0
+      exit 5 ;;
+  esac
+  # infra fault: sandbox failed and nothing written
+  if [ $wrc -ne 0 ] && [ $wrc -ne 124 ] && [ -z "$(g status --porcelain)" ]; then
+    echo "lead-check: sandbox failed (rc $wrc) with nothing written" >&2
+    cleanup
+    write_json false $i "" 0
+    exit 4
+  fi
+  # judge
+  if [ -z "$(g status --porcelain -uall)" ]; then
+    reason="you wrote nothing"; cleanup; continue
+  fi
+  if [ -n "$(g status --porcelain -uall | grep -v '^?? ')" ]; then
+    reason="you changed an existing file"; cleanup; continue
+  fi
+  [ -f "$wt/LEAD-TASK.md" ] || { reason="you did not write LEAD-TASK.md"; cleanup; continue; }
+  newfiles=$(g ls-files -o --exclude-standard | grep -v '^LEAD-TASK.md$')
+  [ "$(echo "$newfiles" | grep -c .)" -eq 1 ] || { reason="write exactly one test file"; cleanup; continue; }
+  newfile=$(echo "$newfiles")
+  cmd=$(head -n1 "$wt/LEAD-TASK.md")
+  case $cmd in "Test: "*) ;; *) reason="first line must be 'Test: <command>'"; cleanup; continue ;; esac
+  cmd=${cmd#Test: }
+  [ -n "$cmd" ] || { reason="you gave no test command"; cleanup; continue; }
+  grep -qx -- '---' "$wt/LEAD-TASK.md" || { reason="LEAD-TASK.md needs a '---' separator line"; cleanup; continue; }
+  body=$(sed '1,/^---$/d' "$wt/LEAD-TASK.md")
+  [ -n "$(echo "$body" | tr -d '[:space:]')" ] || { reason="the task after '---' is empty"; cleanup; continue; }
+  # stem check: command must name the new file's stem as a whole word
+  stem=$(basename "$newfile"); stem=${stem%%.*}
+  words=" $(tr -c '[:alnum:]_-' ' ' <<<"$cmd") "
+  if [ -z "$stem" ] || [[ $words != *" $stem "* ]]; then
+    reason="your test command must run the new test file ($stem)"; reused_verifier=$((reused_verifier+1)); cleanup; continue
+  fi
+  # run the test: it must fail, not crash
+  rrc=0; sbx --timeout "${LEAD_RED_TIMEOUT:-60}" --exec sh -c "$cmd" > "$testoutf" 2>&1 || rrc=$?
+  if [ $rrc -eq 0 ]; then reason="your test already passes"; cleanup; continue
+  elif [ $rrc -eq 124 ] || [ $rrc -eq 137 ]; then reason="your test timed out"; cleanup; continue
+  elif [ $rrc -eq 126 ] || [ $rrc -eq 127 ]; then reason="your test command cannot run here"; cleanup; continue
+  elif startup_crash "$testoutf" red; then reason="your test crashed at startup"; cleanup; continue
+  elif grep -q 'SyntaxError' "$testoutf"; then reason="fails on a syntax error, not on an assertion"; cleanup; continue
+  else
+    # valid: commit the test, hand out task and command
+    sed '1,/^---$/d' "$wt/LEAD-TASK.md" > "$out/task.md"
+    printf '%s\n' "$cmd" > "$out/test"
+    rm -f "$wt/LEAD-TASK.md"
+    g add -- "$newfile"
+    if ! g -c user.name=lead-check -c user.email=lead-check@localhost commit -q --no-verify -m "test: RED from lead-check"; then
+      echo "lead-check: could not commit the test" >&2
+      cleanup; write_json false $i "" $reused_verifier
+      exit 4
+    fi
+    g reset -q --hard; g clean -ffdq
+    write_json true $i "" $reused_verifier
+    exit 0
+  fi
+done
+write_json false $started "" $reused_verifier
+exit 3

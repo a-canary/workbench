@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# lead-check-test — host-side contract of lead-check (the Lead registers a failing test before any work), no LLM needed.
+# A stub replaces worker-sandbox: a --task call plays the Lead (scripted per call: $STUB_DO_<n>, $STUB_SAY_<n>,
+# $STUB_RC_<n>), an --exec call runs the command for real under its --timeout.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+[ -x "$here/lead-check" ] || { echo "FAIL: bin/lead-check missing or not executable"; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+# what a scripted Lead can do in the worktree
+cat > "$tmp/lib" <<'EOF'
+task()   { printf 'Test: %s\n---\nMake a.py print 2. Edit only a.py.\n' "$1" > LEAD-TASK.md; }
+script() { printf '#!/bin/sh\n%s\n' "$2" > "$1"; }
+good()        { script test_new.sh 'grep -q 2 a.py'; task 'sh test_new.sh'; }
+edits_old()   { echo 'print(2)' > a.py; good; }
+passes_now()  { script test_old.sh 'true'; task 'sh test_old.sh'; }
+two_files()   { good; echo x > extra.txt; }
+reuses()      { script test_new.sh 'false'; task 'sh verify.sh'; }
+syntax()      { script test_new.sh 'echo "  File x, line 1"; echo "SyntaxError: invalid syntax"; exit 1'; task 'sh test_new.sh'; }
+norun()       { script test_new.sh 'false'; task 'nosuchcmd-xyz test_new.sh'; }
+slow()        { script test_new.sh 'sleep 5; exit 1'; task 'sh test_new.sh'; }
+nogit()       { script test_new.sh 'echo "fatal: not a git repository"; exit 128'; task 'sh test_new.sh'; }
+no_sep()      { script test_new.sh 'false'; printf 'Test: sh test_new.sh\nMake a.py print 2.\n' > LEAD-TASK.md; }
+no_body()     { script test_new.sh 'false'; printf 'Test: sh test_new.sh\n---\n\n' > LEAD-TASK.md; }
+no_taskfile() { script test_new.sh 'false'; }
+litter()      { script test_new.sh 'touch litter.tmp; grep -q 2 a.py'; task 'sh test_new.sh'; }
+nothing()     { :; }
+nul_way_out() { printf 'bin\0ary\nCANNOT-DO: no such module\n'; }
+dotfile()     { script .x 'false'; task 'sh ./verify.sh'; }
+dirties()     { script test_new.sh 'echo junk >> a.py; grep -q 2 a.py'; task 'sh test_new.sh'; }
+EOF
+
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+wt= task= tmo=600 role= lane= ex=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --worktree) wt=$2; shift 2 ;;
+    --task) task=$2; shift 2 ;;
+    --timeout) tmo=$2; shift 2 ;;
+    --role) role=$2; shift 2 ;;
+    --lane) lane=$2; shift 2 ;;
+    --exec) shift; ex=1; break ;;
+    *) shift ;;
+  esac
+done
+cd "$wt" || exit 9
+[ -z "$ex" ] || exec timeout "$tmo" "$@"
+n=$(( $(cat "$STUB_OUT/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_OUT/calls"
+cp "$task" "$STUB_OUT/task-$n"; echo "$role $lane $tmo" >> "$STUB_OUT/seats"
+. "$STUB_LIB"
+do=STUB_DO_$n; say=STUB_SAY_$n; rc=STUB_RC_$n
+${!do:-nothing}
+[ -z "${!say:-}" ] || printf '%s\n' "${!say}"
+exit "${!rc:-0}"
+EOF
+chmod +x "$tmp/stub"
+echo 'make a.py print 2 (request-marker-7731)' > "$tmp/request"
+
+ok()  { echo "ok   $1"; }
+bad() { echo "FAIL $1"; shift; printf '     %s\n' "$@"; fail=1; }
+G() { git -C "$wd" "$@"; }
+
+# A fresh repo: one source file and an existing verifier that fails. Sets $wd, $out, $rc.
+# Usage: go [VAR=val ...] -- [lead-check args...]     (PRE=<shell> runs in the repo after its first commit)
+go() {
+  local envs=() pre=
+  while [ "$1" != -- ]; do case $1 in PRE=*) pre=${1#PRE=} ;; *) envs+=("$1") ;; esac; shift; done; shift
+  wd=$(mktemp -d "$tmp/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
+  echo 'print(1)' > "$wd/a.py"; printf '#!/bin/sh\ngrep -q 2 a.py\n' > "$wd/verify.sh"
+  git -C "$wd" init -q && git -C "$wd" add -A && git -C "$wd" -c user.name=t -c user.email=t@localhost commit -q -m base
+  [ -z "$pre" ] || ( cd "$wd" && eval "$pre" )
+  env -u LEAD_RED_TIMEOUT WORKER_SANDBOX="$tmp/stub" STUB_LIB="$tmp/lib" STUB_OUT="$out" "${envs[@]}" \
+    "$here/lead-check" --worktree "$wd" --request "$tmp/request" --out "$out/lead" "$@" > "$out/stdout" 2> "$out/stderr"
+  rc=$?
+}
+j() { jq -r "$1" "$out/lead/lead.json" 2>/dev/null; }
+calls() { cat "$out/calls" 2>/dev/null || echo 0; }
+clean() { [ -z "$(G status --porcelain)" ]; }
+untouched() { [ "$(G rev-list --count HEAD)" = 1 ] && clean && [ "$(cat "$wd/a.py")" = 'print(1)' ]; }
+why() { echo "rc=$rc calls=$(calls) json=$(cat "$out/lead/lead.json" 2>/dev/null) stderr: $(tail -3 "$out/stderr" | tr '\n' ' ')"; }
+# rejected NAME DO_FN [extra env...]: one try, the check must be refused and the repo left as it was
+rejected() {
+  local name=$1 fn=$2; shift 2
+  go STUB_DO_1="$fn" "$@" -- --tries 1
+  [ "$rc" = 3 ] && [ "$(calls)" = 1 ] && untouched && [ "$(j .valid)" = false ] && ok "rejects: $name" || bad "rejects: $name" "$(why)"
+}
+
+# 1. a valid check: the test is committed alone as the RED commit, the task and test command are handed over
+go STUB_DO_1=good STUB_SAY_1='test_new.sh fails: no 2' -- --timeout 77
+if [ "$rc" = 0 ] && [ "$(G rev-list --count HEAD)" = 2 ] && [ "$(G show --name-only --format= HEAD)" = test_new.sh ] \
+   && clean && [ ! -e "$wd/LEAD-TASK.md" ] \
+   && [ "$(cat "$out/lead/test")" = 'sh test_new.sh' ] \
+   && grep -q 'Make a.py print 2' "$out/lead/task.md" && ! grep -qE '^(Test:|---$)' "$out/lead/task.md" \
+   && [ "$(j '[.valid, .tries, .way_out, .reused_verifier] | @csv')" = 'true,1,,0' ] \
+   && [ "$(head -1 "$out/seats")" = 'lead private 77' ] \
+   && grep -q 'request-marker-7731' "$out/task-1"; then ok "valid check: RED commit, task, test command, lead.json"
+else bad "valid check: RED commit, task, test command, lead.json" "$(why)" "seats: $(cat "$out/seats" 2>/dev/null)" \
+     "head files: $(G show --name-only --format= HEAD | tr '\n' ' ')" "status: $(G status --porcelain | tr '\n' ' ')"; fi
+who=$(G log -1 --format='%an <%ae>')
+[ "$who" = "lead-check <lead-check@localhost>" ] && ok "fixed commit identity" || bad "fixed commit identity" "got: $who"
+
+# 2. a Lead that changes an existing file is refused; the retry is told why; after two tries: exit 3, repo as it was
+go STUB_DO_1=edits_old STUB_DO_2=edits_old --
+[ "$rc" = 3 ] && [ "$(calls)" = 2 ] && untouched && [ "$(j '[.valid, .tries] | @csv')" = 'false,2' ] \
+  && grep -q 'request-marker-7731' "$out/task-2" && grep -qi 'rejected' "$out/task-2" && ! grep -qi 'rejected' "$out/task-1" \
+  && ok "existing file changed: refused twice, retry told why, repo reset" || bad "existing file changed: refused twice, retry told why, repo reset" "$(why)"
+
+# 3. the second try can succeed; the first try's file is gone
+go STUB_DO_1=passes_now STUB_DO_2=good --
+[ "$rc" = 0 ] && [ "$(calls)" = 2 ] && [ "$(j .tries)" = 2 ] && [ "$(j .valid)" = true ] && [ ! -e "$wd/test_old.sh" ] \
+  && [ "$(G show --name-only --format= HEAD)" = test_new.sh ] && clean \
+  && ok "test that already passes: refused, second try accepted" || bad "test that already passes: refused, second try accepted" "$(why)"
+
+# 4. each way a check can be bad
+rejected "two new files" two_files
+rejected "Test: runs an existing verifier, not the new file" reuses
+[ "$(j .reused_verifier)" = 1 ] && ok "reused verifier is counted" || bad "reused verifier is counted" "$(why)"
+rejected "dot-named new file with the old verifier (empty stem)" dotfile
+rejected "test fails on a syntax error" syntax
+rejected "test command not runnable" norun
+rejected "test only fails by timeout" slow LEAD_RED_TIMEOUT=1
+rejected "test crashes at startup (needs git)" nogit
+rejected "LEAD-TASK.md without the --- line" no_sep
+rejected "LEAD-TASK.md with an empty task" no_body
+rejected "no LEAD-TASK.md" no_taskfile
+rejected "Lead ran out of time and wrote nothing" nothing STUB_RC_1=124
+
+# 5. the way out: recorded, one call, exit 5
+go STUB_DO_1=nothing STUB_SAY_1=$'I looked.\nCANNOT-JUDGE: needs a perf harness' --
+[ "$rc" = 5 ] && [ "$(calls)" = 1 ] && untouched && [ "$(j '[.valid, .way_out] | @csv')" = 'false,"CANNOT-JUDGE"' ] \
+  && grep -q 'CANNOT-JUDGE: needs a perf harness' "$out/stdout" \
+  && ok "way out: exit 5, line printed and recorded" || bad "way out: exit 5, line printed and recorded" "$(why)"
+
+# 6. refuses a dirty worktree before any model call
+go PRE='echo x >> a.py' STUB_DO_1=good --
+[ "$rc" = 2 ] && [ "$(calls)" = 0 ] && ok "refuses a dirty worktree" || bad "refuses a dirty worktree" "$(why)"
+
+# 7. an infra fault is not a bad check: the sandbox failed, nothing written, no way out
+go STUB_DO_1=nothing STUB_RC_1=1 --
+[ "$rc" = 4 ] && [ "$(calls)" = 1 ] && untouched && ok "sandbox failure with nothing written exits 4" || bad "sandbox failure with nothing written exits 4" "$(why)"
+
+# 8. litter from the RED run is neither committed nor left behind
+go STUB_DO_1=litter --
+[ "$rc" = 0 ] && clean && [ ! -e "$wd/litter.tmp" ] && [ "$(G ls-files | tr '\n' ' ')" = 'a.py test_new.sh verify.sh ' ] \
+  && ok "RED-run litter removed" || bad "RED-run litter removed" "$(why)" "files: $(G ls-files | tr '\n' ' ')"
+
+# 9. the startup-crash patterns live in one place, shared with worker-task
+[ -f "$here/red-crash.sh" ] && grep -q 'not a git repository' "$here/red-crash.sh" \
+  && ! grep -q 'not a git repository' "$here/lead-check" && ! grep -q 'not a git repository' "$here/worker-task" \
+  && ok "crash patterns shared, not copied" || bad "crash patterns shared, not copied"
+
+# 10. the RED commit does not depend on the machine's git config (signing, hooks)
+printf '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /bin/false\n' > "$tmp/hostile"
+go GIT_CONFIG_GLOBAL="$tmp/hostile" STUB_DO_1=good STUB_SAY_1='test_new.sh fails: no 2' --
+[ "$rc" = 0 ] && [ "$(G rev-list --count HEAD)" = 2 ] && clean \
+  && ok "hostile git config: RED still committed" || bad "hostile git config: RED still committed" "$(why)"
+
+# 11. a Lead that writes files and then takes the way out leaves the repo as it was
+go STUB_DO_1=good STUB_SAY_1=$'Wrote a draft.\nCANNOT-DO: the request contradicts itself' --
+[ "$rc" = 5 ] && untouched && [ "$(j .way_out)" = CANNOT-DO ] \
+  && ok "way out after writing: repo as it was" || bad "way out after writing: repo as it was" "$(why)"
+
+# 12. a NUL byte in the Lead's reply does not hide its way out (same guard as the worker rung)
+go STUB_DO_1=nul_way_out --
+[ "$rc" = 5 ] && [ "$(calls)" = 1 ] && untouched && [ "$(j .way_out)" = CANNOT-DO ] \
+  && ok "way out found in a reply with a NUL byte" || bad "way out found in a reply with a NUL byte" "$(why)"
+
+# 13. a RED run that changes a tracked file leaves no change behind: the worker starts from the RED commit alone
+go STUB_DO_1=dirties --
+[ "$rc" = 0 ] && clean && [ "$(cat "$wd/a.py")" = 'print(1)' ] && [ "$(G show --name-only --format= HEAD)" = test_new.sh ] \
+  && ok "RED run that edits a tracked file: worktree clean" || bad "RED run that edits a tracked file: worktree clean" "$(why)" "status: $(G status --porcelain | tr '\n' ' ')"
+
+exit $fail

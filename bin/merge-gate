@@ -19,6 +19,8 @@ run floor-run-test     bin/floor-run-test
 run worker-sandbox-test bin/worker-sandbox-test
 run v100-spool-sync-test bin/v100-spool-sync-test
 run disk-guard-test    bin/disk-guard-test
+run lead-check-test    bin/lead-check-test
+run worker-review-test bin/worker-review-test
 run director-tests     bun test director/
 run webui-tests        bun test webui/
 run oss-scrub-check    bin/oss-scrub-check
