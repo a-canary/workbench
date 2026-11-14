@@ -24,6 +24,7 @@ set -u
 SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
 BUDGET="${WAKER_BUDGET:-$HOME/vault/director/.budget}"
 SLOTS="${WAKER_CLAUDE_SLOTS:-2}"
+case "$SLOTS" in ''|*[!0-9]*) SLOTS=2 ;; esac   # not a count: fall back to the default, never to "no limit"
 DRY_RUN=0
 
 # Default seam commands (only used if env vars unset)
@@ -64,7 +65,7 @@ if [ -e "$SEATS/waker.off" ]; then
 fi
 
 # Lock: one tick at a time
-exec 9>"$SEATS/.waker.lock"
+exec 9>"$SEATS/.waker.lock" || { echo "waker: no seat folder $SEATS"; exit 0; }
 if ! flock -n 9; then
     echo "waker: locked"
     exit 0
@@ -111,6 +112,7 @@ validate_seat() {
         elif (.env | type) != "array" then "bad env"
         elif ([.env[] | select(type != "string" or (test("^[A-Za-z_][A-Za-z0-9_]*$")) != true)] | length) > 0 then "bad env entry"
         elif (.start | type) != "string" or .start == "" then "bad start"
+        elif ([.repo, .label] | any(test("[|\n]"))) or (.start | test("\n")) then "bad character in repo, label or start"
         else "ok"
         end
     ' "$file" 2>/dev/null || echo "invalid JSON"
@@ -156,7 +158,7 @@ declare -a running=()
 while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
-    if $WAKER_ALIVE_CMD "$name" 2>/dev/null 9>&-; then
+    if $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
         echo "seat=$name running"
         used=$((used + 1))
         running+=("$name")
@@ -181,7 +183,7 @@ while IFS= read -r s; do
     fi
 
     # Get ready bead
-    bead=$($WAKER_READY_CMD "$repo" "$label" 2>/dev/null 9>&-) || bead=""
+    bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || bead=""
     if [ -z "$bead" ]; then
         echo "seat=$name idle"
         continue

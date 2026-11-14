@@ -195,5 +195,23 @@ tick
 check "18 next tick is not locked out" "$(grep -c '^waker: locked' "$W/out")" 0
 pkill -f "sleep 20" 2>/dev/null
 
+# 19. the seat record is "|"-joined, one per line: those characters in repo, label or start make a bad seat
+world; ready trading t-1; ready ndv n-1
+jq -c '.label = "a|b"' "$W/seats/trading.json" >"$W/t" && mv "$W/t" "$W/seats/trading.json"
+jq -c '.start = "echo a\necho b"' "$W/seats/ndv.json" >"$W/t" && mv "$W/t" "$W/seats/ndv.json"; tick
+has "19 pipe in label" "$W/out" "seat=trading bad-seat bad character in repo, label or start"
+has "19 newline in start" "$W/out" "seat=ndv bad-seat bad character in repo, label or start"
+check "19 nothing started" "$(started)" ""
+
+# 20. a slot count that is not a number means the default of 2, not "no limit"
+world; ready trading t-1; ready ndv n-1; ready stack s-1; tick WAKER_CLAUDE_SLOTS=many
+has "20 third seat has no slot" "$W/out" "seat=stack no-slot bead=s-1"
+
+# 21. a seam that reads stdin must not swallow the remaining seats
+world; ready trading t-1; ready ndv n-1
+printf '#!/bin/bash\ncat >/dev/null\ncat "$W/ready/$(basename "$1").$2" 2>/dev/null\n' >"$tmp/bin/ready-stdin"; chmod +x "$tmp/bin/ready-stdin"
+tick WAKER_READY_CMD="$tmp/bin/ready-stdin"
+check "21 both seats started" "$(started)" "ndv n-1,trading t-1,"
+
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
