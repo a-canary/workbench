@@ -15,19 +15,22 @@ STATE="${FEED_STATE:-$HOME/vault/director/state/feed-watch}"
 LANDED_CMD="${FEED_LANDED_CMD:-}"
 FAIL_CMD="${FEED_FAIL_CMD:-}"
 WAKE_CMD="${FEED_WAKE_CMD:-}"
-if [ -z "$LANDED_CMD" ]; then def=$(dirname "$0")/feed-landed; [ -x "$def" ] && LANDED_CMD="$def" || LANDED_CMD=":"; fi
-if [ -z "$FAIL_CMD" ]; then def=$(dirname "$0")/feed-failures; [ -x "$def" ] && FAIL_CMD="$def" || FAIL_CMD=":"; fi
+# Each seam is one executable path. A missing default is a failed check (rc 127), never a quiet feed.
+[ -n "$LANDED_CMD" ] || LANDED_CMD=$(dirname "$0")/feed-landed
+[ -n "$FAIL_CMD" ] || FAIL_CMD=$(dirname "$0")/feed-failures
 mkdir -p "$STATE" || exit 1
+exec 9>"$STATE/lock" || exit 1
+flock -n 9 || { echo "feed-watch: locked"; exit 0; }  # an overlapping tick would wake twice for the same items
 SEEN="$STATE/landed.seen"; LAST="$STATE/failures.last"
 prev_seen=""; [ -f "$SEEN" ] && prev_seen=$(cat "$SEEN")
 prev_fails=""; [ -f "$LAST" ] && prev_fails=$(cat "$LAST")
 landed_lines=""; cur_fails=""
 if [ -n "$LANDED_CMD" ]; then
-    if out=$($LANDED_CMD 2>/dev/null); then landed_lines=$out
+    if out=$("$LANDED_CMD" 2>/dev/null 9>&-); then landed_lines=$out
     else rc=$?; cur_fails="feed-watch: landed check failed rc=$rc"; fi
 fi
 if [ -n "$FAIL_CMD" ]; then
-    if out=$($FAIL_CMD 2>/dev/null); then
+    if out=$("$FAIL_CMD" 2>/dev/null 9>&-); then
         [ -n "$out" ] && cur_fails="${cur_fails:+$cur_fails
 }$out"
     else
@@ -37,11 +40,12 @@ if [ -n "$FAIL_CMD" ]; then
 $prev_fails}"
     fi
 fi
+cur_fails=$(awk 'NF && !s[$0]++' <<<"$cur_fails")  # a check broken for many ticks must not grow the set
 new_landed=""; landed_count=0
 if [ -n "$landed_lines" ]; then
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        id=${line%% *}
+        read -r id _ <<<"$line"  # first word on any whitespace, the same split write_state uses
         if [ -z "$prev_seen" ] || ! grep -qxF -- "$id" <<<"$prev_seen"; then
             new_landed="${new_landed:+$new_landed
 }$line"; landed_count=$((landed_count + 1))
@@ -61,10 +65,10 @@ fi
 write_state() {
     local tmp
     tmp=$(mktemp "$SEEN.XXXXXX") || exit 1
-    { [ -s "$SEEN" ] && cat "$SEEN"; [ -n "$landed_lines" ] && echo "$landed_lines" | awk 'NF{print $1}'; } | sort -u > "$tmp" || exit 1
+    { [ -s "$SEEN" ] && cat "$SEEN"; [ -n "$landed_lines" ] && printf '%s\n' "$landed_lines" | awk 'NF{print $1}'; } | sort -u > "$tmp" || exit 1
     mv -f "$tmp" "$SEEN" || exit 1
     tmp=$(mktemp "$LAST.XXXXXX") || exit 1
-    if [ -n "$cur_fails" ]; then echo "$cur_fails" > "$tmp" || exit 1
+    if [ -n "$cur_fails" ]; then printf '%s\n' "$cur_fails" > "$tmp" || exit 1
     else : > "$tmp" || exit 1; fi
     mv -f "$tmp" "$LAST" || exit 1
 }
@@ -77,7 +81,7 @@ $(head -n 10 <<<"$new_fails")"
 [ -n "$new_landed" ] && msg="$msg
 $(head -n 10 <<<"$new_landed")"
 if [ -n "$WAKE_CMD" ]; then
-    if ! "$WAKE_CMD" "$msg"; then echo "feed-watch: wake failed"; exit 0; fi
+    if ! "$WAKE_CMD" "$msg" 9>&-; then echo "feed-watch: wake failed"; exit 0; fi
 fi
 write_state
 [ -n "$WAKE_CMD" ] && echo "feed-watch: woke landed=$landed_count failures=$fail_count"

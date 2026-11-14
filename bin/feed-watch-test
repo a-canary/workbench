@@ -78,6 +78,23 @@ echo 2 >"$d/failing.rc"; out=$(run); has "failed failures check wakes" "$(cat "$
 command rm "$d/failing.rc"; run >/dev/null
 ok "a failure held before the check broke does not wake again" "$(( $(wakes) - before ))" 1
 : >"$d/failing"; run >/dev/null
+echo 2 >"$d/failing.rc"; run >/dev/null; run >/dev/null; run >/dev/null
+ok "a check broken for three ticks is one line in the set" "$(grep -c 'failures check failed' "$d/state/failures.last")" 1
+command rm "$d/failing.rc"; run >/dev/null
+
+# ids split on any whitespace; a line starting with a dash or holding a backslash is still data
+before=$(wakes); printf 't-1\ttabbed title\n  s-1 leading spaces\n-n dash\\tid\n' >>"$d/landed"; run >/dev/null; run >/dev/null
+ok "tab, leading space and dash ids wake once" "$(( $(wakes) - before ))" 1
+has "dash id stored verbatim" "$(cat "$d/state/landed.seen")" "-n"
+echo '-e back\\nslash' >"$d/failing"; run >/dev/null
+ok "failure line stored verbatim" "$(cat "$d/state/failures.last")" '-e back\\nslash'
+: >"$d/failing"; run >/dev/null
+
+# a missing check command is a failure, never a quiet feed; an overlapping tick does nothing
+out=$(FEED_STATE="$d/state2" FEED_LANDED_CMD="$d/nope" FEED_FAIL_CMD="$d/fail.sh" FEED_WAKE_CMD="$d/wake.sh" "$fw" 2>&1)
+has "missing landed command is a failure" "$(cat "$d/wakes")" "feed-watch: landed check failed rc=127"
+mkdir -p "$d/state3"; out=$( ( flock 8; FEED_STATE="$d/state3" FEED_LANDED_CMD="$d/landed.sh" FEED_FAIL_CMD="$d/fail.sh" FEED_WAKE_CMD="$d/wake.sh" "$fw" 8>&- 2>&1 ) 8>"$d/state3/lock" )
+has "overlapping tick is skipped" "$out" "feed-watch: locked"
 
 # a failed wake keeps the state, so the next tick retries
 before=$(wakes); printf 'a-1 x\na-2 x\na-9 x\nb-1 retry me\n' >"$d/landed"; echo 1 >"$d/wake.rc"
