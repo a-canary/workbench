@@ -61,7 +61,10 @@ test("GET /feed shows the failures above the landed list; none configured shows 
   const body = await (await handle(new Request("http://pane.test/feed"), { beadDirs: ["/a"], run: paneRun, failuresFile: f })).text();
   expect(body).toContain("<h2>Failures 1</h2>");
   expect(body).toContain("user-unit: lane-front.service failed");
-  expect(body.indexOf("Failures 1")).toBeLessThan(body.indexOf("feed-links"));
+  // in the page body, right above the landed list (not in <head>, where a browser would drop or misplace it)
+  expect(body).toContain('</div><div class="feed-links">');
+  expect(body.indexOf("</head>")).toBeLessThan(body.indexOf("Failures 1"));
+  expect(body.indexOf("Failures 1")).toBeLessThan(body.indexOf('<div class="feed-links">'));
   const none = await (await handle(new Request("http://pane.test/feed"), { beadDirs: ["/a"], run: paneRun })).text();
   expect(none).not.toContain("<h2>Failures");
 });

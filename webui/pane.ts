@@ -546,8 +546,7 @@ export function inboxHtml(cards: Card[]): string {
 export function shell(
   place: string,
   focusHtml: string,
-  counts: { inbox: number },
-  alerts = ""
+  counts: { inbox: number }
 ): string {
   const navItems = PLACES.map((p) => {
     const active = p === place;
@@ -565,7 +564,6 @@ export function shell(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Workbench</title>
-${alerts}
 <style>
 :root{--bg:#fff;--fg:#111;--nav-bg:#f5f5f5}
 @media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--nav-bg:#1a1a1a}}
@@ -707,9 +705,9 @@ async function route(
       .map((e) => `<p class="warn">${esc(e)}</p>`)
       .join("");
     const failures = failuresHtml(readFailures(deps.failuresFile));
-    const html = shell("feed", feedHtml(landed.items, place) + errorsHtml, {
+    const html = shell("feed", failures + feedHtml(landed.items, place) + errorsHtml, {
       inbox: cards.cards.length,
-    }, failures);
+    });
     return new Response(html, {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },
