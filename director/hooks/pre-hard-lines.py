@@ -6,10 +6,11 @@ order tool with order verbs). Quote-aware shlex; follows wrappers, shell -c,
 eval, $(...)/`...`. Input the tokenizer rejects (unbalanced quotes, which bash rejects
 too) is checked by raw regex for the main spellings only.
 
-Limits: this reads the command text, so it cannot see a script's contents (bash x.sh,
-source), a request body in a file (gh api --input), arguments piped into xargs, git or
-gh aliases, or a word built by shell expansion (g=git; $g push ...). Branch protection
-and the prose rule cover those paths.
+Limits: this is a tripwire for the honest mistake, not a security boundary. It reads the
+command text, so it cannot see a script's contents (bash x.sh, source), an interpreter's
+string (python -c, node -e), a request body in a file (gh api --input), arguments piped
+into xargs, stored git or gh aliases, a word built by shell expansion (g=git; $g push ...),
+or a merge through the API (pulls/N/merge). Branch protection and the prose rule cover those.
 """
 import json
 import re
@@ -69,6 +70,8 @@ def git_push_force(words):
     i = 1
     while i < len(words):
         w = words[i]
+        if w == "-c" and i + 1 < len(words) and words[i + 1].startswith("alias."):
+            return "git alias defined inline (cannot be checked)"
         if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
             i += 2
         elif w.startswith("-"):
@@ -79,11 +82,10 @@ def git_push_force(words):
         return None
     for j in range(i + 1, len(words)):
         w = words[j]
-        if w == "-f" or w == "--force" or w == "--mirror":
+        # git accepts any unambiguous prefix of a long option: --forc, --force-with-l, --mirr
+        if re.fullmatch(r"--(f|fo|for|forc|force.*|m|mi|mir|mirr|mirro|mirror)(=.*)?", w):
             return "force push"
-        if w.startswith("--force-with-lease") or w.startswith("--force-if-includes"):
-            return "force push"
-        if re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", w):
+        if re.fullmatch(r"-[A-Za-z0-9]*f[A-Za-z0-9]*", w):
             return "force push"
         if w.startswith("+"):
             return "force push"
@@ -97,7 +99,7 @@ def check_hard_line(words):
     w0 = base(words[0])
 
     # a. --admin with gh
-    if w0 == "gh" and "--admin" in words:
+    if w0 == "gh" and any(w == "--admin" or w.startswith("--admin=") for w in words):
         return "--admin"
 
     # c. repo visibility, access, deletion
@@ -124,6 +126,8 @@ def check_hard_line(words):
                 method = w.split("=", 1)[1]
             elif re.fullmatch(r"-X.+", w):
                 method = w[2:]
+        if not method and any(re.match(r"-[fF]|--(raw-)?field|--input", w) for w in words):
+            method = "POST"  # gh api switches to POST as soon as a field or body is given
         method = method.upper()
         if method in ("PUT", "POST", "PATCH", "DELETE") and any("/collaborators/" in w for w in words):
             return "repo visibility or access"
@@ -152,11 +156,9 @@ def check_hard_line(words):
             if basenames[k] == "order" and ("tools/order" in w or SCRIPT_EXT.search(w)):
                 order_idx = k
                 break
-        if order_idx < 0:
-            for k in range(len(words) - 1):
-                if words[k] == "run" and base(words[k + 1]) == "order":
-                    order_idx = k + 1
-                    break
+        # the package script: npm run order, bun run order, pnpm order, yarn order
+        if order_idx < 0 and w0 in ("npm", "pnpm", "yarn", "bun") and "order" in words:
+            order_idx = words.index("order")
         if order_idx >= 0:
             for j in range(order_idx + 1, len(words)):
                 if words[j] in ORDER_VERBS:
@@ -167,6 +169,8 @@ def check_hard_line(words):
 
 def blocked_cmd(words, depth=0):
     """Check a simple command (may have keywords/wrappers). Return line name or None."""
+    if words and words[0] == "function" and "{" in words:  # function f { cmd; }
+        words = words[words.index("{"):]
     while words and words[0] in KEYWORDS:
         words = words[1:]
     if not words:
@@ -183,7 +187,11 @@ def blocked_cmd(words, depth=0):
         return blocked_cmd(words[1:], depth)
     if w0 in WRAPPERS:
         for i in range(1, len(words)):
-            # the command follows the wrapper's own options, or is one quoted string (watch "git ...")
+            # the command follows the wrapper's own options, or is one quoted string (watch "git ...").
+            # A nested wrapper is skipped, not recursed into: this loop reaches its suffixes anyway,
+            # and recursing on every suffix is exponential in the length of a wrapper chain.
+            if base(words[i]) in WRAPPERS:
+                continue
             res = blocked_cmd(words[i:], depth) or (" " in words[i] and blocked(words[i], depth + 1))
             if res:
                 return res
@@ -241,7 +249,10 @@ def main():
         return 0
     cmd = (data.get("tool_input") or {}).get("command") or ""
     if cmd:
-        hit = blocked(cmd)
+        try:
+            hit = blocked(cmd) if isinstance(cmd, str) else "command is not text"
+        except Exception as e:  # a checker fault must not read as "allowed"
+            hit = f"hard-line check failed ({type(e).__name__})"
         if hit:
             print(f"HARD_LINE_BLOCKED: {hit} is a hard line (operator ruling 2026-11-14); "
                   "a human runs it, never an agent", file=sys.stderr)

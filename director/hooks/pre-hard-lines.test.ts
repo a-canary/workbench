@@ -48,6 +48,11 @@ test("blocks force push in every spelling", () => {
   blocked("FOO=1 git push -f");
   blocked("git commit -m x && git push -f");
   blocked("git --git-dir /repo/.git push -f");
+  blocked("git push --mirr");
+  blocked("git push --force-with-l origin x");
+  blocked("git push --forc");
+  blocked("git push -4f origin x");
+  blocked("git -c alias.p='push -f' p");
 });
 
 test("blocks repo visibility, access and deletion", () => {
@@ -59,6 +64,8 @@ test("blocks repo visibility, access and deletion", () => {
   blocked("gh api repos/o/r --method PATCH -F visibility=public");
   blocked("gh api -X PUT repos/o/r/collaborators/someone");
   blocked("gh api --method PUT /repos/o/r/collaborators/someone -f permission=push");
+  blocked("gh pr merge 5 --admin=true");
+  blocked("gh api repos/o/r/collaborators/x -f permission=push"); // a field makes it a POST
   blocked("gh api -X DELETE repos/o/r");
   blocked("gh api --method=DELETE /repos/o/r");
   blocked("gh api -XDELETE repos/o/r");
@@ -73,6 +80,9 @@ test("blocks through string wrappers, find -exec and nested shells", () => {
   blocked("find . -name x -exec git push -f \\;");
   blocked("find . -exec gh pr merge 5 --admin \\;");
   blocked(`bash -c "bash -c 'bash -c \\"bash -c gh\\\\ pr\\\\ merge\\\\ --admin\\"'"`);
+  blocked("function f { git push -f; }; f");
+  blocked("env ".repeat(60) + "git push -f"); // a long wrapper chain is checked in linear time
+  allowed("env ".repeat(60) + "git status");
   allowed("find . -name '*.ts' -exec grep -n push {} +");
   allowed('watch -n 5 "git status"');
 });
@@ -92,6 +102,9 @@ test("blocks live order paths", () => {
   blocked("nohup trade-rebalance-active &");
   blocked("cd tools && npx tsx order.ts buy SPY 1");
   blocked("node dist/tools/order.js buy SPY 1");
+  blocked("bun tools//order.ts buy SPY 1");
+  blocked("pnpm order buy SPY 1");
+  blocked("yarn order sell SPY 1");
   blocked("node dist/tools/rebalance-calc.js --execute");
   blocked("npx tsx tools/rebalance-calc.ts --execute=true");
 });
