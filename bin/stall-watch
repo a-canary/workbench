@@ -69,7 +69,8 @@ mkdir -p "$STALL_ALERTS"
 trailing_run() {
     local last
     last=$(tail -n 1 "$1")
-    tac "$1" | awk -v l="$last" 'BEGIN{c=0} $0==l{c++;next}{exit} END{print c}'
+    # ENVIRON, not -v: awk -v unescapes backslashes, and the call lines are JSON
+    tac "$1" | l="$last" awk 'BEGIN{c=0} $0==ENVIRON["l"]{c++;next}{exit} END{print c}'
 }
 
 for f in "$WAKER_SEATS"/*.json; do
@@ -172,6 +173,7 @@ for f in "$WAKER_SEATS"/*.json; do
         else
             msg="Lead $seat has repeated one call $loop_count times over $minutes minutes on $bead"
         fi
+        # the pager throttles per key (notify-human.sh), so paging on every pass is one page per window
         [ -z "$STALL_NOTIFY_CMD" ] || $STALL_NOTIFY_CMD "stall-$seat" "$msg" >/dev/null 2>&1
     fi
 done

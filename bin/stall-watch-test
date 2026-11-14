@@ -157,7 +157,8 @@ check "11 unset pager uses the default" "$(notes)" 1
 # 12. default call reader: five identical tool calls at the end of the newest transcript are a loop
 world; echo n-1 >"$W/ready/ndv"; live ndv 1
 pd="$W/home/.claude/projects/$(printf '%s' "$W/repos/ndv" | tr '/.' '--')"; mkdir -p "$pd"
-for i in 1 2 3 4 5; do echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t'$i'","name":"Bash","input":{"command":"bd show x"}}]}}'; done >"$pd/s.jsonl"
+# the command carries a quote, a backslash and a newline: the common case for a Bash call
+for i in 1 2 3 4 5; do echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t'$i'","name":"Bash","input":{"command":"grep \"a\\b\" x\nbd show x"}}]}}'; done >"$pd/s.jsonl"
 env -u STALL_CALLS_CMD W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
   STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_NOTIFY_CMD="" STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
 has "12 loop read from the transcript" "$W/out" "seat=ndv looping calls=5 bead=n-1"
