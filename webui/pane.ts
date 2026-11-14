@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 // Control pane shell (slice B1). Public framework: no repo, seat or
 // mission names in code; personal paths come from <config dir>/pane.json.
 
@@ -27,7 +27,7 @@ export const bdRun: Run = async (args) => {
   return { code, out };
 };
 
-export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[] } {
+export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[]; failuresFile?: string } {
   const path = `${dir}/pane.json`;
   let raw: string;
   try {
@@ -49,14 +49,19 @@ export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[] 
   ) {
     throw new Error(`bad pane.json: ${path}: beadDirs must be an array of strings`);
   }
-  const obj = cfg as { beadDirs: string[]; hosts?: unknown };
+  const obj = cfg as { beadDirs: string[]; hosts?: unknown; failuresFile?: unknown };
   if (obj.hosts !== undefined) {
     if (!Array.isArray(obj.hosts) || obj.hosts.some((h) => typeof h !== "string")) {
       throw new Error(`bad pane.json: ${path}: hosts must be an array of strings`);
     }
-    return { beadDirs: obj.beadDirs, hosts: obj.hosts };
   }
-  return { beadDirs: obj.beadDirs };
+  if (obj.failuresFile !== undefined && typeof obj.failuresFile !== "string") {
+    throw new Error(`bad pane.json: ${path}: failuresFile must be a string`);
+  }
+  const result: { beadDirs: string[]; hosts?: string[]; failuresFile?: string } = { beadDirs: obj.beadDirs };
+  if (obj.hosts !== undefined) result.hosts = obj.hosts;
+  if (obj.failuresFile !== undefined) result.failuresFile = obj.failuresFile;
+  return result;
 }
 
 export function allowedHosts(
@@ -257,6 +262,38 @@ export async function loadLanded(
 
   items.sort((a, b) => b.closed.localeCompare(a.closed));
   return { items, errors };
+}
+
+export function readFailures(path: string | undefined): string[] {
+  if (path === undefined) return [];
+  let st;
+  try {
+    st = statSync(path);
+  } catch {
+    return [];
+  }
+  if (!st.isFile() || st.size > 1048576) return ["failures file unreadable"];
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return ["failures file unreadable"];
+  }
+  const lines = content.split("\n");
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    out.push(trimmed.slice(0, 200));
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+export function failuresHtml(lines: string[]): string {
+  if (lines.length === 0) return "";
+  const parts = lines.map((l) => `<div class="feed-fail">${esc(l)}</div>`);
+  return `<h2>Failures ${lines.length}</h2>${parts.join("")}`;
 }
 
 export function feedHtml(items: Landed[], place?: string): string {
@@ -509,7 +546,8 @@ export function inboxHtml(cards: Card[]): string {
 export function shell(
   place: string,
   focusHtml: string,
-  counts: { inbox: number }
+  counts: { inbox: number },
+  alerts = ""
 ): string {
   const navItems = PLACES.map((p) => {
     const active = p === place;
@@ -527,6 +565,7 @@ export function shell(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Workbench</title>
+${alerts}
 <style>
 :root{--bg:#fff;--fg:#111;--nav-bg:#f5f5f5}
 @media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--nav-bg:#1a1a1a}}
@@ -547,6 +586,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .feed-item{padding:.5rem 0;border-top:1px solid var(--nav-bg);overflow-wrap:anywhere}
 .feed-item time,.feed-place,.feed-id,.feed-reason{opacity:.7;font-size:.85em}
 .feed-item b{display:block;font-weight:600}
+.feed-fail{padding:.35rem 0;color:#b3261e;overflow-wrap:anywhere}
 @media(max-width:700px){
   #places{position:fixed;bottom:0;left:0;right:0;top:auto;width:100%;flex-direction:row;justify-content:space-around;padding:.5rem}
   #focus{margin:0;padding:1rem 1rem 4rem}
@@ -564,7 +604,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 
 export async function handle(
   req: Request,
-  deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
+  deps: { beadDirs: string[]; run?: Run; hosts?: string[]; failuresFile?: string }
 ): Promise<Response> {
   const res = await route(req, deps);
   // The pane has no login, so another site must not be able to show it in a frame and trick a click
@@ -576,7 +616,7 @@ export async function handle(
 
 async function route(
   req: Request,
-  deps: { beadDirs: string[]; run?: Run; hosts?: string[] }
+  deps: { beadDirs: string[]; run?: Run; hosts?: string[]; failuresFile?: string }
 ): Promise<Response> {
   // The pane has no login. Another site can point its own name at the pane's address and then looks
   // same-origin to the browser; answering only to the pane's own names shuts that out.
@@ -666,9 +706,10 @@ async function route(
     const errorsHtml = landed.errors
       .map((e) => `<p class="warn">${esc(e)}</p>`)
       .join("");
+    const failures = failuresHtml(readFailures(deps.failuresFile));
     const html = shell("feed", feedHtml(landed.items, place) + errorsHtml, {
       inbox: cards.cards.length,
-    });
+    }, failures);
     return new Response(html, {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },
