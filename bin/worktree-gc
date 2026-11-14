@@ -48,6 +48,28 @@ ROOT=$(cd "$ROOT" 2>/dev/null && pwd) || { echo "error: root '$ROOT' not found" 
 
 # Determine the origin default branch for a worktree.
 # Falls back to origin/main, then origin/master.
+# 0 = the worktree holds gitignored files other than build caches (or git cannot list them: fail closed)
+holds_data() {
+    local wt=$1 items line isdir name cache
+    items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null) || return 0
+    # --directory also lists a wholly-ignored parent (pkg/ for pkg/node_modules/); drop dirs that prefix
+    # another entry, their children are judged on their own.
+    # ponytail: O(n²) over ignored entries, fine for tens; sort-and-compare-neighbours if it ever gets slow
+    items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$items")
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" == *.pyc ]] && continue
+        # cache names count only for directories: a plain file called build or dist is data
+        isdir=0; [[ "$line" == */ ]] && isdir=1
+        line="${line%/}"; name="${line##*/}"
+        for cache in $IGNORED_CACHES; do
+            [ "$isdir" -eq 1 ] && [ "$name" = "$cache" ] && continue 2
+        done
+        return 0
+    done <<< "$items"
+    return 1
+}
+
 get_base() {
     local wt="$1"
     local base
@@ -137,34 +159,9 @@ for wt in "$ROOT"/*/; do
                 echo "open $wt"
                 continue
             fi
-            # Reuse the held check logic to see if there are non-cache ignored files
-            held_items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null)
-            held_items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$held_items")
-            if [ -n "$held_items" ]; then
-                held_remaining=0
-                while IFS= read -r line; do
-                    [ -z "$line" ] && continue
-                    isdir=0; [[ "$line" == */ ]] && isdir=1
-                    line="${line%/}"; bname="${line##*/}"
-                    is_cache=0
-                    for cache in $IGNORED_CACHES; do
-                        if [ "$isdir" -eq 1 ] && [ "$bname" = "$cache" ]; then
-                            is_cache=1
-                            break
-                        fi
-                    done
-                    if [[ "$line" == *.pyc ]]; then
-                        is_cache=1
-                    fi
-                    if [ "$is_cache" -eq 0 ]; then
-                        held_remaining=1
-                        break
-                    fi
-                done <<< "$held_items"
-                if [ "$held_remaining" -eq 1 ]; then
-                    echo "open $wt"
-                    continue
-                fi
+            if holds_data "$wt"; then
+                echo "open $wt"
+                continue
             fi
             # Safe to park
             if [ "$DRY_RUN" -eq 1 ]; then
@@ -189,38 +186,9 @@ for wt in "$ROOT"/*/; do
     fi
 
     # 5. Held check: merged but holds gitignored files other than build caches
-    # fail closed: if git can't list ignored files, keep the worktree
-    held_items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null) || { echo "held $wt"; continue; }
-    # --directory also lists a wholly-ignored parent (pkg/ for pkg/node_modules/); drop dirs that prefix
-    # another entry, their children are judged on their own.
-    # ponytail: O(n²) over ignored entries, fine for tens; sort-and-compare-neighbours if it ever gets slow
-    held_items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$held_items")
-    if [ -n "$held_items" ]; then
-        remaining=0
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            # cache names count only for directories: a plain file called build or dist is data
-            isdir=0; [[ "$line" == */ ]] && isdir=1
-            line="${line%/}"; base="${line##*/}"
-            is_cache=0
-            for cache in $IGNORED_CACHES; do
-                if [ "$isdir" -eq 1 ] && [ "$base" = "$cache" ]; then
-                    is_cache=1
-                    break
-                fi
-            done
-            if [[ "$line" == *.pyc ]]; then
-                is_cache=1
-            fi
-            if [ "$is_cache" -eq 0 ]; then
-                remaining=1
-                break
-            fi
-        done <<< "$held_items"
-        if [ "$remaining" -eq 1 ]; then
-            echo "held $wt"
-            continue
-        fi
+    if holds_data "$wt"; then
+        echo "held $wt"
+        continue
     fi
 
     # 6. Safe to remove
