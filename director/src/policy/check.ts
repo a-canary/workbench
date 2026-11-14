@@ -36,6 +36,9 @@ const ALLOW_PREFIXES = [
   "/tmp/**",
   "~/vault/ke/**",
   "~/vault/director/**",
+  // Agent homes: one folder per long-running agent, ~/vault/agents/<name>/ (operator ruling
+  // 2026-11-14, repos-l1tt): brief, seat file, drafts. Project state stays in beads.
+  "~/vault/agents/**",
   // ~/trash: the retire/GC destination (operator ruling arc-ypp, 2026-10-30).
   // Move-in only by RULE (GLOBAL-RULES write lane) — this prefix check cannot tell a move from a write.
   "~/trash/**",

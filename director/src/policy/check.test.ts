@@ -69,6 +69,11 @@ test("allows ~/vault/ke/**", () => {
   expect(checkWritePath("~/vault/ke/arc-director/note.md", { home }).ok).toBe(true);
 });
 
+test("allows agent homes ~/vault/agents/** (repos-l1tt)", () => {
+  expect(checkWritePath("~/vault/agents/agents-stack-lead/brief.md", { home }).ok).toBe(true);
+  expect(checkWritePath("~/vault/agentsx/a.md", { home }).ok).toBe(false);
+});
+
 test("allows ~/vault/director/**", () => {
   expect(checkWritePath("~/vault/director/memory.md", { home }).ok).toBe(true);
 });
