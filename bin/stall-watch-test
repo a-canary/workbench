@@ -68,7 +68,7 @@ pass() {
     STALL_NOTIFY_CMD="$tmp/bin/notify" STALL_NOW="${1:-$NOW}" "$sw" >"$W/out" 2>"$W/err"; echo $? >"$W/rc"
 }
 alerts() { ls "$W/alerts" 2>/dev/null | tr '\n' ','; }
-notes() { wc -l <"$W/notify.log" 2>/dev/null || echo 0; }
+notes() { if [ -e "$W/notify.log" ]; then wc -l <"$W/notify.log"; else echo 0; fi; }
 
 # 1. no live session: nothing printed, no alert
 world; echo t-1 >"$W/ready/trading"; pass
@@ -139,6 +139,28 @@ check "9 only the Lead is reported" "$(cat "$W/out")" "seat=trading stalled min=
 world; echo t-1 >"$W/ready/trading"; echo "not-a-number" >"$W/act/trading"; pass
 has "10 unknown activity" "$W/out" "seat=trading unknown no activity time"
 check "10 exit 0" "$(cat "$W/rc")" 0
+
+# 11. STALL_NOTIFY_CMD="" never pages, not even through the default pager under HOME
+world; echo t-1 >"$W/ready/trading"; live trading 90
+mkdir -p "$W/home/vault/director/scripts"; cp "$tmp/bin/notify" "$W/home/vault/director/scripts/notify-human.sh"
+env W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_CALLS_CMD="$tmp/bin/calls" \
+  STALL_NOTIFY_CMD="" STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+has "11 still reported" "$W/out" "seat=trading stalled min=90 bead=t-1"
+check "11 empty pager never pages" "$(notes)" 0
+# unset: the default pager under HOME is used
+env -u STALL_NOTIFY_CMD W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_CALLS_CMD="$tmp/bin/calls" \
+  STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+check "11 unset pager uses the default" "$(notes)" 1
+
+# 12. default call reader: five identical tool calls at the end of the newest transcript are a loop
+world; echo n-1 >"$W/ready/ndv"; live ndv 1
+pd="$W/home/.claude/projects/$(printf '%s' "$W/repos/ndv" | tr '/.' '--')"; mkdir -p "$pd"
+for i in 1 2 3 4 5; do echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t'$i'","name":"Bash","input":{"command":"bd show x"}}]}}'; done >"$pd/s.jsonl"
+env -u STALL_CALLS_CMD W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_NOTIFY_CMD="" STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+has "12 loop read from the transcript" "$W/out" "seat=ndv looping calls=5 bead=n-1"
 
 [ $fails = 0 ] && echo "stall-watch-test: PASS" || echo "stall-watch-test: FAIL"
 exit $fails

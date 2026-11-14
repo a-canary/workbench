@@ -43,9 +43,16 @@ default_alive() {
 default_activity() {
     tmux display -p -t "$1" '#{window_activity}'
 }
-# Default calls: none.
+# Default calls: the tool calls (name + input) at the end of the newest Claude transcript for the seat's repo.
+# ponytail: two sessions in one repo share a project folder, so the newest transcript may be the other
+# session's; map seat to session id if that produces false loops.
 default_calls() {
-    true
+    local d f
+    d="$HOME/.claude/projects/$(printf '%s' "$2" | tr '/.' '--')"
+    f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
+    [ -n "$f" ] || return 0
+    tail -n 400 "$f" | jq -rc 'select(.type == "assistant") | .message.content[]?
+        | select(.type == "tool_use") | [.name, .input] | tojson' 2>/dev/null | tail -n 20
 }
 
 WAKER_READY_CMD="${WAKER_READY_CMD:-default_ready}"
@@ -54,8 +61,7 @@ STALL_ACTIVITY_CMD="${STALL_ACTIVITY_CMD:-default_activity}"
 STALL_CALLS_CMD="${STALL_CALLS_CMD:-default_calls}"
 
 # ${VAR-default} (no colon) to tell unset from empty.
-STALL_NOTIFY_CMD="${STALL_NOTIFY_CMD-default}"
-[ -z "$STALL_NOTIFY_CMD" ] && STALL_NOTIFY_CMD="$HOME/vault/director/scripts/notify-human.sh"
+STALL_NOTIFY_CMD="${STALL_NOTIFY_CMD-$HOME/vault/director/scripts/notify-human.sh}"
 
 mkdir -p "$STALL_ALERTS"
 
@@ -166,7 +172,7 @@ for f in "$WAKER_SEATS"/*.json; do
         else
             msg="Lead $seat has repeated one call $loop_count times over $minutes minutes on $bead"
         fi
-        $STALL_NOTIFY_CMD "stall-$seat" "$msg" >/dev/null 2>&1
+        [ -z "$STALL_NOTIFY_CMD" ] || $STALL_NOTIFY_CMD "stall-$seat" "$msg" >/dev/null 2>&1
     fi
 done
 
