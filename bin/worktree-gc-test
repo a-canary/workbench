@@ -93,6 +93,7 @@ check "parked local branch kept" "$(git -C "$tmp/main" rev-parse -q --verify ref
 check "parked remote branch kept" "$(git -C "$tmp/origin.git" rev-parse -q --verify refs/heads/open >/dev/null && echo y || echo n)" y
 check "ahead commit survives" "$(git -C "$root/ahead" log -1 --format=%s 2>/dev/null)" q
 check "open data survives" "$(cat "$root/opendata/run.log" 2>/dev/null)" trade
+check "one held check, shared by both paths" "$(grep -c 'ls-files --others --ignored' "$gc")" 1
 out=$("$gc" --root "$root" --dry-run --park-days x 2>&1); check "non-numeric park-days is a usage error" "$?" 1
 
 exit $fails
