@@ -120,7 +120,12 @@ for wt in "$ROOT"/*/; do
     fi
 
     # 5. Held check: merged but holds gitignored files other than build caches
-    held_items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null)
+    # fail closed: if git can't list ignored files, keep the worktree
+    held_items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null) || { echo "held $wt"; continue; }
+    # --directory also lists a wholly-ignored parent (pkg/ for pkg/node_modules/); drop dirs that prefix
+    # another entry, their children are judged on their own.
+    # ponytail: O(n²) over ignored entries, fine for tens; sort-and-compare-neighbours if it ever gets slow
+    held_items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$held_items")
     if [ -n "$held_items" ]; then
         remaining=0
         while IFS= read -r line; do

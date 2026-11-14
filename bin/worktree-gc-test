@@ -35,6 +35,9 @@ cp "$root/squashed/squashed.txt" "$tmp/main/"; g -C "$tmp/main" add -A; g -C "$t
 mk logs; printf '*.log\nnode_modules/\n' >"$root/logs/.gitignore"; commit logs w; g -C "$root/logs" push origin logs
 cp "$root/logs/.gitignore" "$root/logs/logs.txt" "$tmp/main/"; g -C "$tmp/main" add -A; g -C "$tmp/main" commit -m logs; g -C "$tmp/main" push origin HEAD:main
 mkdir -p "$root/logs/node_modules/x"; echo trade >"$root/logs/run.log"
+# caches: merged (at main, inherits that .gitignore), holds only ignored node_modules, top-level and nested.
+mk caches; mkdir -p "$root/caches/node_modules/a" "$root/caches/pkg/node_modules/b"
+touch "$root/caches/node_modules/a/i.js" "$root/caches/pkg/node_modules/b/i.js"
 mk dirty;    commit dirty x; g -C "$root/dirty" push origin dirty; echo wip >"$root/dirty/wip"
 mk unpushed; commit unpushed y
 mk open;     commit open z; g -C "$root/open" push origin open
@@ -48,6 +51,7 @@ out=$("$gc" --root "$root" --dry-run --min-idle 0 2>&1)
 check "dry-run: squashed would go"  "$(verdict "$out" squashed)" would-remove
 check "dry-run: squashed still on disk" "$(test -d "$root/squashed" && echo y)" y
 check "ignored log is held" "$(verdict "$out" logs)" held
+check "caches-only would go" "$(verdict "$out" caches)" would-remove
 check "dirty kept"    "$(verdict "$out" dirty)" dirty
 check "unpushed kept" "$(verdict "$out" unpushed)" unpushed
 check "open kept"     "$(verdict "$out" open)" open
