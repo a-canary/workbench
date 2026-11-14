@@ -5,6 +5,9 @@
 #                            changes nothing (catches squash merges, not just ancestry)
 #   dirty                  : uncommitted or untracked changes; kept
 #   unpushed               : HEAD has commits on no remote ref; kept, never dropped
+#   held                   : merged, but holds gitignored files other than build caches (node_modules, .venv,
+#                            venv, __pycache__, dist, build, .pytest_cache, target, .next, coverage, .turbo,
+#                            *.pyc); kept, since ignored logs, data and backups would be lost on removal
 #   open                   : pushed but not merged; kept (caller parks or follows up)
 #   active                 : any file touched within --min-idle minutes (default 60); kept, checked first
 #                            after dirty, so a worker mid-run is never reaped (KE worktree-reaper-race)
@@ -28,6 +31,10 @@ commit() { echo "$2" >"$root/$1/$1.txt"; g -C "$root/$1" add -A; g -C "$root/$1"
 # squashed: two commits, pushed, then squash-merged into main by content (no ancestry).
 mk squashed; commit squashed a; commit squashed b; g -C "$root/squashed" push origin squashed
 cp "$root/squashed/squashed.txt" "$tmp/main/"; g -C "$tmp/main" add -A; g -C "$tmp/main" commit -m squash; g -C "$tmp/main" push origin HEAD:main
+# logs: merged like squashed, but carries an ignored log (real data) beside an ignored node_modules cache.
+mk logs; printf '*.log\nnode_modules/\n' >"$root/logs/.gitignore"; commit logs w; g -C "$root/logs" push origin logs
+cp "$root/logs/.gitignore" "$root/logs/logs.txt" "$tmp/main/"; g -C "$tmp/main" add -A; g -C "$tmp/main" commit -m logs; g -C "$tmp/main" push origin HEAD:main
+mkdir -p "$root/logs/node_modules/x"; echo trade >"$root/logs/run.log"
 mk dirty;    commit dirty x; g -C "$root/dirty" push origin dirty; echo wip >"$root/dirty/wip"
 mk unpushed; commit unpushed y
 mk open;     commit open z; g -C "$root/open" push origin open
@@ -40,6 +47,7 @@ check "default min-idle: fresh merged worktree is active" "$(verdict "$out" squa
 out=$("$gc" --root "$root" --dry-run --min-idle 0 2>&1)
 check "dry-run: squashed would go"  "$(verdict "$out" squashed)" would-remove
 check "dry-run: squashed still on disk" "$(test -d "$root/squashed" && echo y)" y
+check "ignored log is held" "$(verdict "$out" logs)" held
 check "dirty kept"    "$(verdict "$out" dirty)" dirty
 check "unpushed kept" "$(verdict "$out" unpushed)" unpushed
 check "open kept"     "$(verdict "$out" open)" open
@@ -50,6 +58,7 @@ check "squashed dir gone"       "$(test -e "$root/squashed" && echo y || echo n)
 check "squashed local branch gone" "$(git -C "$tmp/main" rev-parse -q --verify refs/heads/squashed >/dev/null && echo y || echo n)" n
 check "unpushed commit survives" "$(git -C "$root/unpushed" log -1 --format=%s 2>/dev/null)" y
 check "dirty file survives"     "$(cat "$root/dirty/wip" 2>/dev/null)" wip
+check "held log survives" "$(cat "$root/logs/run.log" 2>/dev/null)" trade
 check "open still on disk"      "$(test -d "$root/open" && echo y)" y
 
 exit $fails
