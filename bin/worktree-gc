@@ -125,7 +125,7 @@ for wt in "$ROOT"/*/; do
         remaining=0
         while IFS= read -r line; do
             [ -z "$line" ] && continue
-            base="${line##*/}"
+            line="${line%/}"; base="${line##*/}"
             is_cache=0
             for cache in $IGNORED_CACHES; do
                 if [ "$base" = "$cache" ]; then
