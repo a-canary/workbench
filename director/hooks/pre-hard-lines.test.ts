@@ -83,6 +83,13 @@ test("blocks through string wrappers, find -exec and nested shells", () => {
   blocked("function f { git push -f; }; f");
   blocked("env ".repeat(60) + "git push -f"); // a long wrapper chain is checked in linear time
   allowed("env ".repeat(60) + "git status");
+  blocked("find . -exec ".repeat(60) + "git push -f \\;");
+  allowed("find . -exec ".repeat(60) + "true \\;");
+  blocked("git -calias.p='push -f' p");
+  blocked("gh api -X DELETE https://api.github.com/repos/o/r");
+  blocked("gh api -X DELETE 'repos/o/r?x=1'");
+  const odd = spawnSync("bash", [HOOK], { input: '{"tool_name":"Bash","tool_input":"x"}', encoding: "utf8" });
+  expect(odd.status).toBe(2); // a command the hook cannot read is refused, not waved through
   allowed("find . -name '*.ts' -exec grep -n push {} +");
   allowed('watch -n 5 "git status"');
 });

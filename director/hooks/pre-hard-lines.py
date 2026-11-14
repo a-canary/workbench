@@ -10,7 +10,7 @@ Limits: this is a tripwire for the honest mistake, not a security boundary. It r
 command text, so it cannot see a script's contents (bash x.sh, source), an interpreter's
 string (python -c, node -e), a request body in a file (gh api --input), arguments piped
 into xargs, stored git or gh aliases, a word built by shell expansion (g=git; $g push ...),
-or a merge through the API (pulls/N/merge). Branch protection and the prose rule cover those.
+a command run on another host (ssh host "..."), or a merge through the API (pulls/N/merge). Branch protection and the prose rule cover those.
 """
 import json
 import re
@@ -70,7 +70,8 @@ def git_push_force(words):
     i = 1
     while i < len(words):
         w = words[i]
-        if w == "-c" and i + 1 < len(words) and words[i + 1].startswith("alias."):
+        if w.startswith("-calias.") or w.startswith("--config-env=alias.") or (
+                w in ("-c", "--config-env") and i + 1 < len(words) and words[i + 1].startswith("alias.")):
             return "git alias defined inline (cannot be checked)"
         if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
             i += 2
@@ -131,7 +132,8 @@ def check_hard_line(words):
         method = method.upper()
         if method in ("PUT", "POST", "PATCH", "DELETE") and any("/collaborators/" in w for w in words):
             return "repo visibility or access"
-        if method == "DELETE" and any(re.fullmatch(r"/?repos/[^/]+/[^/]+/?", w) for w in words):
+        if method == "DELETE" and any(
+                re.fullmatch(r"(https://[^/]+)?/?repos/[^/?]+/[^/?]+/?(\?.*)?", w) for w in words):
             return "repo visibility or access"
 
     # b. git force push
@@ -198,7 +200,8 @@ def blocked_cmd(words, depth=0):
         return None
     if w0 == "find":
         for i, t in enumerate(words):
-            if t in ("-exec", "-execdir", "-ok", "-okdir"):
+            # a nested find is skipped for the same reason as a nested wrapper: this loop reaches its -exec
+            if t in ("-exec", "-execdir", "-ok", "-okdir") and base("".join(words[i + 1:i + 2])) != "find":
                 res = blocked_cmd(words[i + 1:], depth)
                 if res:
                     return res
@@ -245,10 +248,11 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         return 0
-    if data.get("tool_name") != "Bash":
+    if not isinstance(data, dict) or data.get("tool_name") != "Bash":
         return 0
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    if cmd:
+    ti = data.get("tool_input")
+    cmd = ti.get("command") if isinstance(ti, dict) else None
+    if cmd != "":
         try:
             hit = blocked(cmd) if isinstance(cmd, str) else "command is not text"
         except Exception as e:  # a checker fault must not read as "allowed"
