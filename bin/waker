@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# waker — one tick of the director's seat waker (control-pane spec section 7).
+#
+# Reads seat files from the seat folder, validates them, and for each lead seat
+# that has a ready bead, starts a Claude session — subject to budget, priority,
+# and slot limits. Prints one line per seat:
+#   seat=<name> <verdict> [bead=<id>] [reason]
+# Verdicts: started, running, idle, budget-stop, claude-down, no-slot,
+#           bad-seat, drainer, would-start (--dry-run), start-failed.
+#
+# Off switch: while <seats>/waker.off exists the tick prints "waker: off" and
+# does nothing else (exit 0).
+#
+# Seams (env, all optional):
+#   WAKER_SEATS        seat folder
+#   WAKER_BUDGET       folder holding ignore-until
+#   WAKER_CLAUDE_SLOTS max concurrent lead sessions (default 2)
+#   WAKER_METER_CMD    prints "<util> <pace>" or "? ?" when unreadable
+#   WAKER_READY_CMD    "<cmd> <repo> <label>" prints top ready bead id or nothing
+#   WAKER_ALIVE_CMD    "<cmd> <seat>" exits 0 when seat has a live session
+#   WAKER_DRAIN_CMD    run once at end of tick; "" = none
+set -u
+
+SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
+BUDGET="${WAKER_BUDGET:-$HOME/vault/director/.budget}"
+SLOTS="${WAKER_CLAUDE_SLOTS:-2}"
+DRY_RUN=0
+
+# Default seam commands (only used if env vars unset)
+if [ -z "${WAKER_METER_CMD:-}" ]; then
+    default_meter() {
+        jq -L "$HOME/vault/director/scripts" -r 'include "budget"; "\(.util // "?") \(.pace // "?")"' "$BUDGET/meter.json"
+    }
+    WAKER_METER_CMD="default_meter"
+fi
+if [ -z "${WAKER_READY_CMD:-}" ]; then
+    default_ready() {
+        cd "$1" && bd ready --label "$2" --json --limit 1 | jq -r '.[0].id // empty'
+    }
+    WAKER_READY_CMD="default_ready"
+fi
+if [ -z "${WAKER_ALIVE_CMD:-}" ]; then
+    default_alive() {
+        tmux has-session -t "$1"
+    }
+    WAKER_ALIVE_CMD="default_alive"
+fi
+if [ -z "${WAKER_DRAIN_CMD:-}" ]; then
+    WAKER_DRAIN_CMD=""
+fi
+
+# Parse args
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        *) shift ;;
+    esac
+done
+
+# Off switch
+if [ -e "$SEATS/waker.off" ]; then
+    echo "waker: off"
+    exit 0
+fi
+
+# Lock: one tick at a time
+exec 9>"$SEATS/.waker.lock"
+if ! flock -n 9; then
+    echo "waker: locked"
+    exit 0
+fi
+
+# Read meter once
+meter_out=$($WAKER_METER_CMD 2>/dev/null) || meter_out=""
+util=$(echo "$meter_out" | awk '{print $1}')
+pace=$(echo "$meter_out" | awk '{print $2}')
+meter_ok=1
+case "$util" in
+    ''|*[!0-9.]*|.*.*) meter_ok=0 ;;
+esac
+case "$pace" in
+    ''|*[!0-9.]*|.*.*) meter_ok=0 ;;
+esac
+if [ -z "$util" ] || [ -z "$pace" ]; then meter_ok=0; fi
+
+# Override: ignore-until in the future
+override=0
+if [ -e "$BUDGET/ignore-until" ]; then
+    until_ts=$(cat "$BUDGET/ignore-until" 2>/dev/null)
+    now=$(date +%s)
+    case "$until_ts" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ "$until_ts" -gt "$now" ]; then
+                override=1
+            fi
+            ;;
+    esac
+fi
+
+# Validate seats: single jq expression per file
+# Prints "ok" or a short reason
+validate_seat() {
+    local file="$1"
+    local base="${file##*/}"
+    local stem="${base%.json}"
+    jq -r --arg stem "$stem" '
+        if type != "object" then "not an object"
+        elif .seat != $stem then "seat name mismatch"
+        elif (.seat | test("^[a-z0-9-]+$")) != true then "bad seat name"
+        elif (.kind != "lead" and .kind != "worker") then "bad kind"
+        elif (.repo | type) != "string" or .repo == "" then "bad repo"
+        elif (.label | type) != "string" or .label == "" then "bad label"
+        elif (.priority | type) != "number" then "bad priority"
+        elif (.pace_max | type) != "number" then "bad pace_max"
+        elif (.env | type) != "array" then "bad env"
+        elif ([.env[] | select(type != "string" or (test("^[A-Za-z_][A-Za-z0-9_]*$")) != true)] | length) > 0 then "bad env entry"
+        elif (.start | type) != "string" or .start == "" then "bad start"
+        else "ok"
+        end
+    ' "$file" 2>/dev/null || echo "invalid JSON"
+}
+
+# Collect valid seats as "name|priority|pace_max|repo|label|env_json|start"
+declare -a seats=()
+for file in "$SEATS"/*.json; do
+    [ -f "$file" ] || continue
+    stem="${file##*/}"; stem="${stem%.json}"
+    v=$(validate_seat "$file")
+    if [ "$v" != "ok" ]; then
+        echo "seat=$stem bad-seat $v"
+        continue
+    fi
+    # Check repo exists
+    repo=$(jq -r '.repo' "$file")
+    if [ ! -d "$repo" ]; then
+        echo "seat=$stem bad-seat repo missing"
+        continue
+    fi
+    kind=$(jq -r '.kind' "$file")
+    if [ "$kind" = "worker" ]; then
+        echo "seat=$stem drainer"
+        continue
+    fi
+    # Build seat record: name, priority, pace_max, repo, label, env array (as string), start
+    priority=$(jq -r '.priority' "$file")
+    pace_max=$(jq -r '.pace_max' "$file")
+    label=$(jq -r '.label' "$file")
+    env_json=$(jq -r '.env | join(",")' "$file")
+    start=$(jq -r '.start' "$file")
+    seats+=("$stem|$priority|$pace_max|$repo|$label|$env_json|$start")
+done
+
+# Sort seats by priority ascending, then by name
+# Use sort -t'|' -k2,2n -k1,1
+sorted_seats=$(printf '%s\n' "${seats[@]}" | sort -t'|' -k2,2n -k1,1)
+
+# First pass: count running seats
+used=0
+declare -a running=()
+while IFS= read -r s; do
+    [ -z "$s" ] && continue
+    IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
+    if $WAKER_ALIVE_CMD "$name" 2>/dev/null; then
+        echo "seat=$name running"
+        used=$((used + 1))
+        running+=("$name")
+    fi
+done <<<"$sorted_seats"
+
+# Helper: is this name in the running array?
+is_running() {
+    local n="$1"
+    for r in "${running[@]}"; do
+        [ "$r" = "$n" ] && return 0
+    done
+    return 1
+}
+
+# Second pass: try to start seats that aren't running
+while IFS= read -r s; do
+    [ -z "$s" ] && continue
+    IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
+    if is_running "$name"; then
+        continue
+    fi
+
+    # Get ready bead
+    bead=$($WAKER_READY_CMD "$repo" "$label" 2>/dev/null) || bead=""
+    if [ -z "$bead" ]; then
+        echo "seat=$name idle"
+        continue
+    fi
+
+    # claude.down
+    if [ -e "$SEATS/claude.down" ]; then
+        echo "seat=$name claude-down bead=$bead"
+        continue
+    fi
+
+    # Budget checks (unless overridden)
+    if [ "$override" -eq 0 ]; then
+        if [ "$meter_ok" -eq 0 ]; then
+            echo "seat=$name budget-stop bead=$bead meter unreadable"
+            continue
+        fi
+        if awk -v a="$util" -v b="0.90" 'BEGIN{exit !(a>=b)}'; then
+            echo "seat=$name budget-stop bead=$bead use $util >= 0.90"
+            continue
+        fi
+        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
+            echo "seat=$name budget-stop bead=$bead pace $pace > $pace_max"
+            continue
+        fi
+    fi
+
+    # Slot check
+    if [ "$used" -ge "$SLOTS" ]; then
+        echo "seat=$name no-slot bead=$bead"
+        continue
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "seat=$name would-start bead=$bead"
+        used=$((used + 1))
+        continue
+    fi
+
+    # Start session with scrubbed environment
+    # Build env var list: only names from seat's .env that are set in waker's env
+    vars=("WAKER_SEAT=$name" "WAKER_BEAD=$bead")
+    IFS=',' read -r -a env_names <<<"$env_json"
+    for ename in "${env_names[@]}"; do
+        [ -z "$ename" ] && continue
+        eval "val=\${$ename:-__UNSET__}"
+        if [ "$val" != "__UNSET__" ]; then
+            vars+=("$ename=$val")
+        fi
+    done
+    rc=0
+    ( cd "$repo" && env -i "${vars[@]}" bash -c "$start" </dev/null ) || rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "seat=$name started bead=$bead"
+        used=$((used + 1))
+    else
+        echo "seat=$name start-failed bead=$bead rc=$rc"
+    fi
+done <<<"$sorted_seats"
+
+# Drain (unless dry-run)
+if [ "$DRY_RUN" -eq 0 ] && [ -n "$WAKER_DRAIN_CMD" ]; then
+    $WAKER_DRAIN_CMD >/dev/null 2>&1 || true
+fi
+
+exit 0
