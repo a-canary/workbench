@@ -10,7 +10,8 @@ Limits: this is a tripwire for the honest mistake, not a security boundary. It r
 command text, so it cannot see a script's contents (bash x.sh, source), an interpreter's
 string (python -c, node -e), a request body in a file (gh api --input), arguments piped
 into xargs, stored git or gh aliases, a word built by shell expansion (g=git; $g push ...),
-a command run on another host (ssh host "..."), or a merge through the API (pulls/N/merge). Branch protection and the prose rule cover those.
+a command run on another host or in another process (ssh host "...", docker exec, tmux send-keys,
+screen -X, curl | bash), or a merge through the API (pulls/N/merge). Branch protection and the prose rule cover those.
 """
 import json
 import re
@@ -29,6 +30,7 @@ VIEWERS = {"cat", "grep", "rg", "sed", "head", "tail", "less", "wc", "ls", "echo
 
 
 SCRIPT_EXT = re.compile(r"\.(ts|js|mjs|cjs)$")
+CALLS = 0
 
 
 def base(tok):
@@ -69,9 +71,9 @@ def git_push_force(words):
     """words[0] is git; return 'force push' if this is a force push, else None."""
     i = 1
     while i < len(words):
-        w = words[i]
+        w = words[i].lower() if "alias." in words[i].lower() else words[i]  # config keys ignore case
         if w.startswith("-calias.") or w.startswith("--config-env=alias.") or (
-                w in ("-c", "--config-env") and i + 1 < len(words) and words[i + 1].startswith("alias.")):
+                w in ("-c", "--config-env") and i + 1 < len(words) and words[i + 1].lower().startswith("alias.")):
             return "git alias defined inline (cannot be checked)"
         if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"):
             i += 2
@@ -171,6 +173,10 @@ def check_hard_line(words):
 
 def blocked_cmd(words, depth=0):
     """Check a simple command (may have keywords/wrappers). Return line name or None."""
+    global CALLS
+    CALLS += 1
+    if CALLS > 5000:  # alternating wrapper/find chains are exponential; main() turns this into a block
+        raise RuntimeError("command too complex to check")
     if words and words[0] == "function" and "{" in words:  # function f { cmd; }
         words = words[words.index("{"):]
     while words and words[0] in KEYWORDS:
@@ -212,6 +218,7 @@ def blocked(cmd, depth=0):
     """Check a command string. Return hard line name or None."""
     if depth > 4:  # fail closed, as pre-host-agent does
         return "command nested too deep to check"
+    cmd = cmd.replace("\\\n", "")  # bash joins a backslash-newline continuation
     for sub in substs(cmd):
         res = blocked(sub, depth + 1)
         if res:
@@ -229,14 +236,22 @@ def blocked(cmd, depth=0):
                      r"trade-rebalance-active|\border(\.(ts|js|mjs|cjs))?\s", cmd):
             return "command the checker cannot parse (fix the quoting) that names a hard-line tool"
         return None
-    words = []
+    words, skip = [], False
     for t in toks + ["\n"]:
-        if t in CONTROL:
+        punct = re.fullmatch(r"[();<>|&\n]+", t)
+        if skip and not punct:  # the target of a redirect: gh 2>/dev/null repo delete
+            skip = False
+        elif punct and re.fullmatch(r"[<>&]+", t) and re.search(r"[<>]", t):
+            if words and words[-1].isdigit():  # the fd number: 2> is tokenized as "2", ">"
+                words.pop()
+            skip = True
+        elif punct:  # a separator, including <( and >( process substitution
+            skip = False
             res = blocked_cmd(words, depth)
             if res:
                 return res
             words = []
-        elif not re.fullmatch(r"[<>&]+|\d*[<>]+&?\d*", t):
+        else:
             words.append(t)
     return None
 

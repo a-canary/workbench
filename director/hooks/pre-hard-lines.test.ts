@@ -94,6 +94,17 @@ test("blocks through string wrappers, find -exec and nested shells", () => {
   blocked("cat <<EOF\nit's\nEOF\nbun tools/order.ts buy SPY 1");
   blocked("# don't\ngh api -X DELETE repos/o/r");
   allowed("# don't forget\nls -la");
+  blocked("git push \\\n  -f origin x"); // backslash-newline continuation
+  blocked("gh api -X PATCH repos/o/r \\\n -f private=false");
+  blocked("gh 2>/dev/null repo delete o/r --yes"); // a redirect before the subcommand
+  blocked("git 2>&1 push -f");
+  blocked("git >out.txt push --force");
+  blocked("cat <(git push -f)"); // process substitution
+  blocked("git -c ALIAS.p='push -f' p");
+  blocked("find . -exec env ".repeat(40) + "git push -f \\;"); // exponential chain: refused, not hung
+  allowed("git push origin main 2>&1 | tail -5");
+  allowed("gh pr view 5 --json state >/tmp/x.json 2>/dev/null");
+  allowed("diff <(git log -1) <(git status)");
   blocked('su aaron -c "git push -f"');
   blocked("strace git push -f");
   for (const input of ['{"tool_name":"Bash","tool_input":{}}', '{"tool_name":"Bash"}'])
