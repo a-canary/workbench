@@ -59,6 +59,22 @@ test("blocks repo visibility, access and deletion", () => {
   blocked("gh api repos/o/r --method PATCH -F visibility=public");
   blocked("gh api -X PUT repos/o/r/collaborators/someone");
   blocked("gh api --method PUT /repos/o/r/collaborators/someone -f permission=push");
+  blocked("gh api -X DELETE repos/o/r");
+  blocked("gh api --method=DELETE /repos/o/r");
+  blocked("gh api -XDELETE repos/o/r");
+  blocked("gh api -XPUT repos/o/r/collaborators/x");
+  blocked("gh api -XPATCH repos/o/r -fprivate=false");
+  blocked("gh api -XPATCH repos/o/r -Fvisibility=public");
+  blocked("gh api repos/o/r --method PATCH --field=visibility=public");
+});
+
+test("blocks through string wrappers, find -exec and nested shells", () => {
+  blocked('watch "git push -f"');
+  blocked("find . -name x -exec git push -f \\;");
+  blocked("find . -exec gh pr merge 5 --admin \\;");
+  blocked(`bash -c "bash -c 'bash -c \\"bash -c gh\\\\ pr\\\\ merge\\\\ --admin\\"'"`);
+  allowed("find . -name '*.ts' -exec grep -n push {} +");
+  allowed('watch -n 5 "git status"');
 });
 
 test("blocks live order paths", () => {
@@ -74,6 +90,10 @@ test("blocks live order paths", () => {
   blocked("bun run order close SPY");
   blocked("/home/aaron/bin/trade-rebalance-active");
   blocked("nohup trade-rebalance-active &");
+  blocked("cd tools && npx tsx order.ts buy SPY 1");
+  blocked("node dist/tools/order.js buy SPY 1");
+  blocked("node dist/tools/rebalance-calc.js --execute");
+  blocked("npx tsx tools/rebalance-calc.ts --execute=true");
 });
 
 test("allows the same words as data, and the safe forms", () => {
@@ -91,6 +111,9 @@ test("allows the same words as data, and the safe forms", () => {
   allowed("gh repo create o/new --private");
   allowed("gh api repos/o/r -q .visibility");
   allowed("gh api repos/o/r/collaborators");
+  allowed("gh api -X DELETE repos/o/r/git/refs/heads/lane/x");
+  allowed("gh api -XPATCH repos/o/r/pulls/5 -f title=x");
+  allowed("node dist/tools/order.js list open");
   allowed("npx tsx tools/rebalance-calc.ts");
   allowed("npx tsx tools/rebalance-calc.ts --dry-run");
   allowed("npx tsx tools/m1-execute.ts roth --dry-run");

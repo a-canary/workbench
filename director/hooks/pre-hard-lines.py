@@ -3,7 +3,13 @@
 Blocks: --admin (gh), force push (git), repo visibility/access/deletion (gh),
 live order paths (rebalance-calc/m1-execute --execute, trade-rebalance-active,
 order tool with order verbs). Quote-aware shlex; follows wrappers, shell -c,
-eval, $(...)/`...`. Unparseable input falls back to raw regex and fails closed.
+eval, $(...)/`...`. Input the tokenizer rejects (unbalanced quotes, which bash rejects
+too) is checked by raw regex for the main spellings only.
+
+Limits: this reads the command text, so it cannot see a script's contents (bash x.sh,
+source), a request body in a file (gh api --input), arguments piped into xargs, git or
+gh aliases, or a word built by shell expansion (g=git; $g push ...). Branch protection
+and the prose rule cover those paths.
 """
 import json
 import re
@@ -19,6 +25,9 @@ KEYWORDS = {"{", "}", "!", "if", "then", "elif", "else", "while", "until", "do",
 ORDER_VERBS = {"buy", "buy-notional", "sell", "stop-sell", "close", "cancel", "cancel-all"}
 VIEWERS = {"cat", "grep", "rg", "sed", "head", "tail", "less", "wc", "ls", "echo", "printf",
            "git", "bd", "ke", "diff"}
+
+
+SCRIPT_EXT = re.compile(r"\.(ts|js|mjs|cjs)$")
 
 
 def base(tok):
@@ -103,19 +112,23 @@ def check_hard_line(words):
     # c. gh api visibility/private/collaborators
     if w0 == "gh" and len(words) > 1 and words[1] == "api":
         # ponytail: a body sent with --input FILE is not read; branch protection and the prose rule cover that path
-        if any(w.startswith(("private=", "visibility=")) or "updateRepository" in w for w in words):
+        # fields and methods also come attached to the short flag: -fprivate=false, -XPUT
+        if any(re.search(r"(^|^-[fF]|^--(raw-)?field=)(private|visibility)=", w) or "updateRepository" in w
+               for w in words):
             return "repo visibility or access"
-        if any("/collaborators/" in w for w in words):
-            method = None
-            for k, w in enumerate(words):
-                if w == "-X" and k + 1 < len(words):
-                    method = words[k + 1]
-                elif w == "--method" and k + 1 < len(words):
-                    method = words[k + 1]
-                elif w.startswith("--method="):
-                    method = w.split("=", 1)[1]
-            if method and method.upper() in ("PUT", "POST", "PATCH", "DELETE"):
-                return "repo visibility or access"
+        method = ""
+        for k, w in enumerate(words):
+            if w in ("-X", "--method") and k + 1 < len(words):
+                method = words[k + 1]
+            elif w.startswith("--method="):
+                method = w.split("=", 1)[1]
+            elif re.fullmatch(r"-X.+", w):
+                method = w[2:]
+        method = method.upper()
+        if method in ("PUT", "POST", "PATCH", "DELETE") and any("/collaborators/" in w for w in words):
+            return "repo visibility or access"
+        if method == "DELETE" and any(re.fullmatch(r"/?repos/[^/]+/[^/]+/?", w) for w in words):
+            return "repo visibility or access"
 
     # b. git force push
     if w0 == "git":
@@ -125,25 +138,18 @@ def check_hard_line(words):
 
     # d. live order path — only for non-viewer commands
     if w0 not in VIEWERS:
-        basenames = []
-        for w in words:
-            bn = base(w)
-            if bn.endswith(".ts"):
-                bn = bn[:-3]
-            basenames.append(bn)
+        basenames = [SCRIPT_EXT.sub("", base(w)) for w in words]
 
-        if ("rebalance-calc" in basenames or "m1-execute" in basenames) and "--execute" in words:
+        execute = any(w == "--execute" or w.startswith("--execute=") for w in words)
+        if ("rebalance-calc" in basenames or "m1-execute" in basenames) and execute:
             return "live order path"
         if "trade-rebalance-active" in basenames:
             return "live order path"
 
-        # order tool: basename (no .ts) is 'order' and word contains 'tools/order'
+        # order tool: a script file named order (order.ts, dist/tools/order.js), or any tools/order path
         order_idx = -1
         for k, w in enumerate(words):
-            bn = base(w)
-            if bn.endswith(".ts"):
-                bn = bn[:-3]
-            if bn == "order" and "tools/order" in w:
+            if basenames[k] == "order" and ("tools/order" in w or SCRIPT_EXT.search(w)):
                 order_idx = k
                 break
         if order_idx < 0:
@@ -159,7 +165,7 @@ def check_hard_line(words):
     return None
 
 
-def blocked_cmd(words):
+def blocked_cmd(words, depth=0):
     """Check a simple command (may have keywords/wrappers). Return line name or None."""
     while words and words[0] in KEYWORDS:
         words = words[1:]
@@ -169,18 +175,25 @@ def blocked_cmd(words):
     if w0 in SHELLS:
         for i, t in enumerate(words[1:-1], 1):
             if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", t):
-                return blocked(words[i + 1])
+                return blocked(words[i + 1], depth + 1)
         return None
     if w0 == "eval":
-        return blocked(" ".join(words[1:]))
+        return blocked(" ".join(words[1:]), depth + 1)
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
-        return blocked_cmd(words[1:])
+        return blocked_cmd(words[1:], depth)
     if w0 in WRAPPERS:
         for i in range(1, len(words)):
-            res = blocked_cmd(words[i:])
+            # the command follows the wrapper's own options, or is one quoted string (watch "git ...")
+            res = blocked_cmd(words[i:], depth) or (" " in words[i] and blocked(words[i], depth + 1))
             if res:
                 return res
         return None
+    if w0 == "find":
+        for i, t in enumerate(words):
+            if t in ("-exec", "-execdir", "-ok", "-okdir"):
+                res = blocked_cmd(words[i + 1:], depth)
+                if res:
+                    return res
     return check_hard_line(words)
 
 
@@ -210,7 +223,7 @@ def blocked(cmd, depth=0):
     words = []
     for t in toks + ["\n"]:
         if t in CONTROL:
-            res = blocked_cmd(words)
+            res = blocked_cmd(words, depth)
             if res:
                 return res
             words = []
