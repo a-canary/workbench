@@ -6,6 +6,8 @@
 #   dirty                  : uncommitted or untracked changes; kept
 #   unpushed               : HEAD has commits on no remote ref; kept, never dropped
 #   open                   : pushed but not merged; kept (caller parks or follows up)
+#   active                 : any file touched within --min-idle minutes (default 60); kept, checked first
+#                            after dirty, so a worker mid-run is never reaped (KE worktree-reaper-race)
 # --dry-run removes nothing. Removal = git worktree remove + delete the local branch.
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
@@ -34,13 +36,15 @@ g -C "$tmp/main" fetch origin
 verdict() { echo "$1" | awk -v p="$root/$2" '$2==p {print $1}'; }
 
 out=$("$gc" --root "$root" --dry-run 2>&1)
+check "default min-idle: fresh merged worktree is active" "$(verdict "$out" squashed)" active
+out=$("$gc" --root "$root" --dry-run --min-idle 0 2>&1)
 check "dry-run: squashed would go"  "$(verdict "$out" squashed)" would-remove
 check "dry-run: squashed still on disk" "$(test -d "$root/squashed" && echo y)" y
 check "dirty kept"    "$(verdict "$out" dirty)" dirty
 check "unpushed kept" "$(verdict "$out" unpushed)" unpushed
 check "open kept"     "$(verdict "$out" open)" open
 
-out=$("$gc" --root "$root" 2>&1)
+out=$("$gc" --root "$root" --min-idle 0 2>&1)
 check "squashed removed"        "$(verdict "$out" squashed)" removed
 check "squashed dir gone"       "$(test -e "$root/squashed" && echo y || echo n)" n
 check "squashed local branch gone" "$(git -C "$tmp/main" rev-parse -q --verify refs/heads/squashed >/dev/null && echo y || echo n)" n
