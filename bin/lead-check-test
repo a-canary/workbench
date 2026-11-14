@@ -26,6 +26,8 @@ no_body()     { script test_new.sh 'false'; printf 'Test: sh test_new.sh\n---\n\
 no_taskfile() { script test_new.sh 'false'; }
 litter()      { script test_new.sh 'touch litter.tmp; grep -q 2 a.py'; task 'sh test_new.sh'; }
 nothing()     { :; }
+nul_way_out() { printf 'bin\0ary\nCANNOT-DO: no such module\n'; }
+dirties()     { script test_new.sh 'echo junk >> a.py; grep -q 2 a.py'; task 'sh test_new.sh'; }
 EOF
 
 cat > "$tmp/stub" <<'EOF'
@@ -157,5 +159,15 @@ go GIT_CONFIG_GLOBAL="$tmp/hostile" STUB_DO_1=good STUB_SAY_1='test_new.sh fails
 go STUB_DO_1=good STUB_SAY_1=$'Wrote a draft.\nCANNOT-DO: the request contradicts itself' --
 [ "$rc" = 5 ] && untouched && [ "$(j .way_out)" = CANNOT-DO ] \
   && ok "way out after writing: repo as it was" || bad "way out after writing: repo as it was" "$(why)"
+
+# 12. a NUL byte in the Lead's reply does not hide its way out (same guard as the worker rung)
+go STUB_DO_1=nul_way_out --
+[ "$rc" = 5 ] && [ "$(calls)" = 1 ] && untouched && [ "$(j .way_out)" = CANNOT-DO ] \
+  && ok "way out found in a reply with a NUL byte" || bad "way out found in a reply with a NUL byte" "$(why)"
+
+# 13. a RED run that changes a tracked file leaves no change behind: the worker starts from the RED commit alone
+go STUB_DO_1=dirties --
+[ "$rc" = 0 ] && clean && [ "$(cat "$wd/a.py")" = 'print(1)' ] && [ "$(G show --name-only --format= HEAD)" = test_new.sh ] \
+  && ok "RED run that edits a tracked file: worktree clean" || bad "RED run that edits a tracked file: worktree clean" "$(why)" "status: $(G status --porcelain | tr '\n' ' ')"
 
 exit $fail
