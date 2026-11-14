@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# floor-run-test — host-side contract of floor-run (the bench adapter), no LLM needed.
+# A stub replaces worker-sandbox: it records its arguments and plays the worker ($STUB_DO, $STUB_SAY, $STUB_RC).
+set -uo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+[ -x "$here/floor-run" ] || { echo "FAIL: bin/floor-run missing or not executable"; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$STUB_OUT/args"
+while [ $# -gt 0 ]; do
+  case $1 in --worktree) wt=$2 ;; --task) cp "$2" "$STUB_OUT/task-seen"; echo "$2" > "$STUB_OUT/task-path" ;; esac
+  shift
+done
+cd "$wt" || exit 9
+eval "${STUB_DO:-}"
+[ -z "${STUB_SAY:-}" ] || printf '%s\n' "$STUB_SAY"
+exit "${STUB_RC:-0}"
+EOF
+chmod +x "$tmp/stub"
+
+ok()  { echo "ok   $1"; }
+bad() { echo "FAIL $1"; shift; printf '     %s\n' "$@"; fail=1; }
+
+# A fresh bench work dir: one source file and python litter. Sets $wd, $out, $rc.
+# Usage: go [VAR=val ...] -- floor-run args...
+go() {
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+  wd=$(mktemp -d "${wdroot:-$tmp}/wd-XXXXXX"); out=$(mktemp -d "$tmp/out-XXXXXX")
+  echo 'print(1)' > "$wd/a.py"
+  mkdir "$wd/__pycache__" && echo junk > "$wd/__pycache__/a.cpython-312.pyc"
+  [ -z "${prep:-}" ] || ( cd "$wd" && eval "$prep" )   # prep='cmds' go ... : extra setup inside the work dir
+  ( cd "$wd" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS -u FLOOR_METRICS \
+      WORKER_SANDBOX="$tmp/stub" STUB_OUT="$out" ${envs[@]+"${envs[@]}"} "$here/floor-run" "$@" ) > "$out/stdout" 2> "$out/stderr"
+  rc=$?
+}
+arg_after() { grep -x -A1 -- "$1" "$out/args" 2>/dev/null | tail -1; }
+metric() { jq -r "$1" "$out/metrics" 2>/dev/null; }
+
+# 1. happy path: repo made, litter excluded, worker seat called on the private lane, one metrics line
+go FLOOR_METRICS="$tmp/m1" STUB_DO='echo fixed > fixed.txt' STUB_SAY='done' -- --rung worker 'make a.py print 2'
+cp "$tmp/m1" "$out/metrics" 2>/dev/null
+tracked=$(git -C "$wd" ls-files 2>/dev/null | tr '\n' ' ')
+commits=$(git -C "$wd" rev-list --count HEAD 2>/dev/null)
+if [ "$rc" = 0 ] && [ "$(cat "$out/stdout")" = done ] && [ "$commits" = 1 ] && [ "$tracked" = "a.py " ] \
+   && [ -z "$(git -C "$wd" status --porcelain --ignored=no | grep -v '^?? fixed.txt$')" ] \
+   && [ "$(arg_after --worktree)" = "$wd" ] && [ "$(arg_after --lane)" = private ] \
+   && [ "$(arg_after --role)" = worker ] && [ "$(arg_after --timeout)" = 600 ] \
+   && grep -qF 'make a.py print 2' "$out/task-seen" \
+   && case $(cat "$out/task-path") in "$wd"/*) false ;; *) true ;; esac \
+   && [ "$(wc -l < "$tmp/m1")" = 1 ] \
+   && [ "$(metric '[.rung, .sandbox_rc, .way_out, (.seconds|type), (.workbench_sha|type)] | @csv')" != "" ] \
+   && [ "$(metric '.rung')" = worker ] && [ "$(metric '.sandbox_rc')" = 0 ] && [ "$(metric '.way_out')" = null ] \
+   && [ "$(metric '.seconds|type')" = number ]; then ok "worker rung: repo, excludes, sandbox args, metrics"
+else bad "worker rung: repo, excludes, sandbox args, metrics" "rc=$rc commits=$commits tracked=[$tracked]" \
+     "args: $(tr '\n' ' ' < "$out/args" 2>/dev/null)" "metrics: $(cat "$tmp/m1" 2>/dev/null)" "stderr: $(tail -3 "$out/stderr")"; fi
+
+# 2. the commit identity is fixed (a bench HOME has no git config)
+who=$(git -C "$wd" log -1 --format='%an <%ae>' 2>/dev/null)
+[ "$who" = "floor-run <floor-run@localhost>" ] && ok "fixed commit identity" || bad "fixed commit identity" "got: $who"
+
+# 3. a foreign port is refused before the sandbox starts
+go WORKER_PRIVATE_PORT=8093 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a foreign WORKER_PRIVATE_PORT" || bad "refuses a foreign WORKER_PRIVATE_PORT" "rc=$rc"
+go WORKER_PRIVATE_PORT=8099 -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && ok "accepts the local port" || bad "accepts the local port" "rc=$rc $(tail -2 "$out/stderr")"
+
+# 4. bad usage: unknown rung, no instruction
+go -- --rung nope 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses an unknown rung" || bad "refuses an unknown rung" "rc=$rc"
+go -- --rung worker
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a missing instruction" || bad "refuses a missing instruction" "rc=$rc"
+
+# 5. the worker's time limit sits under the bench's task limit
+go BENCH_TASK_TIMEOUT_MS=180000 -- --rung worker 'x'
+[ "$(arg_after --timeout)" = 165 ] && ok "timeout = task limit - 15 s" || bad "timeout = task limit - 15 s" "got $(arg_after --timeout)"
+go BENCH_TASK_TIMEOUT_MS=30000 -- --rung worker 'x'
+[ "$(arg_after --timeout)" = 15 ] && ok "shortest task limit: 30 s gives the worker 15 s" || bad "shortest task limit: 30 s gives the worker 15 s" "got $(arg_after --timeout)"
+# a limit under 30 s leaves the worker no room, and a limit that is not a whole number is never evaluated
+go BENCH_TASK_TIMEOUT_MS=20000 -- --rung worker 'x'
+r5=$rc; a5=$([ -e "$out/args" ] && echo ran)
+go "BENCH_TASK_TIMEOUT_MS=a[\$(touch $tmp/pwned)]" -- --rung worker 'x'
+[ "$r5" = 2 ] && [ -z "$a5" ] && [ "$rc" = 2 ] && [ ! -e "$out/args" ] && [ ! -e "$tmp/pwned" ] \
+  && ok "refuses a task limit under 30 s or not a number" || bad "refuses a task limit under 30 s or not a number" "rc=$r5,$rc ran=$a5 pwned=$(ls "$tmp/pwned" 2>/dev/null)"
+
+# 6. any model outcome exits 0 (the bench's verify gives the verdict): a timeout, a failure that left changes
+go FLOOR_METRICS="$tmp/m6" STUB_RC=124 -- --rung worker 'x'
+cp "$tmp/m6" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.sandbox_rc')" = 124 ] && ok "sandbox timeout is a model outcome" || bad "sandbox timeout is a model outcome" "rc=$rc $(cat "$tmp/m6" 2>/dev/null)"
+go STUB_RC=1 STUB_DO='echo half > half.txt' -- --rung worker 'x'
+[ "$rc" = 0 ] && ok "failure with changes is a model outcome" || bad "failure with changes is a model outcome" "rc=$rc"
+
+# 7. an infra fault is not a model outcome: the sandbox failed and nothing changed
+go FLOOR_METRICS="$tmp/m7" STUB_RC=1 -- --rung worker 'x'
+cp "$tmp/m7" "$out/metrics" 2>/dev/null
+[ "$rc" = 4 ] && [ "$(metric '.sandbox_rc')" = 1 ] && ok "sandbox failure with no change exits 4" || bad "sandbox failure with no change exits 4" "rc=$rc"
+
+# 8. the way out is recorded, and is never an infra fault
+go FLOOR_METRICS="$tmp/m8" STUB_RC=1 STUB_SAY=$'I looked.\nCANNOT-DO: no compiler in the jail' -- --rung worker 'x'
+cp "$tmp/m8" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = CANNOT-DO ] && ok "way-out line recorded" || bad "way-out line recorded" "rc=$rc $(cat "$tmp/m8" 2>/dev/null)"
+go FLOOR_METRICS="$tmp/m8b" STUB_SAY=$'TOOL-FAULT: edit tool broke\nso I used bash instead, done' -- --rung worker 'x'
+cp "$tmp/m8b" "$out/metrics" 2>/dev/null
+[ "$(metric '.way_out')" = null ] && ok "way out counts only as the last line" || bad "way out counts only as the last line" "$(cat "$tmp/m8b" 2>/dev/null)"
+
+# 8c. --rung with no value is a usage error; an instruction that looks like an echo flag reaches the worker as written
+go -- 'x' --rung
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses --rung with no value" || bad "refuses --rung with no value" "rc=$rc $(tail -1 "$out/stderr")"
+go -- --rung worker '-n'
+[ "$(head -1 "$out/task-seen" 2>/dev/null)" = '-n' ] && ok "instruction written verbatim" || bad "instruction written verbatim" "got: $(head -1 "$out/task-seen" 2>/dev/null)"
+
+# 8d. floor-run only ever commits into a repo it made: a work dir that already has a .git (dir or file) is refused
+prep='git init -q' go -- --rung worker 'x'
+rd=$rc; ad=$([ -e "$out/args" ] && echo ran); nd=$(git -C "$wd" rev-list --all --count 2>/dev/null)
+prep='echo "gitdir: /nonexistent" > .git' go -- --rung worker 'x'
+[ "$rd" = 2 ] && [ -z "$ad" ] && [ "$nd" = 0 ] && [ "$rc" = 2 ] && [ ! -e "$out/args" ] \
+  && ok "refuses a work dir that is already a git repo" || bad "refuses a work dir that is already a git repo" "rc=$rd,$rc ran=$ad commits=$nd"
+
+# 8e. the setup commit does not depend on the machine's git config (signing, hooks)
+mkdir -p "$tmp/hooks"; printf '#!/bin/sh\nexit 1\n' > "$tmp/hooks/pre-commit"; chmod +x "$tmp/hooks/pre-commit"
+printf '[commit]\n\tgpgsign = true\n[core]\n\thooksPath = %s\n' "$tmp/hooks" > "$tmp/hostile.gitconfig"
+go GIT_CONFIG_GLOBAL="$tmp/hostile.gitconfig" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && [ "$(git -C "$wd" rev-list --count HEAD 2>/dev/null)" = 1 ] && [ -z "$(git -C "$wd" status --porcelain)" ] \
+  && ok "setup commit ignores signing and hook config" || bad "setup commit ignores signing and hook config" "rc=$rc $(tail -2 "$out/stderr")"
+
+# 8f. a setup that cannot commit everything is an infra fault before the worker starts
+#     (otherwise the old files look like the worker's changes and exit 4 can never fire)
+prep='echo s > locked; chmod 000 locked' go STUB_RC=1 -- --rung worker 'x'
+if [ "$(id -u)" = 0 ]; then echo "skip (root can read the file)"; else
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "failed setup commit exits 4 before the sandbox" || bad "failed setup commit exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+fi
+
+# 8g. work the worker committed itself still counts as a change
+go STUB_RC=1 STUB_DO='echo z > z.txt; git add z.txt; git -c user.name=w -c user.email=w@localhost commit -qm w' -- --rung worker 'x'
+[ "$rc" = 0 ] && ok "failure after the worker's own commit is a model outcome" || bad "failure after the worker's own commit is a model outcome" "rc=$rc"
+
+# 8h. a limit with leading zeros is refused (the shell would read it as octal and hand out a wrong limit)
+go BENCH_TASK_TIMEOUT_MS=0300000 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a task limit with leading zeros" || bad "refuses a task limit with leading zeros" "rc=$rc timeout=$(arg_after --timeout)"
+
+# 8i. git redirection inherited from the caller is ignored: the setup commit lands in the work dir's own repo
+git init -q "$tmp/other"
+go GIT_DIR="$tmp/other/.git" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ "$(git -C "$wd" rev-list --count HEAD 2>/dev/null)" = 1 ] && [ -d "$wd/.git" ] \
+  && ! git -C "$tmp/other" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "inherited GIT_DIR is ignored" || bad "inherited GIT_DIR is ignored" "rc=$rc other: $(git -C "$tmp/other" log --oneline 2>&1 | head -1)"
+
+# 8j. the metrics file must be an absolute path outside the work dir (inside, it would count as the worker's change)
+go FLOOR_METRICS=m.jsonl -- --rung worker 'x'; rj1=$rc; aj1=$(ls "$out/args" 2>/dev/null)
+wdj=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outj"
+( cd "$wdj" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outj" FLOOR_METRICS="$wdj/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rj2=$?
+[ "$rj1" = 2 ] && [ -z "$aj1" ] && [ "$rj2" = 2 ] && [ ! -e "$tmp/outj/args" ] \
+  && ok "refuses a metrics path that is relative or inside the work dir" || bad "refuses a metrics path that is relative or inside the work dir" "rc=$rj1,$rj2"
+
+# 8k. two instructions are a usage error, not a silent drop of the first
+go -- --rung worker 'fix a' 'and b'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a second instruction" || bad "refuses a second instruction" "rc=$rc"
+
+# 8l. a final TOOL-FAULT line is recorded and is a model outcome
+go FLOOR_METRICS="$tmp/m8l" STUB_RC=1 STUB_SAY=$'tried twice\nTOOL-FAULT: edit tool broke' -- --rung worker 'x'
+cp "$tmp/m8l" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = TOOL-FAULT ] && ok "final TOOL-FAULT line recorded, exit 0" || bad "final TOOL-FAULT line recorded, exit 0" "rc=$rc $(cat "$tmp/m8l" 2>/dev/null)"
+
+# 8m. a work dir whose .git is a dangling link, inside another repo: refused, nothing lands in the repo further up
+git init -q "$tmp/outer1"
+wdroot="$tmp/outer1" prep='ln -s /nonexistent/x .git' go -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ! git -C "$tmp/outer1" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "refuses a dangling .git link, repo further up untouched" || bad "refuses a dangling .git link, repo further up untouched" "rc=$rc outer: $(git -C "$tmp/outer1" log --oneline 2>&1 | head -1)"
+
+# 8n. git init fails (work dir not writable) inside another repo: infra fault, nothing lands in the repo further up
+git init -q "$tmp/outer2"
+wdroot="$tmp/outer2" prep='chmod 555 .' go STUB_RC=1 -- --rung worker 'x'
+chmod 755 "$wd"
+if [ "$(id -u)" = 0 ]; then echo "skip (root can write anyway)"; else
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ! git -C "$tmp/outer2" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+  && ok "failed git init exits 4, repo further up untouched" || bad "failed git init exits 4, repo further up untouched" "rc=$rc outer: $(git -C "$tmp/outer2" log --oneline 2>&1 | head -1)"
+fi
+
+# 8o. the infra-fault decision does not depend on the caller's git config (file or environment)
+printf '[status]\n\tshowUntrackedFiles = no\n' > "$tmp/quiet.gitconfig"
+go GIT_CONFIG_GLOBAL="$tmp/quiet.gitconfig" STUB_RC=1 STUB_DO='echo new > new.txt' -- --rung worker 'x'; ro1=$rc
+go GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=no STUB_RC=1 STUB_DO='echo new > new.txt' -- --rung worker 'x'
+[ "$ro1" = 0 ] && [ "$rc" = 0 ] && ok "a new file counts as a change whatever the caller's git config" || bad "a new file counts as a change whatever the caller's git config" "rc=$ro1,$rc"
+
+# 8p. a variable named like floor-run's own flag in the caller's environment changes nothing
+go have=1 -- --rung worker 'x'
+[ "$rc" = 0 ] && [ -e "$out/args" ] && ok "exported 'have' does not refuse the instruction" || bad "exported 'have' does not refuse the instruction" "rc=$rc $(tail -1 "$out/stderr")"
+
+# 8q. a metrics path that only looks outside the work dir (.. segments) is refused too
+wdq=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outq" "$wdq/sub"
+( cd "$wdq" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outq" \
+    FLOOR_METRICS="$tmp/outq/../$(basename "$wdq")/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rq=$?
+[ "$rq" = 2 ] && [ ! -e "$tmp/outq/args" ] && ok "refuses a metrics path that resolves into the work dir" || bad "refuses a metrics path that resolves into the work dir" "rc=$rq"
+
+# 8r. an empty git template from the caller does not put python litter into the setup commit
+mkdir "$tmp/empty-tpl"
+go GIT_TEMPLATE_DIR="$tmp/empty-tpl" -- --rung worker 'x'
+[ "$rc" = 0 ] && [ "$(git -C "$wd" ls-files | grep -c pycache)" = 0 ] && [ "$(git -C "$wd" ls-files)" = a.py ] \
+  && ok "litter stays out of the setup commit with an empty git template" || bad "litter stays out of the setup commit with an empty git template" "rc=$rc files: $(git -C "$wd" ls-files 2>&1 | tr '\n' ' ')"
+
+# 8s. a repo nested in the work dir before the run: refused, host-side git never walks into a repo it did not make
+prep='git init -q sub' go -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a work dir that holds a nested repo" || bad "refuses a work dir that holds a nested repo" "rc=$rc"
+
+# 8t. a repo the worker makes counts as its change, and git status is not run over it (one status call: the setup one)
+mkdir "$tmp/shim"
+printf '#!/usr/bin/env bash\necho "$*" >> "$GITLOG"\nexec %q "$@"\n' "$(command -v git)" > "$tmp/shim/git"; chmod +x "$tmp/shim/git"
+go PATH="$tmp/shim:$PATH" GITLOG="$tmp/gitlog" STUB_RC=1 STUB_DO='git init -q sub' -- --rung worker 'x'
+nstat=$(grep -c 'status --porcelain' "$tmp/gitlog" 2>/dev/null)
+[ "$rc" = 0 ] && [ "$nstat" = 1 ] && ok "a repo made by the worker is a change, no git status over it" || bad "a repo made by the worker is a change, no git status over it" "rc=$rc status calls=$nstat"
+
+# 8u. temp files must not land in the work dir (they would count as the worker's change, and the worker could read them)
+prep='mkdir t' go TMPDIR=t STUB_RC=1 -- --rung worker 'x'
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a TMPDIR inside the work dir" || bad "refuses a TMPDIR inside the work dir" "rc=$rc"
+
+# 8v. a directory the worker made unreadable is a change, not an infra fault
+go STUB_RC=1 STUB_DO='mkdir x && echo y > x/y && chmod 000 x' -- --rung worker 'x'
+chmod 755 "$wd/x" 2>/dev/null
+[ "$rc" = 0 ] && ok "an unreadable new directory counts as a change" || bad "an unreadable new directory counts as a change" "rc=$rc"
+
+# 8w. the way out must start the last line: a marker wrapped in markdown is not one
+go FLOOR_METRICS="$tmp/m8w" STUB_RC=1 STUB_SAY='**CANNOT-DO:** no' -- --rung worker 'x'
+cp "$tmp/m8w" "$out/metrics" 2>/dev/null
+[ "$rc" = 4 ] && [ "$(metric '.way_out')" = null ] && ok "a wrapped way-out marker is not a way out" || bad "a wrapped way-out marker is not a way out" "rc=$rc $(cat "$tmp/m8w" 2>/dev/null)"
+
+# 8x. the metrics line lands where the path pointed at the start, even if the worker repoints a link on the way
+wdx=$(mktemp -d "$tmp/wd-XXXXXX"); mkdir "$tmp/outx" "$tmp/real1" "$tmp/real2"; ln -s "$tmp/real1" "$wdx/link"
+( cd "$wdx" && env -u WORKER_PRIVATE_PORT -u BENCH_TASK_TIMEOUT_MS WORKER_SANDBOX="$tmp/stub" STUB_OUT="$tmp/outx" \
+    STUB_DO="ln -sfn '$tmp/real2' link" FLOOR_METRICS="$wdx/link/m.jsonl" "$here/floor-run" --rung worker 'x' ) >/dev/null 2>&1; rx=$?
+[ "$rx" = 0 ] && [ -s "$tmp/real1/m.jsonl" ] && [ ! -e "$tmp/real2/m.jsonl" ] \
+  && ok "metrics path is resolved once, a repointed link changes nothing" || bad "metrics path is resolved once, a repointed link changes nothing" "rc=$rx real1=$(ls "$tmp/real1") real2=$(ls "$tmp/real2")"
+
+# 8y. no temp file, no run: an infra fault before the sandbox starts
+go TMPDIR=/nonexistent/floor-run-test STUB_RC=1 -- --rung worker 'x'
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "a failed mktemp exits 4 before the sandbox" || bad "a failed mktemp exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+
+# 8z. a directory git cannot read before the run is a setup fault (after the run its warning would always count as a change)
+prep='mkdir d; echo s > d/f; chmod 000 d' go STUB_RC=1 -- --rung worker 'x'
+chmod 755 "$wd/d" 2>/dev/null
+if [ "$(id -u)" = 0 ]; then echo "skip (root can read the directory)"; else
+[ "$rc" = 4 ] && [ ! -e "$out/args" ] && ok "an unreadable directory before the run exits 4 before the sandbox" || bad "an unreadable directory before the run exits 4 before the sandbox" "rc=$rc ran=$(ls "$out/args" 2>/dev/null)"
+fi
+
+# 9a. a NUL byte in the worker's output does not hide its way out
+go FLOOR_METRICS="$tmp/m9a" STUB_RC=1 STUB_DO='printf "a\0b\n"' STUB_SAY='CANNOT-DO: no' -- --rung worker 'x'
+cp "$tmp/m9a" "$out/metrics" 2>/dev/null
+[ "$rc" = 0 ] && [ "$(metric '.way_out')" = CANNOT-DO ] && ok "way out found in output with a NUL byte" || bad "way out found in output with a NUL byte" "rc=$rc $(cat "$tmp/m9a" 2>/dev/null)"
+
+exit $fail
