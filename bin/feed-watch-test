@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# feed-watch-test — hermetic contract for bin/feed-watch (epic repos-dg7w item 14, repos-27xl).
+#
+# bin/feed-watch runs ONE tick: no model, no loop. It wakes the Assistant only when something is new:
+# an item that landed (a closed bead) or a system failure (cron, service, seat stall). Exit 0 always,
+# unless the state folder cannot be written (exit 1).
+#
+# Seams (env, all optional; defaults are the live commands):
+#   FEED_STATE        state folder                          (default ~/vault/director/state/feed-watch)
+#   FEED_LANDED_CMD   prints one line per landed item, the first word is its id
+#   FEED_FAIL_CMD     prints one line per current failure
+#   FEED_WAKE_CMD     "<cmd> <message>" delivers one message to the Assistant; "" = never wake
+#
+# Rules:
+#   - A landed line is new when its first word was not seen on an earlier tick. Seen ids are kept for good.
+#   - A failure line is new when it was not in the previous tick's failure set. The set is replaced every tick,
+#     so a failure that clears and comes back wakes again; one that persists wakes once.
+#   - Nothing new: no wake, prints "feed-watch: quiet".
+#   - Something new: exactly ONE wake call per tick, message
+#       "feed: <L> landed, <F> new failures" followed by the new failure lines, then the new landed lines,
+#     each on its own line, at most 10 lines of each, and prints "feed-watch: woke landed=<L> failures=<F>".
+#   - A seam command that exits non-zero is itself a failure line: "feed-watch: <landed|failures> check failed rc=<n>".
+#     Its output is ignored for that tick (an infra fault never reads as an empty feed), and the seen sets for
+#     that seam are left untouched.
+#   - A failed wake (non-zero) leaves the state untouched, so the next tick tries again; prints "feed-watch: wake failed".
+#   - Lines are data: a line with quotes, a dollar sign, a backtick or a semicolon is passed on verbatim, never run.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+fw="$here/feed-watch"
+d=$(mktemp -d /tmp/feed-watch-test.XXXXXX); trap 'command rm -r "$d"' EXIT
+fails=0; n=0
+ok() { n=$((n+1)); if [ "$2" = "$3" ]; then echo "ok $n $1"; else echo "FAIL $n $1: got '$2' want '$3'"; fails=1; fi; }
+has() { n=$((n+1)); case "$2" in *"$3"*) echo "ok $n $1" ;; *) echo "FAIL $n $1: '$2' lacks '$3'"; fails=1 ;; esac; }
+
+# stubs: landed/fail print a file; wake appends "---" and its one argument to wakes
+printf '#!/bin/bash\ncat %s/landed 2>/dev/null; exit $(cat %s/landed.rc 2>/dev/null || echo 0)\n' "$d" "$d" >"$d/landed.sh"
+printf '#!/bin/bash\ncat %s/failing 2>/dev/null; exit $(cat %s/failing.rc 2>/dev/null || echo 0)\n' "$d" "$d" >"$d/fail.sh"
+printf '#!/bin/bash\n[ $# = 1 ] || echo BADARGS >>%s/wakes\nprintf -- "---\\n%%s\\n" "$1" >>%s/wakes\nexit $(cat %s/wake.rc 2>/dev/null || echo 0)\n' "$d" "$d" "$d" >"$d/wake.sh"
+chmod +x "$d"/*.sh
+run() { FEED_STATE="$d/state" FEED_LANDED_CMD="$d/landed.sh" FEED_FAIL_CMD="$d/fail.sh" FEED_WAKE_CMD="$d/wake.sh" "$fw" 2>&1; }
+wakes() { grep -c '^---$' "$d/wakes" 2>/dev/null || true; }
+
+[ -x "$fw" ] || { echo "FAIL bin/feed-watch missing or not executable"; exit 1; }
+
+# 1-3: first tick with two landed items wakes once
+printf 'a-1 first thing\na-2 second thing\n' >"$d/landed"; : >"$d/failing"
+out=$(run); ok "tick exits 0" "$?" 0
+has "reports the wake" "$out" "feed-watch: woke landed=2 failures=0"
+ok "one wake" "$(wakes)" 1
+has "message header" "$(cat "$d/wakes")" "feed: 2 landed, 0 new failures"
+has "message lists the item" "$(cat "$d/wakes")" "a-2 second thing"
+
+# same input again: quiet
+out=$(run); has "second tick quiet" "$out" "feed-watch: quiet"
+ok "no second wake" "$(wakes)" 1
+
+# a retitled item with a seen id is not new
+printf 'a-1 retitled\na-2 second thing\n' >"$d/landed"; run >/dev/null
+ok "retitle is not new" "$(wakes)" 1
+
+# a failure appears: wake; persists: quiet; clears and returns: wake again
+echo 'cron: lane-drain exit 3' >"$d/failing"; out=$(run)
+has "failure wakes" "$out" "feed-watch: woke landed=0 failures=1"
+has "failure line in message" "$(cat "$d/wakes")" "cron: lane-drain exit 3"
+run >/dev/null; ok "persisting failure wakes once" "$(wakes)" 2
+: >"$d/failing"; run >/dev/null; ok "cleared failure is quiet" "$(wakes)" 2
+echo 'cron: lane-drain exit 3' >"$d/failing"; run >/dev/null; ok "returning failure wakes again" "$(wakes)" 3
+: >"$d/failing"; run >/dev/null
+
+# a failing seam is a failure line, and its output is ignored
+echo 7 >"$d/landed.rc"; printf 'a-9 half written\n' >"$d/landed"; out=$(run)
+has "failed landed check wakes" "$out" "failures=1"
+has "failed check is named" "$(cat "$d/wakes")" "feed-watch: landed check failed rc=7"
+command rm "$d/landed.rc"; out=$(run)
+has "a-9 is new once the check works" "$out" "feed-watch: woke landed=1 failures=0"
+echo 2 >"$d/failing.rc"; out=$(run); has "failed failures check wakes" "$(cat "$d/wakes")" "feed-watch: failures check failed rc=2"
+command rm "$d/failing.rc"; run >/dev/null
+
+# a failed wake keeps the state, so the next tick retries
+before=$(wakes); printf 'a-1 x\na-2 x\na-9 x\nb-1 retry me\n' >"$d/landed"; echo 1 >"$d/wake.rc"
+out=$(run); has "wake failure reported" "$out" "feed-watch: wake failed"
+command rm "$d/wake.rc"; out=$(run); has "retried on the next tick" "$out" "feed-watch: woke landed=1 failures=0"
+ok "two attempts for b-1" "$(( $(wakes) - before ))" 2
+
+# lines are data, never run
+printf 'c-1 $(touch %s/pwned) `touch %s/pwned`; touch %s/pwned "q" '"'"'s'"'"'\n' "$d" "$d" "$d" >>"$d/landed"
+echo "svc: it's \$HOME; touch $d/pwned" >"$d/failing"; run >/dev/null
+ok "nothing executed" "$([ -e "$d/pwned" ] && echo ran || echo clean)" clean
+has "verbatim line" "$(cat "$d/wakes")" "svc: it's \$HOME; touch $d/pwned"
+ok "wake always got one argument" "$(grep -c BADARGS "$d/wakes")" 0
+: >"$d/failing"; run >/dev/null
+
+# at most 10 lines of each kind in one message, counts stay true
+for i in $(seq 1 25); do echo "z-$i item $i"; done >>"$d/landed"; : >"$d/wakes"; out=$(run)
+has "count is the true count" "$out" "feed-watch: woke landed=25 failures=0"
+ok "message capped at 10 landed lines" "$(grep -c '^z-' "$d/wakes")" 10
+
+# empty wake command: never wakes, still records what it saw
+echo 'e-1 silent' >>"$d/landed"; : >"$d/wakes"
+out=$(FEED_STATE="$d/state" FEED_LANDED_CMD="$d/landed.sh" FEED_FAIL_CMD="$d/fail.sh" FEED_WAKE_CMD="" "$fw" 2>&1)
+ok "empty wake command: no wake" "$(wakes)" 0
+out=$(run); has "seen while silent stays seen" "$out" "feed-watch: quiet"
+
+# unwritable state folder: exit 1
+FEED_STATE=/proc/nope FEED_LANDED_CMD="$d/landed.sh" FEED_FAIL_CMD="$d/fail.sh" FEED_WAKE_CMD="$d/wake.sh" "$fw" >/dev/null 2>&1
+ok "unwritable state exits 1" "$?" 1
+
+[ $fails = 0 ] && echo "feed-watch-test: PASS ($n checks)" || echo "feed-watch-test: FAIL"
+exit $fails
