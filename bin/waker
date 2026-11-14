@@ -29,7 +29,7 @@ DRY_RUN=0
 # Default seam commands (only used if env vars unset)
 if [ -z "${WAKER_METER_CMD:-}" ]; then
     default_meter() {
-        jq -L "$HOME/vault/director/scripts" -r 'include "budget"; "\(.util // "?") \(.pace // "?")"' "$BUDGET/meter.json"
+        jq -L "$HOME/vault/director/scripts" -r 'include "budget"; "\(cur_util // "?") \(cur_pace // "?")"' "$BUDGET/meter.json"
     }
     WAKER_METER_CMD="default_meter"
 fi
@@ -75,13 +75,8 @@ meter_out=$($WAKER_METER_CMD 2>/dev/null) || meter_out=""
 util=$(echo "$meter_out" | awk '{print $1}')
 pace=$(echo "$meter_out" | awk '{print $2}')
 meter_ok=1
-case "$util" in
-    ''|*[!0-9.]*|.*.*) meter_ok=0 ;;
-esac
-case "$pace" in
-    ''|*[!0-9.]*|.*.*) meter_ok=0 ;;
-esac
-if [ -z "$util" ] || [ -z "$pace" ]; then meter_ok=0; fi
+num='^[0-9]+(\.[0-9]+)?$'
+[[ $util =~ $num && $pace =~ $num ]] || meter_ok=0
 
 # Override: ignore-until in the future
 override=0
@@ -161,7 +156,7 @@ declare -a running=()
 while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
-    if $WAKER_ALIVE_CMD "$name" 2>/dev/null; then
+    if $WAKER_ALIVE_CMD "$name" 2>/dev/null 9>&-; then
         echo "seat=$name running"
         used=$((used + 1))
         running+=("$name")
@@ -186,7 +181,7 @@ while IFS= read -r s; do
     fi
 
     # Get ready bead
-    bead=$($WAKER_READY_CMD "$repo" "$label" 2>/dev/null) || bead=""
+    bead=$($WAKER_READY_CMD "$repo" "$label" 2>/dev/null 9>&-) || bead=""
     if [ -z "$bead" ]; then
         echo "seat=$name idle"
         continue
@@ -232,13 +227,11 @@ while IFS= read -r s; do
     IFS=',' read -r -a env_names <<<"$env_json"
     for ename in "${env_names[@]}"; do
         [ -z "$ename" ] && continue
-        eval "val=\${$ename:-__UNSET__}"
-        if [ "$val" != "__UNSET__" ]; then
-            vars+=("$ename=$val")
-        fi
+        [ -n "${!ename+x}" ] && vars+=("$ename=${!ename}")
     done
     rc=0
-    ( cd "$repo" && env -i "${vars[@]}" bash -c "$start" </dev/null ) || rc=$?
+    # timeout: a start command that hangs would hold the tick lock, and no later tick would run
+    ( cd "$repo" && timeout 120 env -i "${vars[@]}" bash -c "$start" </dev/null 9>&- ) || rc=$?
     if [ $rc -eq 0 ]; then
         echo "seat=$name started bead=$bead"
         used=$((used + 1))
@@ -249,7 +242,7 @@ done <<<"$sorted_seats"
 
 # Drain (unless dry-run)
 if [ "$DRY_RUN" -eq 0 ] && [ -n "$WAKER_DRAIN_CMD" ]; then
-    $WAKER_DRAIN_CMD >/dev/null 2>&1 || true
+    $WAKER_DRAIN_CMD >/dev/null 2>&1 9>&- || true
 fi
 
 exit 0

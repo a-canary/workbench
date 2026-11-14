@@ -187,5 +187,13 @@ has "17 start failure named" "$W/out" "seat=trading start-failed bead=t-1 rc=3"
 check "17 ndv still started" "$(started)" "ndv n-1,"
 check "17 exit 0" "$(cat "$W/rc")" 0
 
+# 18. a session the start command leaves running (a tmux server) must not keep the tick lock
+world; ready trading t-1
+sed -i 's|"start":"[^"]*"|"start":"sleep 20 >/dev/null 2>\&1 \& echo up"|' "$W/seats/trading.json"; tick
+has "18 started" "$W/out" "seat=trading started bead=t-1"
+tick
+check "18 next tick is not locked out" "$(grep -c '^waker: locked' "$W/out")" 0
+pkill -f "sleep 20" 2>/dev/null
+
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
