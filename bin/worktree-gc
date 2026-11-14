@@ -10,6 +10,8 @@
 #   would-remove - same as removed but --dry-run; nothing deleted
 #   held         - merged but holds gitignored files other than build caches; kept
 #   open         - pushed but not merged; kept
+#   parked       - open, idle --park-days or more, and lossless; worktree removed, branch kept
+#   would-park   - same as parked but --dry-run; nothing removed
 #
 # Non-git children are skipped silently. Never uses --force on worktree remove.
 set -u
@@ -17,10 +19,11 @@ set -u
 ROOT="${HOME}/worktrees"
 DRY_RUN=0
 MIN_IDLE=60
+PARK_DAYS=-1
 IGNORED_CACHES="node_modules .venv venv __pycache__ dist build .pytest_cache target .next coverage .turbo"
 
 usage() {
-    echo "Usage: worktree-gc [--root DIR] [--dry-run] [--min-idle MIN]"
+    echo "Usage: worktree-gc [--root DIR] [--dry-run] [--min-idle MIN] [--park-days N]"
     exit 1
 }
 
@@ -32,6 +35,9 @@ while [ $# -gt 0 ]; do
             DRY_RUN=1; shift ;;
         --min-idle)
             MIN_IDLE="$2"; shift 2 ;;
+        --park-days)
+            if ! [[ "$2" =~ ^[0-9]+$ ]]; then usage; fi
+            PARK_DAYS="$2"; shift 2 ;;
         *)
             usage ;;
     esac
@@ -42,6 +48,28 @@ ROOT=$(cd "$ROOT" 2>/dev/null && pwd) || { echo "error: root '$ROOT' not found" 
 
 # Determine the origin default branch for a worktree.
 # Falls back to origin/main, then origin/master.
+# 0 = the worktree holds gitignored files other than build caches (or git cannot list them: fail closed)
+holds_data() {
+    local wt=$1 items line isdir name cache
+    items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null) || return 0
+    # --directory also lists a wholly-ignored parent (pkg/ for pkg/node_modules/); drop dirs that prefix
+    # another entry, their children are judged on their own.
+    # ponytail: O(n²) over ignored entries, fine for tens; sort-and-compare-neighbours if it ever gets slow
+    items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$items")
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" == *.pyc ]] && continue
+        # cache names count only for directories: a plain file called build or dist is data
+        isdir=0; [[ "$line" == */ ]] && isdir=1
+        line="${line%/}"; name="${line##*/}"
+        for cache in $IGNORED_CACHES; do
+            [ "$isdir" -eq 1 ] && [ "$name" = "$cache" ] && continue 2
+        done
+        return 0
+    done <<< "$items"
+    return 1
+}
+
 get_base() {
     local wt="$1"
     local base
@@ -72,17 +100,23 @@ is_merged() {
 
 # Check if any file (excluding .git) was modified within MIN_IDLE minutes.
 is_active() {
-    local wt="$1"
-    [ "$MIN_IDLE" -le 0 ] && return 1
+    local wt="$1" minutes="$2"
+    [ "$minutes" -le 0 ] && return 1
     if find "$wt" \
         -not -path "$wt/.git" \
         -not -path "*/.git/*" \
         -type f \
-        -mmin -"$MIN_IDLE" \
+        -mmin -"$minutes" \
         -print -quit 2>/dev/null | grep -q .; then
         return 0
     fi
     return 1
+}
+
+# Check if HEAD is exactly at the commit of some remote ref.
+head_at_remote_ref() {
+    local wt="$1"
+    git -C "$wt" for-each-ref --points-at HEAD refs/remotes 2>/dev/null | grep -q .
 }
 
 for wt in "$ROOT"/*/; do
@@ -101,7 +135,7 @@ for wt in "$ROOT"/*/; do
     fi
 
     # 2. Active check (recent file activity)
-    if is_active "$wt"; then
+    if is_active "$wt" "$MIN_IDLE"; then
         echo "active $wt"
         continue
     fi
@@ -115,43 +149,46 @@ for wt in "$ROOT"/*/; do
     # 4. Merged check
     base=$(get_base "$wt") || { echo "open $wt"; continue; }
     if ! is_merged "$wt" "$base"; then
-        echo "open $wt"
+        # Not merged. Check if we can park it (idle, pushed, clean, no held files).
+        if [ "$PARK_DAYS" -ge 0 ]; then
+            if is_active "$wt" $((PARK_DAYS * 1440)); then
+                echo "open $wt"
+                continue
+            fi
+            if ! head_at_remote_ref "$wt"; then
+                echo "open $wt"
+                continue
+            fi
+            if holds_data "$wt"; then
+                echo "open $wt"
+                continue
+            fi
+            # Safe to park
+            if [ "$DRY_RUN" -eq 1 ]; then
+                echo "would-park $wt"
+            else
+                common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null)
+                if [ -z "$common" ] || [[ "$common" != /* ]]; then
+                    if [ -n "$common" ]; then common="$wt/$common"; fi
+                    common=$(cd "$common" 2>/dev/null && pwd) || { echo "open $wt"; continue; }
+                fi
+                main_repo=$(dirname "$common")
+                if git -C "$main_repo" worktree remove "$wt" 2>/dev/null; then
+                    echo "parked $wt"
+                else
+                    echo "open $wt"
+                fi
+            fi
+        else
+            echo "open $wt"
+        fi
         continue
     fi
 
     # 5. Held check: merged but holds gitignored files other than build caches
-    # fail closed: if git can't list ignored files, keep the worktree
-    held_items=$(git -C "$wt" ls-files --others --ignored --exclude-standard --directory 2>/dev/null) || { echo "held $wt"; continue; }
-    # --directory also lists a wholly-ignored parent (pkg/ for pkg/node_modules/); drop dirs that prefix
-    # another entry, their children are judged on their own.
-    # ponytail: O(n²) over ignored entries, fine for tens; sort-and-compare-neighbours if it ever gets slow
-    held_items=$(awk '{a[NR]=$0} END {for (i=1;i<=NR;i++) {p=0; if (substr(a[i],length(a[i]))=="/") for (j=1;j<=NR;j++) if (j!=i && index(a[j],a[i])==1) p=1; if (!p) print a[i]}}' <<<"$held_items")
-    if [ -n "$held_items" ]; then
-        remaining=0
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            # cache names count only for directories: a plain file called build or dist is data
-            isdir=0; [[ "$line" == */ ]] && isdir=1
-            line="${line%/}"; base="${line##*/}"
-            is_cache=0
-            for cache in $IGNORED_CACHES; do
-                if [ "$isdir" -eq 1 ] && [ "$base" = "$cache" ]; then
-                    is_cache=1
-                    break
-                fi
-            done
-            if [[ "$line" == *.pyc ]]; then
-                is_cache=1
-            fi
-            if [ "$is_cache" -eq 0 ]; then
-                remaining=1
-                break
-            fi
-        done <<< "$held_items"
-        if [ "$remaining" -eq 1 ]; then
-            echo "held $wt"
-            continue
-        fi
+    if holds_data "$wt"; then
+        echo "held $wt"
+        continue
     fi
 
     # 6. Safe to remove
