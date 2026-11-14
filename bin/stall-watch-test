@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# stall-watch-test — hermetic contract for bin/stall-watch (epic repos-dg7w item 10, card repos-exr0:
+# "after 30 minutes, webui alert on left nav bar. after 1 hour, ping on discord").
+#
+# bin/stall-watch runs ONE pass, no model. For every valid Lead seat file (same files and same validation
+# seams as bin/waker) with a live session it prints one line and exits 0:
+#   seat=<name> ok                         the session made progress, or has no work
+#   seat=<name> stalled min=<n> bead=<id>  it holds work and has shown no activity for 30 minutes or more
+#   seat=<name> looping calls=<n> bead=<id>  its last <n> tool calls (5 or more) are identical
+# Seats with no live session print nothing. Work = WAKER_READY_CMD prints a bead id.
+# A stalled or looping seat gets an alert file <alerts>/<seat>.json
+#   {"seat":"…","kind":"stalled"|"looping","since":<epoch of first sighting>,"minutes":<n>,"bead":"…"}
+# which the control pane shows on the left nav; `since` is kept across passes. The file is removed when
+# the seat is ok again or its session is gone.
+# When a seat has been stalled or looping for 60 minutes or more (activity age for stalled; now - since for
+# looping), STALL_NOTIFY_CMD is run as: <cmd> stall-<seat> "<message naming the seat, the minutes and the bead>".
+#
+# Seams (env): WAKER_SEATS, WAKER_READY_CMD, WAKER_ALIVE_CMD as in bin/waker, and
+#   STALL_ALERTS        alert folder                         (default ~/vault/director/state/stalls)
+#   STALL_ACTIVITY_CMD  "<cmd> <seat>" prints the epoch second of the session's last activity
+#                       (default: tmux display -p -t <seat> '#{window_activity}')
+#   STALL_CALLS_CMD     "<cmd> <seat> <repo>" prints the session's recent tool calls, oldest first, one per line
+#   STALL_NOTIFY_CMD    the pager (default ~/vault/director/scripts/notify-human.sh); "" = none
+#   STALL_NOW           epoch seconds to use as now (tests)
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+sw=$here/stall-watch
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stall-watch-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+has() { if grep -qxF -- "$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no line '$3' in:"; sed 's/^/      /' "$2"; fails=1; fi; }
+
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/ready" <<'EOF'
+#!/bin/bash
+cat "$W/ready/$(basename "$1")" 2>/dev/null
+EOF
+cat >"$tmp/bin/alive" <<'EOF'
+#!/bin/bash
+[ -e "$W/act/$1" ]
+EOF
+cat >"$tmp/bin/activity" <<'EOF'
+#!/bin/bash
+cat "$W/act/$1"
+EOF
+cat >"$tmp/bin/calls" <<'EOF'
+#!/bin/bash
+cat "$W/calls/$1" 2>/dev/null
+EOF
+cat >"$tmp/bin/notify" <<'EOF'
+#!/bin/bash
+echo "$1 | $2" >>"$W/notify.log"
+EOF
+chmod +x "$tmp"/bin/*
+
+NOW=1800000000
+world() {
+  W=$tmp/w; command rm -rf "$W"; mkdir -p "$W"/{seats,alerts,ready,act,calls,repos/trading,repos/ndv}
+  for s in trading ndv; do
+    echo '{"seat":"'$s'","kind":"lead","repo":"'"$W"'/repos/'$s'","label":"lead","priority":1,"pace_max":1,"env":[],"start":"true"}' >"$W/seats/$s.json"
+  done
+}
+# live <seat> <minutes since last activity>
+live() { echo $(( NOW - $2 * 60 )) >"$W/act/$1"; }
+pass() {
+  env W="$W" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+    STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_CALLS_CMD="$tmp/bin/calls" \
+    STALL_NOTIFY_CMD="$tmp/bin/notify" STALL_NOW="${1:-$NOW}" "$sw" >"$W/out" 2>"$W/err"; echo $? >"$W/rc"
+}
+alerts() { ls "$W/alerts" 2>/dev/null | tr '\n' ','; }
+notes() { if [ -e "$W/notify.log" ]; then wc -l <"$W/notify.log"; else echo 0; fi; }
+
+# 1. no live session: nothing printed, no alert
+world; echo t-1 >"$W/ready/trading"; pass
+check "1 exit 0" "$(cat "$W/rc")" 0
+check "1 prints nothing" "$(cat "$W/out")" ""
+check "1 no alert" "$(alerts)" ""
+
+# 2. live, working, active 5 minutes ago: ok
+world; echo t-1 >"$W/ready/trading"; live trading 5; pass
+has "2 ok" "$W/out" "seat=trading ok"
+check "2 no alert" "$(alerts)" ""
+
+# 3. live, quiet for 45 minutes, but no work: ok (an idle Lead is not a stall)
+world; live trading 45; pass
+has "3 idle is ok" "$W/out" "seat=trading ok"
+
+# 4. live, has work, quiet 29 minutes: ok; 30 minutes: stalled, alert written, no page yet
+world; echo t-1 >"$W/ready/trading"; live trading 29; pass
+has "4 29 min ok" "$W/out" "seat=trading ok"
+live trading 30; pass
+has "4 30 min stalled" "$W/out" "seat=trading stalled min=30 bead=t-1"
+check "4 alert file" "$(alerts)" "trading.json,"
+check "4 alert content" "$(jq -c '[.seat,.kind,.minutes,.bead,.since]' "$W/alerts/trading.json")" "[\"trading\",\"stalled\",30,\"t-1\",$NOW]"
+check "4 no page before 60" "$(notes)" 0
+
+# 5. quiet 60 minutes: paged once per pass, message names seat, minutes and bead; since is kept
+echo $(( NOW + 1800 - 3600 )) >"$W/act/trading"; pass $(( NOW + 1800 ))
+has "5 60 min stalled" "$W/out" "seat=trading stalled min=60 bead=t-1"
+check "5 since kept from first sighting" "$(jq .since "$W/alerts/trading.json")" "$NOW"
+check "5 paged with key" "$(grep -c '^stall-trading | ' "$W/notify.log")" "$(notes)"
+check "5 message names seat, minutes, bead" "$(tail -n1 "$W/notify.log" | grep -c 'trading.*60.*t-1')" 1
+
+# 6. activity resumes: ok, alert removed
+echo $(( NOW + 1800 )) >"$W/act/trading"; pass $(( NOW + 1800 ))
+has "6 ok again" "$W/out" "seat=trading ok"
+check "6 alert removed" "$(alerts)" ""
+
+# 7. session gone: its stale alert is removed
+world; echo t-1 >"$W/ready/trading"; live trading 40; pass
+check "7 alert present" "$(alerts)" "trading.json,"
+command rm "$W/act/trading"; pass
+check "7 alert removed with the session" "$(alerts)" ""
+
+# 8. looping: active one minute ago, but the last 5 calls are identical
+world; echo n-1 >"$W/ready/ndv"; live ndv 1
+printf 'A\nB\nC\nC\nC\nC\nC\n' >"$W/calls/ndv"; pass
+has "8 looping" "$W/out" "seat=ndv looping calls=5 bead=n-1"
+check "8 alert kind" "$(jq -r .kind "$W/alerts/ndv.json")" looping
+check "8 no page yet" "$(notes)" 0
+# four identical calls are not a loop
+printf 'A\nB\nC\nC\nC\nC\n' >"$W/calls/ndv"; pass
+has "8 four repeats ok" "$W/out" "seat=ndv ok"
+# a loop that lasts an hour pages
+printf 'C\nC\nC\nC\nC\nC\nC\n' >"$W/calls/ndv"; pass
+check "8 loop since" "$(jq .since "$W/alerts/ndv.json")" "$NOW"
+echo $(( NOW + 3600 )) >"$W/act/ndv"; pass $(( NOW + 3600 ))
+has "8 looping counts every repeat" "$W/out" "seat=ndv looping calls=7 bead=n-1"
+check "8 hour-long loop pages" "$(grep -c '^stall-ndv | ' "$W/notify.log")" 1
+
+# 9. a bad seat file and a worker seat are skipped quietly; other seats are still watched
+world; echo '{broken' >"$W/seats/broken.json"
+echo '{"seat":"qwen","kind":"worker","repo":"'"$W"'/repos/ndv","label":"x","priority":9,"pace_max":0,"env":[],"start":"true"}' >"$W/seats/qwen.json"
+echo t-1 >"$W/ready/trading"; live trading 31; live qwen 99; live broken 99; pass
+check "9 exit 0" "$(cat "$W/rc")" 0
+check "9 only the Lead is reported" "$(cat "$W/out")" "seat=trading stalled min=31 bead=t-1"
+
+# 10. an unreadable activity time is reported, never treated as progress
+world; echo t-1 >"$W/ready/trading"; echo "not-a-number" >"$W/act/trading"; pass
+has "10 unknown activity" "$W/out" "seat=trading unknown no activity time"
+check "10 exit 0" "$(cat "$W/rc")" 0
+
+# 11. STALL_NOTIFY_CMD="" never pages, not even through the default pager under HOME
+world; echo t-1 >"$W/ready/trading"; live trading 90
+mkdir -p "$W/home/vault/director/scripts"; cp "$tmp/bin/notify" "$W/home/vault/director/scripts/notify-human.sh"
+env W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_CALLS_CMD="$tmp/bin/calls" \
+  STALL_NOTIFY_CMD="" STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+has "11 still reported" "$W/out" "seat=trading stalled min=90 bead=t-1"
+check "11 empty pager never pages" "$(notes)" 0
+# unset: the default pager under HOME is used
+env -u STALL_NOTIFY_CMD W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_CALLS_CMD="$tmp/bin/calls" \
+  STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+check "11 unset pager uses the default" "$(notes)" 1
+
+# 12. default call reader: five identical tool calls at the end of the newest transcript are a loop
+world; echo n-1 >"$W/ready/ndv"; live ndv 1
+pd="$W/home/.claude/projects/$(printf '%s' "$W/repos/ndv" | tr '/.' '--')"; mkdir -p "$pd"
+# the command carries a quote, a backslash and a newline: the common case for a Bash call
+for i in 1 2 3 4 5; do echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t'$i'","name":"Bash","input":{"command":"grep \"a\\b\" x\nbd show x"}}]}}'; done >"$pd/s.jsonl"
+env -u STALL_CALLS_CMD W="$W" HOME="$W/home" WAKER_SEATS="$W/seats" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+  STALL_ALERTS="$W/alerts" STALL_ACTIVITY_CMD="$tmp/bin/activity" STALL_NOTIFY_CMD="" STALL_NOW="$NOW" "$sw" >"$W/out" 2>"$W/err"
+has "12 loop read from the transcript" "$W/out" "seat=ndv looping calls=5 bead=n-1"
+
+[ $fails = 0 ] && echo "stall-watch-test: PASS" || echo "stall-watch-test: FAIL"
+exit $fails

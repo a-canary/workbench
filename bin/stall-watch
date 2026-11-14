@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# stall-watch — one pass over Lead seats; detect stalls and call loops,
+# write alert files, page humans after thresholds.
+#
+# For every valid Lead seat file (same validation as bin/waker) with a live
+# session, prints exactly one line:
+#   seat=<name> ok                         the session made progress, or has no work
+#   seat=<name> stalled min=<n> bead=<id>  it holds work and has shown no activity for 30+ minutes
+#   seat=<name> looping calls=<n> bead=<id>  its last <n> tool calls (5 or more) are identical
+# Seats with no live session print nothing.
+#
+# A stalled or looping seat gets an alert file <alerts>/<seat>.json with the
+# seat name, kind, since (epoch of first sighting, kept across passes),
+# minutes, and bead. The file is removed when the seat is ok again or its
+# session is gone.
+#
+# When a seat has been stalled for 60+ minutes or looping for 60+ minutes
+# (now - since), STALL_NOTIFY_CMD is run as:
+#   <cmd> stall-<seat> "<message naming the seat, the minutes and the bead>"
+#
+# Seams (env, with defaults): WAKER_SEATS, WAKER_READY_CMD, WAKER_ALIVE_CMD
+# as in bin/waker, plus:
+#   STALL_ALERTS        alert folder
+#   STALL_ACTIVITY_CMD  "<cmd> <seat>" prints the epoch second of the session's last activity
+#   STALL_CALLS_CMD     "<cmd> <seat> <repo>" prints recent tool calls, oldest first, one per line
+#   STALL_NOTIFY_CMD    the pager; "" = never page
+#   STALL_NOW           epoch seconds to use as now
+set -u
+
+WAKER_SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
+STALL_ALERTS="${STALL_ALERTS:-$HOME/vault/director/state/stalls}"
+STALL_NOW="${STALL_NOW:-$(date +%s)}"
+
+# Default ready: find the first bead ready for the label in the repo.
+default_ready() {
+    cd "$1" && bd ready --label "$2" --json --limit 1 | jq -r '.[0].id // empty'
+}
+# Default alive: tmux session exists.
+default_alive() {
+    tmux has-session -t "$1" 2>/dev/null
+}
+# Default activity: tmux window activity epoch.
+default_activity() {
+    tmux display -p -t "$1" '#{window_activity}'
+}
+# Default calls: the tool calls (name + input) at the end of the newest Claude transcript for the seat's repo.
+# ponytail: two sessions in one repo share a project folder, so the newest transcript may be the other
+# session's; map seat to session id if that produces false loops.
+default_calls() {
+    local d f
+    d="$HOME/.claude/projects/$(printf '%s' "$2" | tr '/.' '--')"
+    f=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
+    [ -n "$f" ] || return 0
+    tail -n 400 "$f" | jq -rc 'select(.type == "assistant") | .message.content[]?
+        | select(.type == "tool_use") | [.name, .input] | tojson' 2>/dev/null | tail -n 20
+}
+
+WAKER_READY_CMD="${WAKER_READY_CMD:-default_ready}"
+WAKER_ALIVE_CMD="${WAKER_ALIVE_CMD:-default_alive}"
+STALL_ACTIVITY_CMD="${STALL_ACTIVITY_CMD:-default_activity}"
+STALL_CALLS_CMD="${STALL_CALLS_CMD:-default_calls}"
+
+# ${VAR-default} (no colon) to tell unset from empty.
+STALL_NOTIFY_CMD="${STALL_NOTIFY_CMD-$HOME/vault/director/scripts/notify-human.sh}"
+
+mkdir -p "$STALL_ALERTS"
+
+# Count the trailing run of identical lines.
+trailing_run() {
+    local last
+    last=$(tail -n 1 "$1")
+    # ENVIRON, not -v: awk -v unescapes backslashes, and the call lines are JSON
+    tac "$1" | l="$last" awk 'BEGIN{c=0} $0==ENVIRON["l"]{c++;next}{exit} END{print c}'
+}
+
+for f in "$WAKER_SEATS"/*.json; do
+    [ -e "$f" ] || continue
+    seat=$(jq -r '.seat // empty' "$f" 2>/dev/null) || continue
+    kind=$(jq -r '.kind // empty' "$f" 2>/dev/null) || continue
+    repo=$(jq -r '.repo // empty' "$f" 2>/dev/null) || continue
+    label=$(jq -r '.label // empty' "$f" 2>/dev/null) || continue
+
+    base="$(basename "$f")"
+    base="${base%.json}"
+    [ "$seat" = "$base" ] || continue
+    [ "$kind" = "lead" ] || continue
+
+    # Must be alive.
+    if ! $WAKER_ALIVE_CMD "$seat"; then
+        rm -f "$STALL_ALERTS/$seat.json"
+        continue
+    fi
+
+    # Does it hold work?
+    bead=$($WAKER_READY_CMD "$repo" "$label")
+    if [ -z "$bead" ]; then
+        echo "seat=$seat ok"
+        rm -f "$STALL_ALERTS/$seat.json"
+        continue
+    fi
+
+    # Activity time.
+    act=$($STALL_ACTIVITY_CMD "$seat")
+    if ! [[ "$act" =~ ^[0-9]+$ ]]; then
+        echo "seat=$seat unknown no activity time"
+        continue
+    fi
+
+    min=$(( (STALL_NOW - act) / 60 ))
+
+    # Loop check: count identical trailing lines in calls.
+    loop_count=0
+    calls_file=$(mktemp)
+    $STALL_CALLS_CMD "$seat" "$repo" >"$calls_file" 2>/dev/null
+    if [ -s "$calls_file" ]; then
+        loop_count=$(trailing_run "$calls_file")
+    fi
+    rm -f "$calls_file"
+
+    # Decide: loop check first.
+    if [ "$loop_count" -ge 5 ]; then
+        kind="looping"
+    elif [ "$min" -ge 30 ]; then
+        kind="stalled"
+    else
+        echo "seat=$seat ok"
+        rm -f "$STALL_ALERTS/$seat.json"
+        continue
+    fi
+
+    # since: keep from existing alert if same kind, else now.
+    alert="$STALL_ALERTS/$seat.json"
+    since=$STALL_NOW
+    if [ -e "$alert" ]; then
+        old_kind=$(jq -r '.kind // empty' "$alert" 2>/dev/null)
+        old_since=$(jq -r '.since // empty' "$alert" 2>/dev/null)
+        if [ "$old_kind" = "$kind" ] && [[ "$old_since" =~ ^[0-9]+$ ]]; then
+            since=$old_since
+        fi
+    fi
+
+    # minutes: for stalled, use min; for looping, use elapsed since first sighting.
+    if [ "$kind" = "stalled" ]; then
+        minutes=$min
+        echo "seat=$seat stalled min=$min bead=$bead"
+    else
+        minutes=$(( (STALL_NOW - since) / 60 ))
+        echo "seat=$seat looping calls=$loop_count bead=$bead"
+    fi
+
+    # Write alert file atomically.
+    tmp_alert=$(mktemp "${alert}.tmp.XXXXXX")
+    jq -n \
+        --arg seat "$seat" \
+        --arg kind "$kind" \
+        --argjson since "$since" \
+        --argjson minutes "$minutes" \
+        --arg bead "$bead" \
+        '{seat:$seat, kind:$kind, since:$since, minutes:$minutes, bead:$bead}' \
+        >"$tmp_alert"
+    mv -f "$tmp_alert" "$alert"
+
+    # Page threshold: stalled >= 60 min, looping >= 3600 sec.
+    page=0
+    if [ "$kind" = "stalled" ] && [ "$min" -ge 60 ]; then
+        page=1
+    elif [ "$kind" = "looping" ] && [ $(( STALL_NOW - since )) -ge 3600 ]; then
+        page=1
+    fi
+    if [ "$page" -eq 1 ]; then
+        if [ "$kind" = "stalled" ]; then
+            msg="Lead $seat has made no progress for $min minutes on $bead"
+        else
+            msg="Lead $seat has repeated one call $loop_count times over $minutes minutes on $bead"
+        fi
+        # the pager throttles per key (notify-human.sh), so paging on every pass is one page per window
+        [ -z "$STALL_NOTIFY_CMD" ] || $STALL_NOTIFY_CMD "stall-$seat" "$msg" >/dev/null 2>&1
+    fi
+done
+
+exit 0
