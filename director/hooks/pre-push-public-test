@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# pre-push-public-test — contract for director/hooks/pre-push-public (git pre-push hook).
+#   bash director/hooks/pre-push-public-test      exit 0 = all pass
+# The hook is called the way git calls a pre-push hook: args <remote-name> <remote-url>,
+# stdin lines "<local ref> <local sha> <remote ref> <remote sha>". Run from inside the repo.
+# Seams: PUSH_GUARD_VIS_CMD <owner/repo> prints PUBLIC|PRIVATE|INTERNAL (non-zero = unknown),
+#        PUSH_GUARD_DIR holds clears.tsv (one line per cleared repo + sha).
+set -uo pipefail
+HOOK=$(cd "$(dirname "$0")" && pwd)/pre-push-public
+T=$(mktemp -d); trap 'rm -r "$T"' EXIT
+ZERO=0000000000000000000000000000000000000000
+pass=0; fail=0
+ok()  { pass=$((pass+1)); echo "PASS $1"; }
+bad() { fail=$((fail+1)); echo "FAIL $1"; [ -z "${2:-}" ] || echo "     $2"; }
+
+# visibility stub: answers from $T/vis, counts calls in $T/vis.calls
+cat > "$T/vis" <<'EOF'
+#!/usr/bin/env bash
+echo "$1" >> "$VIS_CALLS"
+case $(tr 'A-Z' 'a-z' <<<"$1") in
+  acme/open)    echo PUBLIC ;;
+  acme/closed)  echo PRIVATE ;;
+  acme/inside)  echo INTERNAL ;;
+  acme/odd)     echo SOMETHING ;;
+  acme/empty)   exit 0 ;;
+  *)            exit 1 ;;
+esac
+EOF
+chmod +x "$T/vis"
+export VIS_CALLS=$T/vis.calls PUSH_GUARD_VIS_CMD=$T/vis PUSH_GUARD_DIR=$T/guard
+: > "$VIS_CALLS"
+
+R=$T/repo; git init -q "$R"
+g() { git -C "$R" -c user.name=t -c user.email=t@example.invalid "$@"; }
+echo one > "$R/a"; g add a; g commit -qm one; S1=$(g rev-parse HEAD)
+echo two > "$R/a"; g commit -qam two;         S2=$(g rev-parse HEAD)
+
+# push <url> <stdin text> → sets rc, out
+push() { out=$(cd "$R" && printf '%s' "$2" | bash "$HOOK" origin "$1" 2>&1); rc=$?; }
+line() { printf 'refs/heads/x %s refs/heads/x %s\n' "$1" "${2:-$ZERO}"; }
+want() { # <name> <want rc> [text the output must contain]
+  if [ "$rc" != "$2" ]; then bad "$1" "rc=$rc want $2: $out"; return; fi
+  if [ -n "${3:-}" ] && ! grep -qF -- "$3" <<<"$out"; then bad "$1" "output lacks '$3': $out"; return; fi
+  ok "$1"
+}
+clear_sha() { bash "$HOOK" --clear "$1" "$2" "${3:-reviewed}" >"$T/clear.out" 2>&1; }
+
+# 1 private and internal repos pass with no clear record
+push https://github.com/acme/closed.git "$(line "$S2")"; want "1a private repo passes" 0
+push https://github.com/acme/inside "$(line "$S2")";     want "1b internal repo passes" 0
+
+# 2 public repo with no clear record is blocked, and the message names the sha
+push https://github.com/acme/open.git "$(line "$S2")";   want "2 public, no clear: blocked" 1 "$S2"
+
+# 3 public repo with a clear record for that sha passes; every GitHub URL form is read
+clear_sha acme/open "$S2" || bad "3 --clear exits 0" "$(cat "$T/clear.out")"
+push https://github.com/acme/open.git "$(line "$S2")";     want "3a public, cleared (https .git)" 0
+push https://github.com/Acme/Open "$(line "$S2")";         want "3b repo name match ignores case" 0
+push git@github.com:acme/open.git "$(line "$S2")";         want "3c scp-style url" 0
+push ssh://git@github.com/acme/open.git "$(line "$S2")";   want "3d ssh url" 0
+push https://x-access-token:abc@github.com/acme/open.git "$(line "$S2")"; want "3e url with credentials" 0
+
+# 4 a clear for another sha, or for another repo, does not count
+push https://github.com/acme/open.git "$(line "$S1")";     want "4a other sha: blocked" 1
+clear_sha acme/closed "$S1"
+push https://github.com/acme/open.git "$(line "$S1")";     want "4b clear for another repo: blocked" 1
+
+# 5 unknown visibility fails closed: lookup error, empty answer, unexpected answer
+push https://github.com/acme/nope.git "$(line "$S2")";     want "5a lookup fails: blocked" 1 "unknown"
+push https://github.com/acme/empty.git "$(line "$S2")";    want "5b empty answer: blocked" 1
+push https://github.com/acme/odd.git "$(line "$S2")";      want "5c unexpected answer: blocked" 1
+
+# 6 a remote that is not GitHub is not this hook's business; no lookup is made
+: > "$VIS_CALLS"
+push /srv/git/thing.git "$(line "$S2")";                   want "6a local path remote passes" 0
+push ssh://box.lan/srv/thing.git "$(line "$S2")";          want "6b LAN ssh remote passes" 0
+[ ! -s "$VIS_CALLS" ] && ok "6c no lookup for non-GitHub" || bad "6c no lookup for non-GitHub" "$(cat "$VIS_CALLS")"
+# a host that only looks like GitHub is not GitHub; the real host in any letter case is
+push https://github.com.evil.example/acme/open.git "$(line "$S1")"; want "6d look-alike host is not GitHub" 0
+push https://GitHub.com/acme/open.git "$(line "$S1")";     want "6e host match ignores case" 1
+
+# 7 deleting a branch pushes no code
+push https://github.com/acme/open.git "refs/heads/x $ZERO refs/heads/x $S1"$'\n'; want "7 branch delete passes" 0
+
+# 8 several refs in one push: one uncleared ref blocks the push
+push https://github.com/acme/open.git "$(line "$S2")"$'\n'"refs/heads/y $S1 refs/heads/y $ZERO"$'\n'
+want "8 one uncleared ref blocks" 1 "$S1"
+
+# 9 nothing pushed (empty stdin) passes
+push https://github.com/acme/open.git "";                  want "9 empty push passes" 0
+
+# 10 --clear refuses a short or non-hex sha and a malformed repo, and writes nothing for them
+before=$(cat "$T/guard/clears.tsv")
+clear_sha acme/open "${S1:0:12}" && bad "10a short sha refused" || ok "10a short sha refused"
+clear_sha acme/open "zz${S1:2}"  && bad "10b non-hex sha refused" || ok "10b non-hex sha refused"
+clear_sha "acme open" "$S1"      && bad "10c bad repo refused" || ok "10c bad repo refused"
+clear_sha acme/open "$S1" ""     && bad "10d empty summary refused" || ok "10d empty summary refused"
+[ "$before" = "$(cat "$T/guard/clears.tsv")" ] && ok "10e refused clears write nothing" || bad "10e refused clears write nothing"
+# a summary cannot forge a second record with a tab or newline
+clear_sha acme/open "$S2" $'x\nacme/open\t'"$S1"$'\tforged'
+push https://github.com/acme/open.git "$(line "$S1")";     want "10f summary cannot forge a record" 1
+
+# 11 scrub: a pushed tree that carries bin/oss-scrub-check must pass it, judged on the pushed commit
+mkdir "$R/bin"; printf '#!/usr/bin/env bash\necho "scrub: hit"; exit 1\n' > "$R/bin/oss-scrub-check"
+g add bin; g commit -qm "scrub red"; S3=$(g rev-parse HEAD)
+clear_sha acme/open "$S3"
+push https://github.com/acme/open.git "$(line "$S3" "$S2")"; want "11a cleared but scrub red: blocked" 1 "scrub"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$R/bin/oss-scrub-check"   # working tree now green, commit still red
+push https://github.com/acme/open.git "$(line "$S3" "$S2")"; want "11b scrub runs on the pushed commit, not the working tree" 1
+g commit -qam "scrub green"; S4=$(g rev-parse HEAD)
+clear_sha acme/open "$S4"
+push https://github.com/acme/open.git "$(line "$S4" "$S3")"; want "11c cleared and scrub green passes" 0
+push https://github.com/acme/closed.git "$(line "$S3")";     want "11d private repo: no scrub" 0
+
+# 12 a tag is judged by the commit it points at
+g tag -a v1 -m v1 "$S2"; TAG=$(g rev-parse v1)
+push https://github.com/acme/open.git "refs/tags/v1 $TAG refs/tags/v1 $ZERO"$'\n'; want "12a tag on a cleared commit passes" 0
+g tag -a v0 -m v0 "$S1"; TAG0=$(g rev-parse v0)
+push https://github.com/acme/open.git "refs/tags/v0 $TAG0 refs/tags/v0 $ZERO"$'\n'; want "12b tag on an uncleared commit blocked" 1
+
+# 13 a broken seam fails closed, and a pushed sha git cannot read fails closed
+out=$(cd "$R" && line "$S2" | PUSH_GUARD_VIS_CMD=/nonexistent/vis bash "$HOOK" origin https://github.com/acme/open.git 2>&1); rc=$?
+want "13a missing lookup command: blocked" 1
+push https://github.com/acme/open.git "$(line 1234567890123456789012345678901234567890)"; want "13b unreadable sha: blocked" 1
+
+echo "pre-push-public-test: $pass pass, $fail fail"
+[ "$fail" = 0 ]
