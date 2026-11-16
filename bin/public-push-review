@@ -5,7 +5,9 @@ base=${1:-origin/master}
 [ -z "$(git status --porcelain)" ] || { echo "public-push-review: worktree not clean; commit first" >&2; exit 1; }
 sha=$(git rev-parse HEAD)
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
-git diff "$base"...HEAD > "$tmp"
+git diff "$base"...HEAD > "$tmp" || { echo "public-push-review: cannot diff $base...HEAD" >&2; exit 1; }
+# an empty diff would CLEAR trivially and receipt a sha nobody reviewed
+[ -s "$tmp" ] || { echo "public-push-review: empty diff vs $base; nothing to review" >&2; exit 1; }
 out=$("${DEFEND_ATTACK:-$HOME/.claude/skills/defend/bin/defend-attack}" --diff "$tmp")
 rc=$?
 echo "$out"

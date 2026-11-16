@@ -55,4 +55,15 @@ echo dirty >> "$repo/f.txt"
 run "dirty worktree refused, no receipt" CLEAR 1 no
 git -C "$repo" checkout -q -- f.txt
 
+# a base git cannot resolve, or one equal to HEAD, must not yield a receipt for an empty review
+run_base() {
+  rm -rf "$tmp/receipts"
+  (cd "$repo" && DEFEND_ATTACK="$tmp/defend-attack" STUB_VERDICT=CLEAR STUB_DIFF_COPY="$tmp/diff" \
+    PUBLIC_PUSH_RECEIPTS="$tmp/receipts" "$here/public-push-review" "$2" >/dev/null 2>&1)
+  local rc=$?
+  if [ $rc -ne 0 ] && [ ! -e "$tmp/receipts/$head_sha" ]; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$rc)"; fail=1; fi
+}
+run_base "unknown base refused, no receipt" no-such-branch
+run_base "empty diff refused, no receipt"   HEAD
+
 exit $fail
