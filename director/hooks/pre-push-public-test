@@ -43,7 +43,7 @@ want() { # <name> <want rc> [text the output must contain]
   if [ -n "${3:-}" ] && ! grep -qF -- "$3" <<<"$out"; then bad "$1" "output lacks '$3': $out"; return; fi
   ok "$1"
 }
-clear_sha() { bash "$HOOK" --clear "$1" "$2" "${3:-reviewed}" >"$T/clear.out" 2>&1; }
+clear_sha() { bash "$HOOK" --clear "$1" "$2" "${3-reviewed}" >"$T/clear.out" 2>&1; }
 
 # 1 private and internal repos pass with no clear record
 push https://github.com/acme/closed.git "$(line "$S2")"; want "1a private repo passes" 0
@@ -78,6 +78,12 @@ push ssh://box.lan/srv/thing.git "$(line "$S2")";          want "6b LAN ssh remo
 # a host that only looks like GitHub is not GitHub; the real host in any letter case is
 push https://github.com.evil.example/acme/open.git "$(line "$S1")"; want "6d look-alike host is not GitHub" 0
 push https://GitHub.com/acme/open.git "$(line "$S1")";     want "6e host match ignores case" 1
+
+# a GitHub url in a form the hook does not read is blocked, never waved through as "not GitHub"
+for u in https://github.com/acme/closed/ https://github.com:443/acme/closed.git ssh://git@github.com:22/acme/closed \
+         git://github.com/acme/closed.git https://www.github.com/acme/closed github.com:acme/closed.git; do
+  push "$u" "$(line "$S1")"; want "6f unread GitHub form blocked: $u" 1 "unknown"
+done
 
 # 7 deleting a branch pushes no code
 push https://github.com/acme/open.git "refs/heads/x $ZERO refs/heads/x $S1"$'\n'; want "7 branch delete passes" 0
