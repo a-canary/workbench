@@ -194,6 +194,8 @@ while IFS= read -r s; do
         nudge_bead=""
         if $WAKER_IDLE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
             nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
+            # the id is typed into a live session: anything but a plain id is dropped
+            [[ $nudge_bead =~ ^[A-Za-z0-9._-]+$ ]] || nudge_bead=""
         fi
         # Decide whether to nudge
         should_nudge=0
