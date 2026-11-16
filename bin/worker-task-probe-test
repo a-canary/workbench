@@ -46,6 +46,13 @@ ok "the probe gets WORKER_PRIVATE_PORT" '[ "$probed" = 8097 ] && grep -q 8097 <<
 run alive private 0
 ok "an answering endpoint lets the run finish green" '[ "$rc" = 0 ] && [ "$ran" = yes ]'
 
+# a probe that cannot run (exit 126/127: command missing) is a host fault, not a dead endpoint
+run probe-missing private 127
+ok "a probe that cannot run stops the run with exit 4" '[ "$rc" = 4 ] && [ "$ran" = no ]'
+ok "and says the probe could not run, not that the endpoint is down" 'grep -q "probe could not run" <<<"$err" && ! grep -q "not answering" <<<"$err"'
+
+ok "the header documents exit 4" 'grep -q "^# .*[Ee]xit 4" "$here/worker-task"'
+
 # the public lane has its own endpoint and key: the private probe says nothing about it
 run public public 1
 ok "the public lane is not probed" '[ -z "$probed" ]'

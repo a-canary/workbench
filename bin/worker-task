@@ -9,6 +9,7 @@
 # (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
 # it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
+# Exit 4 = infrastructure fault before the worker started (private lane endpoint down or probe could not run).
 # WORKER_LANE_PROBE: command run as `$WORKER_LANE_PROBE <port>` before the private-lane
 # worker starts; exit 0 means the endpoint answers (default: curl the /v1/models endpoint).
 set -euo pipefail
@@ -124,8 +125,14 @@ fi
 # private lane: probe the endpoint before spending the worker timeout on a dead one
 if [ "$lane" = private ]; then
   port=${WORKER_PRIVATE_PORT:-8099}
-  if ! ${WORKER_LANE_PROBE:-default_lane_probe} "$port"; then
-    log "private lane endpoint 127.0.0.1:$port not answering; worker not started"
+  probe_rc=0
+  ${WORKER_LANE_PROBE:-default_lane_probe} "$port" || probe_rc=$?
+  if [ $probe_rc -ne 0 ]; then
+    if [ $probe_rc -eq 126 ] || [ $probe_rc -eq 127 ]; then
+      log "private lane probe could not run (exit $probe_rc); worker not started"
+    else
+      log "private lane endpoint 127.0.0.1:$port not answering; worker not started"
+    fi
     exit 4
   fi
 fi
