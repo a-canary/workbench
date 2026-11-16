@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# lane-health: sends one real chat request to a lane and checks it finishes.
+# /v1/models is not enough: a lane can list models and never finish a request (repos-mmi1).
+
+usage() { echo "usage: lane-health <port> [--timeout S]" >&2; }
+
+if [ $# -lt 1 ] || [ -z "$1" ]; then
+  usage
+  exit 2
+fi
+
+port="$1"
+shift
+
+if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+  usage
+  exit 2
+fi
+
+timeout=60
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) [[ "${2:-}" =~ ^[0-9]+$ ]] || { usage; exit 2; }; timeout="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+model="${LANE_HEALTH_MODEL:-local}"
+body="{\"model\": \"$model\", \"messages\": [{\"role\": \"user\", \"content\": \"ok\"}], \"max_tokens\": 1}"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+http_code=$(curl -sS --max-time "$timeout" -o "$tmp" -w '%{http_code}' \
+  -X POST "http://127.0.0.1:$port/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "$body" 2>/dev/null)
+rc=$?
+
+if [ $rc -ne 0 ]; then
+  echo "lane-health: 127.0.0.1:$port unhealthy: request failed"
+  exit 1
+fi
+
+if [[ "$http_code" != 2[0-9][0-9] ]]; then
+  echo "lane-health: 127.0.0.1:$port unhealthy: HTTP $http_code"
+  exit 1
+fi
+
+if ! jq -e '.choices | length > 0' "$tmp" >/dev/null 2>&1; then
+  echo "lane-health: 127.0.0.1:$port unhealthy: no choices in response"
+  exit 1
+fi
+
+echo "lane-health: 127.0.0.1:$port answered a chat request"
+exit 0

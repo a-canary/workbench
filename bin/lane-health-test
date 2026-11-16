@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# lane-health-test — checks bin/lane-health against a local stub server (no real model).
+# lane-health <port> [--timeout S]: sends ONE real chat request to 127.0.0.1:<port>/v1/chat/completions
+# (max_tokens 1) and exits 0 only when the reply has a non-empty choices list; prints one line either way.
+# /v1/models or /health answering is not enough: a lane can list models and still never finish a request (repos-mmi1).
+here=$(cd "$(dirname "$0")" && pwd)
+tmp=$(mktemp -d); trap 'kill $srv 2>/dev/null; command rm -r "$tmp"' EXIT
+fail=0
+ok() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$rc out='$out')"; fail=1; fi; }
+
+cat > "$tmp/stub.py" <<'EOF'
+import http.server, json, sys, time
+mode = sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, code, body):
+        b = body.encode()
+        self.send_response(code); self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        self.reply(200, '{"data":[{"id":"m"}]}')          # models and health always look fine
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0)); req = json.loads(self.rfile.read(n) or b'{}')
+        open(sys.argv[3], 'a').write(self.path + ' ' + json.dumps(req) + '\n')
+        if mode == 'hang': time.sleep(30); return
+        if mode == 'empty': return self.reply(200, '{"choices":[]}')
+        if mode == 'error': return self.reply(500, '{"error":"busy"}')
+        if mode == 'junk': return self.reply(200, 'not json')
+        self.reply(200, '{"choices":[{"message":{"role":"assistant","content":"o"}}]}')
+http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+EOF
+
+port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+case_() {  # $1 mode, rest: extra args
+  local mode=$1; shift
+  kill $srv 2>/dev/null; wait $srv 2>/dev/null; : > "$tmp/req.log"
+  python3 -I "$tmp/stub.py" "$port" "$mode" "$tmp/req.log" & srv=$!
+  for _ in $(seq 50); do python3 -c "import socket; socket.create_connection(('127.0.0.1',$port),0.1)" 2>/dev/null && break; sleep 0.1; done
+  local t0=$SECONDS
+  out=$("$here/lane-health" "$port" "$@" 2>&1); rc=$?
+  took=$((SECONDS - t0))
+}
+
+[ -x "$here/lane-health" ] || { echo "FAIL  bin/lane-health missing or not executable"; exit 1; }
+
+case_ ok
+ok "a lane that answers a chat request is healthy (exit 0)" '[ "$rc" = 0 ]'
+ok "it sent exactly one chat request" '[ "$(wc -l < "$tmp/req.log")" = 1 ] && grep -q "^/v1/chat/completions " "$tmp/req.log"'
+ok "the request asks for one token" 'grep -q "\"max_tokens\": 1" "$tmp/req.log"'
+ok "it prints one line naming the port" '[ "$(printf "%s\n" "$out" | wc -l)" = 1 ] && grep -q "$port" <<<"$out"'
+
+case_ empty
+ok "an empty choices list is unhealthy" '[ "$rc" != 0 ] && grep -q "$port" <<<"$out"'
+case_ error
+ok "an HTTP error is unhealthy" '[ "$rc" != 0 ]'
+case_ junk
+ok "a non-JSON reply is unhealthy" '[ "$rc" != 0 ]'
+case_ hang --timeout 2
+ok "a lane that never finishes is unhealthy within the timeout" '[ "$rc" != 0 ] && [ "$took" -le 6 ]'
+
+kill $srv 2>/dev/null; wait $srv 2>/dev/null
+out=$("$here/lane-health" "$port" --timeout 2 2>&1); rc=$?
+ok "a closed port is unhealthy" '[ "$rc" != 0 ]'
+out=$("$here/lane-health" 2>&1); rc=$?
+ok "no port is a usage error (exit 2)" '[ "$rc" = 2 ]'
+out=$("$here/lane-health" 'x;y' 2>&1); rc=$?
+ok "a non-numeric port is a usage error (exit 2)" '[ "$rc" = 2 ]'
+
+[ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
+exit "$fail"
