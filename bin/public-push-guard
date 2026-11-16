@@ -8,8 +8,10 @@ set -uo pipefail
 url=${2:-}
 receipts=${PUBLIC_PUSH_RECEIPTS:-$HOME/vault/director/push-receipts}
 cache=${PUBLIC_PUSH_CACHE:-$receipts/.visibility}  # not /tmp: a pre-made cache file there could mark a public repo PRIVATE
-slug=$(printf '%s' "$url" | sed -nE 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+)$#\2#p' | sed 's/\.git$//')
-[ -n "$slug" ] || exit 0
+# any URL naming github.com is parsed or refused, never passed: scheme, user@, :port, trailing / and .git are stripped
+[[ ${url,,} == *github.com* ]] || exit 0
+slug=$(printf '%s' "${url,,}" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^github\.com(:[0-9]+)?[:/]##; s#/+$##; s#\.git$##')
+[[ $slug =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]] || { echo "public-push-guard: cannot parse GitHub URL $url" >&2; exit 1; }
 cf="$cache/${slug/\//__}"
 vis=
 if [ -f "$cf" ] && [ -n "$(find "$cf" -mmin -1440)" ]; then vis=$(cat "$cf"); fi

@@ -72,4 +72,11 @@ run "cache primed again" ok "$gh_url" PRIVATE "$(line $sha_a)"
 find "$tmp/cache" -type f -exec sh -c 'echo junk > "$1"' _ {} \;
 run "junk cache entry not trusted, gh fails: refused" refused "$gh_url" fail "$(line $sha_a)"
 
+# review of 9876983: github.com URL shapes the first slug regex missed must not fail open
+fresh
+for u in https://github.com/own/repo/ https://user@github.com/own/repo ssh://git@github.com:22/own/repo.git git@GitHub.com:own/repo.git HTTPS://GITHUB.COM/own/repo; do
+  run "public repo via $u, no receipt: refused" refused "$u" PUBLIC "$(line $sha_a)"
+done
+run "github.com URL with no owner/repo: refused" refused "https://github.com/own" PRIVATE "$(line $sha_a)"
+
 exit $fail
