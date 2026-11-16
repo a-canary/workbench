@@ -17,6 +17,15 @@ set -euo pipefail
 log() { echo "worker-task: $*" >&2; [ -z "${WORKER_TASK_LOG:-}" ] || echo "$*" >>"$WORKER_TASK_LOG"; }
 die() { log "$*"; exit 2; }
 default_lane_probe() { curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:$1/v1/models"; }
+# queue depth of a private lane: laneproxy (8099) serves /__lanes; a bare llama.cpp server (8097) serves /slots (repos-ns7m)
+default_lane_depth() {
+  local j
+  if j=$(curl -fsS --max-time 5 "http://127.0.0.1:$1/__lanes" 2>/dev/null); then
+    jq -e '(.waiting | length) + .idle.inflight' <<<"$j"
+  else
+    curl -fsS --max-time 5 "http://127.0.0.1:$1/slots" | jq -e '[.[] | select(.is_processing)] | length'
+  fi
+}
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 wt= lane= task= test= tools=read,edit,write,bash tmo=600 push= review=
@@ -131,7 +140,18 @@ fi
 
 # private lane: probe the endpoint before spending the worker timeout on a dead one
 if [ "$lane" = private ]; then
-  port=${WORKER_PRIVATE_PORT:-8099}
+  # no port given: pick the less busy of the two private lanes, 8099 on a tie; callers never choose (repos-ns7m)
+  if [ -n "${WORKER_PRIVATE_PORT:-}" ]; then port=$WORKER_PRIVATE_PORT
+  else
+    port= best=
+    for p in 8099 8097; do
+      d=$(${WORKER_LANE_DEPTH:-default_lane_depth} "$p" 2>/dev/null) || continue
+      [[ $d =~ ^[0-9]+$ ]] || continue
+      if [ -z "$port" ] || [ "$d" -lt "$best" ]; then port=$p best=$d; fi
+    done
+    [ -n "$port" ] || { log "no private lane answering (8099, 8097); worker not started"; exit 4; }
+    log "private lane: picked $port (depth $best)"
+  fi
   probe_rc=0
   ${WORKER_LANE_PROBE:-default_lane_probe} "$port" || probe_rc=$?
   if [ $probe_rc -ne 0 ]; then
@@ -142,6 +162,7 @@ if [ "$lane" = private ]; then
     fi
     exit 4
   fi
+  export WORKER_PRIVATE_PORT=$port
 fi
 log "worker: lane=$lane tools=$tools"
 t0=$(date +%s)
