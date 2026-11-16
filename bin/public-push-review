@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# review-then-receipt wrapper for public pushes; pairs with public-push-guard (repos-ga1o)
+set -uo pipefail
+base=${1:-origin/master}
+[ -z "$(git status --porcelain)" ] || { echo "public-push-review: worktree not clean; commit first" >&2; exit 1; }
+sha=$(git rev-parse HEAD)
+tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+git diff "$base"...HEAD > "$tmp"
+out=$("${DEFEND_ATTACK:-$HOME/.claude/skills/defend/bin/defend-attack}" --diff "$tmp")
+rc=$?
+echo "$out"
+verdict=$(grep '^VERDICT: CLEAR' <<<"$out")
+if [ $rc -eq 0 ] && [ -n "$verdict" ]; then
+  dir=${PUBLIC_PUSH_RECEIPTS:-$HOME/vault/director/push-receipts}
+  mkdir -p "$dir"
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  { echo CLEAR; echo "public-push-review $base...$sha $verdict $ts"; } > "$dir/$sha"
+  echo "receipt: $dir/$sha"
+  exit 0
+fi
+[ $rc -eq 0 ] && rc=1
+exit $rc
