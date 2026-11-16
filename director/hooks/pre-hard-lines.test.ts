@@ -105,7 +105,7 @@ test("blocks through string wrappers, find -exec and nested shells", () => {
   allowed("git push origin main 2>&1 | tail -5");
   allowed("gh pr view 5 --json state >/tmp/x.json 2>/dev/null");
   allowed("diff <(git log -1) <(git status)");
-  blocked('su aaron -c "git push -f"');
+  blocked('su operator -c "git push -f"');
   blocked("strace git push -f");
   for (const input of ['{"tool_name":"Bash","tool_input":{}}', '{"tool_name":"Bash"}'])
     expect(spawnSync("bash", [HOOK], { input, encoding: "utf8" }).status).toBe(2);
@@ -123,10 +123,10 @@ test("blocks live order paths", () => {
   blocked("npx tsx tools/m1-execute.ts roth --execute");
   blocked("npx tsx tools/order.ts --alpaca-live buy SPY 1");
   blocked("bun tools/order.ts sell SPY 1");
-  blocked("npx tsx /home/x/repos/trading/tools/order.ts cancel-all");
+  blocked("npx tsx /srv/repos/trading/tools/order.ts cancel-all");
   blocked("npm run order -- buy SPY 1");
   blocked("bun run order close SPY");
-  blocked("/home/aaron/bin/trade-rebalance-active");
+  blocked("/usr/local/bin/trade-rebalance-active");
   blocked("nohup trade-rebalance-active &");
   blocked("cd tools && npx tsx order.ts buy SPY 1");
   blocked("node dist/tools/order.js buy SPY 1");
@@ -162,7 +162,7 @@ test("allows the same words as data, and the safe forms", () => {
   allowed("bun test tools/order.test.ts");
   allowed("cat tools/order.ts");
   allowed("grep -n execute tools/rebalance-calc.ts");
-  allowed("/home/aaron/bin/trade-rebalance-shadow");
+  allowed("/usr/local/bin/trade-rebalance-shadow");
 });
 
 test("non-Bash tools and malformed input pass; unbalanced quotes fail closed", () => {
