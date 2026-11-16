@@ -134,8 +134,11 @@ for line in "${refs[@]}"; do
   if git ls-tree -r --name-only "$commit" 2>/dev/null | grep -qxF 'bin/oss-scrub-check'; then
     tmp=$(mktemp -d) || { echo "push-guard: scrub could not start for $commit"; blocked=1; continue; }
     scrub_ok=0
-    if git archive "$commit" 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
-      scrub_out=$(cd "$tmp" && bash bin/oss-scrub-check </dev/null 2>&1) && scrub_ok=1
+    # A throwaway index, not git archive: archive honours export-ignore, which would hide a
+    # pushed file from the scrub.
+    if GIT_INDEX_FILE="$tmp/.idx" git read-tree "$commit" 2>/dev/null &&
+       GIT_INDEX_FILE="$tmp/.idx" git checkout-index -a --prefix="$tmp/tree/" 2>/dev/null; then
+      scrub_out=$(cd "$tmp/tree" && bash bin/oss-scrub-check </dev/null 2>&1) && scrub_ok=1
     fi
     rm -rf "$tmp"
     if [ "$scrub_ok" -ne 1 ]; then
