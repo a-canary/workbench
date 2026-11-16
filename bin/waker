@@ -26,6 +26,8 @@
 #   WAKER_NUDGE_CMD    "<cmd> <seat> <bead>" tells live session bead is ready
 #   WAKER_NUDGE_GAP_S  seconds between nudges to same seat (default 1800)
 #   WAKER_DRAIN_CMD    run once at end of tick; "" = none
+# tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
+# would reach a session named "ndv-lead".
 set -u
 
 SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
@@ -49,28 +51,32 @@ if [ -z "${WAKER_READY_CMD:-}" ]; then
 fi
 if [ -z "${WAKER_ALIVE_CMD:-}" ]; then
     default_alive() {
-        tmux has-session -t "$1"
+        tmux has-session -t "=$1"
     }
     WAKER_ALIVE_CMD="default_alive"
 fi
 if [ -z "${WAKER_IDLE_CMD:-}" ]; then
     default_idle() {
-        local seat="$1" activity now idle_s
+        local seat="$1" activity now idle_s screen
         idle_s="${WAKER_IDLE_S:-600}"
-        activity=$(tmux display-message -p -t "$seat" '#{window_activity}' 2>/dev/null) || return 1
+        case "$idle_s" in ''|*[!0-9]*) idle_s=600 ;; esac
+        activity=$(tmux display-message -p -t "=$seat:" '#{window_activity}' 2>/dev/null) || return 1
         [[ $activity =~ ^[0-9]+$ ]] || return 1
         now=$(date +%s)
-        if [ $((now - activity)) -ge "$idle_s" ]; then
-            return 0
-        fi
-        return 1
+        [ $((now - activity)) -ge "$idle_s" ] || return 1
+        # A session waiting on a dialog is quiet too, and the nudge ends in Enter,
+        # which would answer it. Any sign of a question on screen means not idle.
+        # ponytail: text heuristic; replace with a harness idle signal when one exists.
+        screen=$(tmux capture-pane -p -t "=$seat:" 2>/dev/null) || return 1
+        [ -n "$screen" ] || return 1
+        ! grep -qiE 'do you want|\(y/n\)|\[y/n\]|esc to cancel|enter to confirm|enter to select|❯ *[0-9]+\.|trust (this|the) (folder|files)' <<<"$screen"
     }
     WAKER_IDLE_CMD="default_idle"
 fi
 if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
     default_nudge() {
         local seat="$1" bead="$2"
-        tmux send-keys -t "$seat" "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." Enter
+        tmux send-keys -t "=$seat:" "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." Enter
     }
     WAKER_NUDGE_CMD="default_nudge"
 fi
@@ -185,7 +191,6 @@ sorted_seats=$(printf '%s\n' "${seats[@]}" | sort -t'|' -k2,2n -k1,1)
 # First pass: count running seats; nudge live idle seats that have a ready bead
 used=0
 declare -a running=()
-mkdir -p "$SEATS/.nudge"
 while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
@@ -229,7 +234,7 @@ while IFS= read -r s; do
                 rc=0
                 $WAKER_NUDGE_CMD "$name" "$nudge_bead" </dev/null 2>/dev/null 9>&- || rc=$?
                 if [ $rc -eq 0 ]; then
-                    date +%s >"$nudge_file"
+                    mkdir -p "$SEATS/.nudge" && date +%s >"$nudge_file"
                     echo "seat=$name nudged bead=$nudge_bead"
                 else
                     echo "seat=$name nudge-failed bead=$nudge_bead rc=$rc"

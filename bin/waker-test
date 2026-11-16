@@ -37,7 +37,21 @@ pre() { if grep -q -- "^$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no 
 has() { if grep -qxF -- "$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no line '$3' in:"; sed 's/^/      /' "$2"; fails=1; fi; }
 
 # --- stubs: every seam is a small script reading files under $tmp/w ---
-mkdir -p "$tmp/bin"
+mkdir -p "$tmp/bin" "$tmp/fake"
+# No tick may reach the real tmux: a fake one is first on PATH for every tick, and the idle and
+# nudge seams are stubbed unless a case clears them (case 29).
+cat >"$tmp/fake/tmux" <<'TMUX'
+#!/usr/bin/env bash
+echo "$*" >>"$W/tmux.calls"
+case $1 in
+  display-message) cat "$W/activity" 2>/dev/null ;;
+  capture-pane)    cat "$W/screen" 2>/dev/null ;;
+  send-keys)       echo "$*" >>"$W/keys" ;;
+  *)               exit 1 ;;
+esac
+TMUX
+chmod +x "$tmp/fake/tmux"
+export PATH="$tmp/fake:$PATH"   # also covers the calls below that do not go through tick
 cat >"$tmp/bin/meter" <<'EOF'
 #!/bin/bash
 cat "$W/meter" 2>/dev/null || echo "? ?"
@@ -71,7 +85,8 @@ EOF
 }
 ready() { echo "$2" >"$W/ready/$1.lead"; }
 tick() {
-  env W="$W" KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
+  env W="$W" PATH="$tmp/fake:$PATH" WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" \
+    KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
     WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
     WAKER_DRAIN_CMD="$tmp/bin/drain" "$@" "$waker" >"$W/out" 2>"$W/err"; echo $? >"$W/rc"
 }
@@ -261,7 +276,7 @@ check "24 bad gap means the default, not no gap" "$(nudged)" "ndv n-7,ndv n-7,"
 
 # 25. --dry-run names the nudge and sends nothing, and does not start the gap
 world; ready ndv n-7; live_idle ndv
-env W="$W" WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" \
+env W="$W" PATH="$tmp/fake:$PATH" WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" \
   WAKER_ALIVE_CMD="$tmp/bin/alive" WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" WAKER_DRAIN_CMD="" \
   "$waker" --dry-run >"$W/out" 2>"$W/err"
 has "25 would-nudge" "$W/out" "seat=ndv would-nudge bead=n-7"
@@ -290,6 +305,24 @@ has "28 trading started" "$W/out" "seat=trading started bead=t-1"
 has "28 stack has no slot" "$W/out" "seat=stack no-slot bead=s-1"
 world; ready ndv n-7; live_idle ndv; touch "$W/seats/waker.off"; ntick
 check "28 off: nobody nudged" "$(nudged)" ""
+
+# 29. the default idle check and nudge (fake tmux): a quiet screen is nudged; a screen showing a
+#     question is never typed into; a recently active or unreadable one is left alone
+dtick() { tick WAKER_IDLE_CMD= WAKER_NUDGE_CMD= "$@"; }
+quiet() { touch "$W/alive/ndv"; echo 1000 >"$W/activity"; printf '> \n' >"$W/screen"; }
+world; ready ndv n-7; quiet; dtick
+has "29 quiet screen nudged" "$W/out" "seat=ndv nudged bead=n-7"
+check "29 keys name the bead" "$(grep -c 'bd show n-7' "$W/keys")" "1"
+check "29 every tmux call names the exact session" "$(grep -vc -- '-t =ndv:' "$W/tmux.calls")" "0"
+world; ready ndv n-7; quiet; printf 'Do you want to proceed?\n❯ 1. Yes\n' >"$W/screen"; dtick
+has "29 dialog on screen: running" "$W/out" "seat=ndv running"
+check "29 dialog on screen: nothing typed" "$(cat "$W/keys" 2>/dev/null)" ""
+world; ready ndv n-7; quiet; date +%s >"$W/activity"; dtick
+has "29 recent activity: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; quiet; : >"$W/screen"; dtick
+has "29 unreadable screen: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; quiet; dtick WAKER_IDLE_S=soon
+has "29 bad idle seconds means the default" "$W/out" "seat=ndv nudged bead=n-7"
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
