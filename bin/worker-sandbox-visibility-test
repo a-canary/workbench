@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# worker-sandbox-visibility-test — the public lane (a third-party model) never gets a private repo (repos-1fxr).
+# Operator 2026-10-28: "9router models should never see private repos." Stub gh, no network, no model.
+here=$(cd "$(dirname "$0")" && pwd)
+tmp=$(mktemp -d); trap 'command rm -r "$tmp"' EXIT
+fail=0
+
+mkdir "$tmp/bin" "$tmp/repo"
+cat > "$tmp/bin/gh" <<'EOF'
+#!/bin/sh
+[ "$1 $2" = "repo view" ] || exit 1
+[ "$STUB_VIS" = fail ] && exit 1
+echo "$STUB_VIS o/secret"
+EOF
+chmod +x "$tmp/bin/gh"
+git -C "$tmp/repo" init -q && git -C "$tmp/repo" remote add origin https://github.com/o/secret
+echo x > "$tmp/repo/f" && git -C "$tmp/repo" add f && git -C "$tmp/repo" -c user.name=t -c user.email=t@t commit -qm x
+# an untracked file: a run that clears the visibility gate stops at the next check, so "passed" proves it got there
+echo y > "$tmp/repo/untracked"
+
+run() {  # STUB_VIS value, then env assignments; prints worker-sandbox stderr
+  local vis=$1; shift
+  env PATH="$tmp/bin:$PATH" STUB_VIS="$vis" WORKER_PUBLIC_KEY=x WORKER_PUBLIC_PORT=1 "$@" \
+    "$here/worker-sandbox" --worktree "$tmp/repo" --lane public --timeout 5 --exec true 2>&1 >/dev/null
+}
+refused() { grep -q "refused: repo visibility" <<<"$2"; }
+check() {  # name, want (refused|passed), stderr
+  if { [ "$2" = refused ] && refused "$1" "$3"; } || { [ "$2" = passed ] && ! refused "$1" "$3" && grep -q "untracked/ignored files" <<<"$3"; }
+  then echo "PASS  $1"; else echo "FAIL  $1: ${3:0:200}"; fail=1; fi
+}
+
+check "a PRIVATE repo is refused" refused "$(run PRIVATE)"
+check "an INTERNAL repo is refused" refused "$(run INTERNAL)"
+check "visibility unknown (gh fails) is refused" refused "$(run fail)"
+echo "o/other" > "$tmp/prepublic"
+check "a PRIVATE repo not on the pre-public list is refused" refused "$(run PRIVATE WORKER_PREPUBLIC="$tmp/prepublic")"
+echo "o/secret-old" > "$tmp/prepublic"
+check "a name that only starts like a listed one is refused" refused "$(run PRIVATE WORKER_PREPUBLIC="$tmp/prepublic")"
+echo "o/secret  operator 2026-11-16" > "$tmp/prepublic"
+check "a PRIVATE repo on the pre-public list passes the gate" passed "$(run PRIVATE WORKER_PREPUBLIC="$tmp/prepublic")"
+check "a missing pre-public list refuses" refused "$(run PRIVATE WORKER_PREPUBLIC="$tmp/nope")"
+check "a PUBLIC repo passes the gate" passed "$(run PUBLIC)"
+
+[ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
+exit "$fail"
