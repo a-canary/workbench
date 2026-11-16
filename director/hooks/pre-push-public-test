@@ -118,6 +118,18 @@ clear_sha acme/open "$S4"
 push https://github.com/acme/open.git "$(line "$S4" "$S3")"; want "11c cleared and scrub green passes" 0
 push https://github.com/acme/closed.git "$(line "$S3")";     want "11d private repo: no scrub" 0
 
+# 11e a scrub that scans "." sees the pushed commit, not uncommitted files in the working tree
+printf '#!/usr/bin/env bash\nif grep -rq FORBIDDEN-WORD --exclude=oss-scrub-check .; then echo "scrub: found it"; exit 1; fi\n' > "$R/bin/oss-scrub-check"
+g commit -qam "scrub scans dot"; S5=$(g rev-parse HEAD)
+clear_sha acme/open "$S5"
+echo FORBIDDEN-WORD > "$R/draft"
+push https://github.com/acme/open.git "$(line "$S5" "$S4")"; want "11e dirty working tree does not fail a clean commit" 0
+g add draft; g commit -qm "bad file"; S6=$(g rev-parse HEAD)
+clear_sha acme/open "$S6"
+rm "$R/draft"
+push https://github.com/acme/open.git "$(line "$S6" "$S5")"; want "11f bad commit fails though the working tree is clean" 1 "found it"
+g checkout -q -- draft
+
 # 12 a tag is judged by the commit it points at
 g tag -a v1 -m v1 "$S2"; TAG=$(g rev-parse v1)
 push https://github.com/acme/open.git "refs/tags/v1 $TAG refs/tags/v1 $ZERO"$'\n'; want "12a tag on a cleared commit passes" 0

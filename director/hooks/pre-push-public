@@ -6,6 +6,8 @@
 # Seams: PUSH_GUARD_VIS_CMD <owner/repo> prints PUBLIC|PRIVATE|INTERNAL (non-zero = unknown).
 #        Default: gh repo view "<owner/repo>" --json visibility -q .visibility.
 #        PUSH_GUARD_DIR holds clears.tsv (default ~/.local/state/push-guard).
+# A clear names the tip commit of a pushed ref and covers its history; a rebase changes the tip
+# and so needs a new clear. Nothing calls this file until it is wired in as a pre-push hook.
 # git push --no-verify skips every git hook, so this catches mistakes, not a determined bypass.
 set -uo pipefail
 
@@ -126,15 +128,19 @@ for line in "${refs[@]}"; do
     continue
   fi
 
-  # scrub: judge the pushed commit, never the working tree
+  # scrub: judge the pushed commit, never the working tree. The script runs from inside the
+  # extracted copy, so one that scans "." sees the commit. It is the repo's own code: this
+  # trusts the commits being pushed as much as running the repo's tests would.
   if git ls-tree -r --name-only "$commit" 2>/dev/null | grep -qxF 'bin/oss-scrub-check'; then
-    tmp=$(mktemp -d)
-    if git archive "$commit" 2>/dev/null | tar -x -C "$tmp" 2>/dev/null && \
-       bash "$tmp/bin/oss-scrub-check" </dev/null >/dev/null 2>&1; then
-      rm -rf "$tmp"
-    else
-      echo "push-guard: scrub failed for $commit"
-      rm -rf "$tmp"
+    tmp=$(mktemp -d) || { echo "push-guard: scrub could not start for $commit"; blocked=1; continue; }
+    scrub_ok=0
+    if git archive "$commit" 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
+      scrub_out=$(cd "$tmp" && bash bin/oss-scrub-check </dev/null 2>&1) && scrub_ok=1
+    fi
+    rm -rf "$tmp"
+    if [ "$scrub_ok" -ne 1 ]; then
+      echo "push-guard: scrub failed for $commit; last lines:"
+      printf '%s\n' "${scrub_out:-}" | tail -5 | sed 's/^/  /'
       blocked=1
       continue
     fi
