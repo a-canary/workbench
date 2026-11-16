@@ -31,9 +31,21 @@ run() {
   [ -z "${BASEF:-}" ] || echo "$BASEBODY" > "$wt/$BASEF"
   git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
   local redf=${REDF:-t.sh}
+  if [ -n "${MERGE:-}" ]; then
+    # a merge RED (workbench#107): m.txt conflicts and keeps its markers; the test t.sh is added in the merge itself
+    local gc=(git -C "$wt" -c user.name=t -c user.email=t@t)
+    "${gc[@]}" checkout -qb side && echo side > "$wt/m.txt" && "${gc[@]}" add -A && "${gc[@]}" commit -qm side
+    "${gc[@]}" checkout -q - && echo main > "$wt/m.txt" && "${gc[@]}" add -A && "${gc[@]}" commit -qm main
+    # big: a long shared tail after the conflict, so a reader that stops at the first marker cuts its writer off
+    [ "$MERGE" != big ] || { seq 300000 > "$wt/tail.txt"; "${gc[@]}" checkout -q side; cat "$wt/m.txt" "$wt/tail.txt" > "$wt/m2" && mv "$wt/m2" "$wt/m.txt"; "${gc[@]}" commit -qam side2; "${gc[@]}" checkout -q -; cat "$wt/m.txt" "$wt/tail.txt" > "$wt/m2" && mv "$wt/m2" "$wt/m.txt"; rm "$wt/tail.txt"; "${gc[@]}" commit -qam main2; }
+    "${gc[@]}" merge -q side >/dev/null 2>&1
+    [ "$MERGE" = notest ] || echo '! grep -q "^<<<<<<< " m.txt && test -f ok' > "$wt/t.sh"
+    "${gc[@]}" add -A && "${gc[@]}" commit -qm "${RED_MSG:-red}"
+  else
   echo "${REDBODY:-test -f ok}" > "$wt/$redf"
   [ -z "${REDEXTRA:-}" ] || echo stub > "$wt/$REDEXTRA"
   git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm "${RED_MSG:-red}"
+  fi
   [ -z "${HOOKS:-}" ] || git -C "$wt" config core.hooksPath "$HOOKS"
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
   echo 'make ok exist' > "$tmp/task"
@@ -181,4 +193,11 @@ else echo "FAIL  review verdict reaches WORKER_TASK_LOG"; fail=1; fi
 WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-vague run "review non-PASS verdict refused" 'true' refused
 WT_EXTRA=--review WORKER_REVIEW_CMD=$tmp/rv-crash run "review command failure refused" 'true' refused
 WORKER_REVIEW_CMD=$tmp/rv-fail run "no --review: reviewer never runs" 'true' ok
+
+# workbench#107: in a merge RED the files with committed conflict markers are the work, not the test
+MERGE=1 run "merge RED: worker resolves the conflict markers" 'echo resolved > m.txt' ok
+MERGE=big run "merge RED: a large conflicted file is still the work (no SIGPIPE under pipefail)" 'echo resolved > m.txt' ok
+MERGE=1 run "merge RED: the test added in the merge stays protected" 'echo resolved > m.txt; echo true > t.sh' refused
+MERGE=notest run "merge RED with only marked files protects no test: refused" 'echo resolved > m.txt' refused
+REDF=m.txt REDBODY='<<<<<<< HEAD' TEST='test -f ok' run "linear RED: a file with markers stays protected" 'echo x > m.txt' refused
 exit $fail
