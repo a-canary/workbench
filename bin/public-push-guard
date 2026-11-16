@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# git pre-push hook (args: <remote> <url>; stdin: <lref> <lsha> <rref> <rsha>) (repos-72vu, ruling repos-sakc A)
+# A push to a GitHub repo that is not PRIVATE needs a local receipt <receipts>/<sha> whose first line is CLEAR,
+# written by an independent review of that range before the push. Unknown visibility is refused (fail closed).
+# ponytail: any agent can write a receipt file, so this catches mistakes, not an attacker; upgrade = reviewer-signed receipt.
+# ponytail: only github.com URLs are recognised; an ssh host alias for github.com passes unchecked.
+set -uo pipefail
+url=${2:-}
+receipts=${PUBLIC_PUSH_RECEIPTS:-$HOME/vault/director/push-receipts}
+cache=${PUBLIC_PUSH_CACHE:-$receipts/.visibility}  # not /tmp: a pre-made cache file there could mark a public repo PRIVATE
+# any URL naming github.com is parsed or refused, never passed: scheme, user@, :port, trailing / and .git are stripped
+[[ ${url,,} == *github.com* ]] || exit 0
+slug=$(printf '%s' "${url,,}" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^github\.com(:[0-9]+)?[:/]##; s#/+$##; s#\.git$##')
+[[ $slug =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]] || { echo "public-push-guard: cannot parse GitHub URL $url" >&2; exit 1; }
+cf="$cache/${slug/\//__}"
+vis=
+if [ -f "$cf" ] && [ -n "$(find "$cf" -mmin -1440)" ]; then vis=$(cat "$cf"); fi
+case $vis in PUBLIC|PRIVATE) ;; *) vis=$(gh repo view "$slug" --json visibility -q .visibility 2>/dev/null) || vis=
+  case $vis in PUBLIC|PRIVATE) mkdir -p "$cache" && echo "$vis" > "$cf" ;; esac ;; esac
+[ "$vis" = PRIVATE ] && exit 0
+z=0000000000000000000000000000000000000000
+while read -r lref lsha rref rsha; do
+  [ "$lsha" = "$z" ] && continue
+  [ "$vis" = PUBLIC ] || { echo "public-push-guard: visibility of $slug unknown" >&2; exit 1; }
+  [ "$(head -1 "$receipts/$lsha" 2>/dev/null)" = CLEAR ] || { echo "public-push-guard: $slug is public and $lsha has no CLEAR receipt" >&2; exit 1; }
+done
+exit 0
