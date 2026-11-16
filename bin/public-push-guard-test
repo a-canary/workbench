@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# public-push-guard-test — pre-push guard for public GitHub repos (repos-72vu), no network.
+# A stub gh answers the visibility; each case feeds pre-push stdin and checks the exit code.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+mkdir "$tmp/bin"
+cat > "$tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+[ "$STUB_VIS" = fail ] && exit 1
+echo "$STUB_VIS"
+EOF
+chmod +x "$tmp/bin/gh"
+
+sha_a=1111111111111111111111111111111111111111
+sha_b=2222222222222222222222222222222222222222
+zero=0000000000000000000000000000000000000000
+gh_url=git@github.com:own/repo.git
+
+# $1 name, $2 expected ok|refused, $3 url, $4 visibility (PUBLIC|PRIVATE|fail), $5 stdin lines
+run() {
+  : > "$tmp/ghlog"
+  printf '%b' "$5" | PATH="$tmp/bin:$PATH" GH_LOG="$tmp/ghlog" STUB_VIS="$4" \
+    PUBLIC_PUSH_RECEIPTS="$tmp/receipts" PUBLIC_PUSH_CACHE="$tmp/cache" \
+    "$here/public-push-guard" origin "$3" >/dev/null 2>&1
+  local rc=$?
+  if [ "$2" = ok ] && [ $rc -ne 0 ]; then echo "FAIL  $1 (rc=$rc)"; fail=1
+  elif [ "$2" = refused ] && [ $rc -eq 0 ]; then echo "FAIL  $1 (not refused)"; fail=1
+  else echo "PASS  $1"; fi
+}
+fresh() { rm -rf "$tmp/receipts" "$tmp/cache"; mkdir -p "$tmp/receipts"; }
+line() { echo "refs/heads/b $1 refs/heads/b $zero\n"; }
+
+fresh
+run "public repo, no receipt: refused" refused "$gh_url" PUBLIC "$(line $sha_a)"
+fresh; echo CLEAR > "$tmp/receipts/$sha_a"
+run "public repo, CLEAR receipt for the pushed sha: ok" ok "$gh_url" PUBLIC "$(line $sha_a)"
+fresh; echo BLOCK > "$tmp/receipts/$sha_a"
+run "public repo, BLOCK receipt: refused" refused "$gh_url" PUBLIC "$(line $sha_a)"
+fresh; echo CLEAR > "$tmp/receipts/$sha_b"
+run "public repo, receipt for another sha: refused" refused "$gh_url" PUBLIC "$(line $sha_a)"
+fresh; echo CLEAR > "$tmp/receipts/$sha_a"
+run "public repo, one of two refs unreceipted: refused" refused "$gh_url" PUBLIC "$(line $sha_a)$(line $sha_b)"
+fresh
+run "public repo, branch delete publishes nothing: ok" ok "$gh_url" PUBLIC "(delete) $zero refs/heads/b $sha_a\n"
+fresh
+run "private repo: ok" ok "$gh_url" PRIVATE "$(line $sha_a)"
+fresh
+run "internal or other visibility counts as not private: refused" refused "$gh_url" INTERNAL "$(line $sha_a)"
+fresh
+run "visibility unknown (gh fails): refused" refused "$gh_url" fail "$(line $sha_a)"
+fresh
+run "https url, private: ok" ok "https://github.com/own/repo" PRIVATE "$(line $sha_a)"
+/usr/bin/grep -q 'own/repo' "$tmp/ghlog" && echo "PASS  gh asked about own/repo" || { echo "FAIL  gh not asked about own/repo: $(cat "$tmp/ghlog")"; fail=1; }
+fresh
+run "non-GitHub remote (local path): ok, gh not asked" ok "$tmp/some.git" fail "$(line $sha_a)"
+[ -s "$tmp/ghlog" ] && { echo "FAIL  gh was asked about a non-GitHub remote"; fail=1; } || echo "PASS  gh not asked for a local remote"
+
+# cache: a PRIVATE answer is reused, so a later gh failure does not block
+fresh
+run "cache primed: private" ok "$gh_url" PRIVATE "$(line $sha_a)"
+run "cached private reused when gh fails: ok" ok "$gh_url" fail "$(line $sha_a)"
+# a cache entry older than a day is not trusted
+find "$tmp/cache" -type f -exec touch -d '2 days ago' {} +
+run "stale cache not used, gh fails: refused" refused "$gh_url" fail "$(line $sha_a)"
+# a cache file with junk in it is not trusted
+fresh; mkdir -p "$tmp/cache"
+run "cache primed again" ok "$gh_url" PRIVATE "$(line $sha_a)"
+find "$tmp/cache" -type f -exec sh -c 'echo junk > "$1"' _ {} \;
+run "junk cache entry not trusted, gh fails: refused" refused "$gh_url" fail "$(line $sha_a)"
+
+exit $fail
