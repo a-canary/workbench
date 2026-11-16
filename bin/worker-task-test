@@ -38,7 +38,7 @@ run() {
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
-  ATTACK=$2 WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
+  ATTACK=$2 WORKER_LANE_PROBE=true WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
     --task "$tmp/task" --test "${TEST:-sh '$redf'}" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
