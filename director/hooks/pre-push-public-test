@@ -129,6 +129,11 @@ clear_sha acme/open "$S6"
 rm "$R/draft"
 push https://github.com/acme/open.git "$(line "$S6" "$S5")"; want "11f bad commit fails though the working tree is clean" 1 "found it"
 g checkout -q -- draft
+# 11g a file the commit marks export-ignore is still pushed, so the scrub must still see it
+echo 'draft export-ignore' > "$R/.gitattributes"; g add .gitattributes; g commit -qm "hide draft from archive"; S7=$(g rev-parse HEAD)
+clear_sha acme/open "$S7"
+push https://github.com/acme/open.git "$(line "$S7" "$S6")"; want "11g export-ignore does not hide a file from the scrub" 1 "found it"
+g rm -q .gitattributes draft; g commit -qm "drop draft"
 
 # 12 a tag is judged by the commit it points at
 g tag -a v1 -m v1 "$S2"; TAG=$(g rev-parse v1)
