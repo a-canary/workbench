@@ -135,6 +135,14 @@ clear_sha acme/open "$S7"
 push https://github.com/acme/open.git "$(line "$S7" "$S6")"; want "11g export-ignore does not hide a file from the scrub" 1 "found it"
 g rm -q .gitattributes draft; g commit -qm "drop draft"
 
+# 11h a large tree is still scrubbed: the presence check must not die on a closed pipe and skip the scrub
+P8=$(g rev-parse HEAD)
+mkdir -p "$R/zz"; for i in $(seq 1 6000); do : > "$R/zz/file-with-a-long-name-$i"; done
+g show "$S7:draft" > "$R/draft"; g add zz draft; g commit -qm "big tree"; S8=$(g rev-parse HEAD)
+clear_sha acme/open "$S8"
+push https://github.com/acme/open.git "$(line "$S8" "$P8")"; want "11h large tree is still scrubbed" 1 "found it"
+g rm -rq zz draft; g commit -qm "drop big tree"
+
 # 12 a tag is judged by the commit it points at
 g tag -a v1 -m v1 "$S2"; TAG=$(g rev-parse v1)
 push https://github.com/acme/open.git "refs/tags/v1 $TAG refs/tags/v1 $ZERO"$'\n'; want "12a tag on a cleared commit passes" 0
