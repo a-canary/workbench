@@ -9,10 +9,13 @@
 # (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
 # it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
+# WORKER_LANE_PROBE: command run as `$WORKER_LANE_PROBE <port>` before the private-lane
+# worker starts; exit 0 means the endpoint answers (default: curl the /v1/models endpoint).
 set -euo pipefail
 
 log() { echo "worker-task: $*" >&2; [ -z "${WORKER_TASK_LOG:-}" ] || echo "$*" >>"$WORKER_TASK_LOG"; }
 die() { log "$*"; exit 2; }
+default_lane_probe() { curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:$1/v1/models"; }
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 wt= lane= task= test= tools=read,edit,write,bash tmo=600 push= review=
@@ -118,6 +121,14 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   fi
 fi
 
+# private lane: probe the endpoint before spending the worker timeout on a dead one
+if [ "$lane" = private ]; then
+  port=${WORKER_PRIVATE_PORT:-8099}
+  if ! ${WORKER_LANE_PROBE:-default_lane_probe} "$port"; then
+    log "private lane endpoint 127.0.0.1:$port not answering; worker not started"
+    exit 4
+  fi
+fi
 log "worker: lane=$lane tools=$tools"
 t0=$(date +%s)
 wrc=0; sbx --task "$task" --tools "$tools" --timeout "$tmo" | tee "$reply" >&2 || { wrc=$?; log "worker rc=$wrc (judging by tests)"; }
