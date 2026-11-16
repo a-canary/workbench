@@ -43,6 +43,13 @@ g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 
 mapfile -d '' -t protected < <(g show -z --name-only --format= HEAD)
+# a merge RED (2+ parents) with conflict markers committed: the marked files are the work, not the test (workbench#107)
+if g rev-parse -q --verify HEAD^2 >/dev/null; then
+  keep=()
+  # process substitution, not a pipe: under pipefail grep -q's early exit SIGPIPEs git show on a large file
+  for f in "${protected[@]}"; do grep -q '^<<<<<<< ' < <(g show "HEAD:$f" 2>/dev/null) || keep+=("$f"); done
+  protected=("${keep[@]}")
+fi
 [ ${#protected[@]} -gt 0 ] || die "HEAD (RED commit) touches no files"
 # read before the worker runs (the jail masks .git anyway)
 may_edit=$(g log -1 --format='%(trailers:key=Worker-May-Edit,valueonly)' HEAD | { grep -v '^[[:space:]]*$' || true; } | paste -sd'|')
