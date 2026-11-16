@@ -37,7 +37,21 @@ pre() { if grep -q -- "^$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no 
 has() { if grep -qxF -- "$3" "$2"; then echo "PASS  $1"; else echo "FAIL  $1: no line '$3' in:"; sed 's/^/      /' "$2"; fails=1; fi; }
 
 # --- stubs: every seam is a small script reading files under $tmp/w ---
-mkdir -p "$tmp/bin"
+mkdir -p "$tmp/bin" "$tmp/fake"
+# No tick may reach the real tmux: a fake one is first on PATH for every tick, and the idle and
+# nudge seams are stubbed unless a case clears them (case 29).
+cat >"$tmp/fake/tmux" <<'TMUX'
+#!/usr/bin/env bash
+echo "$*" >>"$W/tmux.calls"
+case $1 in
+  display-message) cat "$W/activity" 2>/dev/null ;;
+  capture-pane)    cat "$W/screen" 2>/dev/null ;;
+  send-keys)       echo "$*" >>"$W/keys" ;;
+  *)               exit 1 ;;
+esac
+TMUX
+chmod +x "$tmp/fake/tmux"
+export PATH="$tmp/fake:$PATH"   # also covers the calls below that do not go through tick
 cat >"$tmp/bin/meter" <<'EOF'
 #!/bin/bash
 cat "$W/meter" 2>/dev/null || echo "? ?"
@@ -71,7 +85,8 @@ EOF
 }
 ready() { echo "$2" >"$W/ready/$1.lead"; }
 tick() {
-  env W="$W" KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
+  env W="$W" PATH="$tmp/fake:$PATH" WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" \
+    KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
     WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
     WAKER_DRAIN_CMD="$tmp/bin/drain" "$@" "$waker" >"$W/out" 2>"$W/err"; echo $? >"$W/rc"
 }
@@ -212,6 +227,102 @@ world; ready trading t-1; ready ndv n-1
 printf '#!/bin/bash\ncat >/dev/null\ncat "$W/ready/$(basename "$1").$2" 2>/dev/null\n' >"$tmp/bin/ready-stdin"; chmod +x "$tmp/bin/ready-stdin"
 tick WAKER_READY_CMD="$tmp/bin/ready-stdin"
 check "21 both seats started" "$(started)" "ndv n-1,trading t-1,"
+
+# --- nudge: a live seat that sits idle while a bead is ready gets one message, not a second session ---
+# Two more seams (defaults are the live tmux commands):
+#   WAKER_IDLE_CMD    "<cmd> <seat>" exits 0 when the seat's live session is idle
+#                     (default: the tmux session has printed nothing for WAKER_IDLE_S seconds, default 600)
+#   WAKER_NUDGE_CMD   "<cmd> <seat> <bead>" tells the live session the bead is ready
+#                     (default: tmux send-keys one line naming the bead, then Enter)
+#   WAKER_NUDGE_GAP_S seconds before the same seat may be nudged again (default 1800; not a number = default)
+# New verdicts: nudged bead=<id> | would-nudge bead=<id> (--dry-run) | nudge-failed bead=<id> rc=<n>.
+# A live seat that is busy, has no ready bead, was nudged inside the gap, or is under a budget stop or
+# claude.down stays "running". The last nudge time lives in <seats>/.nudge/<seat>.
+cat >"$tmp/bin/idle" <<'EOF'
+#!/bin/bash
+[ -e "$W/idle/$1" ]
+EOF
+cat >"$tmp/bin/nudge" <<'EOF'
+#!/bin/bash
+echo "$1 $2" >>"$W/nudged"
+exit "$(cat "$W/nudge-rc" 2>/dev/null || echo 0)"
+EOF
+chmod +x "$tmp/bin/idle" "$tmp/bin/nudge"
+ntick() { tick WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" "$@"; }
+live_idle() { mkdir -p "$W/idle"; touch "$W/alive/$1" "$W/idle/$1"; }
+nudged() { sort "$W/nudged" 2>/dev/null | tr '\n' ','; }
+
+# 22. live, idle, bead ready: nudged with seat and bead; no second session is started
+world; ready ndv n-7; live_idle ndv; ntick
+has "22 ndv nudged" "$W/out" "seat=ndv nudged bead=n-7"
+check "22 nudge saw seat and bead" "$(nudged)" "ndv n-7,"
+check "22 nothing started" "$(started)" ""
+check "22 no plain running line for ndv" "$(grep -c '^seat=ndv running' "$W/out")" 0
+
+# 23. live and busy, or live and idle with nothing ready: running, no nudge
+world; ready ndv n-7; touch "$W/alive/ndv"; live_idle trading; ntick
+has "23 busy seat running" "$W/out" "seat=ndv running"
+has "23 idle seat with no bead running" "$W/out" "seat=trading running"
+check "23 nobody nudged" "$(nudged)" ""
+
+# 24. the gap: a second tick does not nudge again; a gap of 0 does; a gap that is not a number is the default
+world; ready ndv n-7; live_idle ndv; ntick; ntick
+has "24 second tick is running" "$W/out" "seat=ndv running"
+check "24 nudged once" "$(nudged)" "ndv n-7,"
+ntick WAKER_NUDGE_GAP_S=0
+check "24 gap 0 nudges again" "$(nudged)" "ndv n-7,ndv n-7,"
+ntick WAKER_NUDGE_GAP_S=soon
+check "24 bad gap means the default, not no gap" "$(nudged)" "ndv n-7,ndv n-7,"
+
+# 25. --dry-run names the nudge and sends nothing, and does not start the gap
+world; ready ndv n-7; live_idle ndv
+env W="$W" PATH="$tmp/fake:$PATH" WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" \
+  WAKER_ALIVE_CMD="$tmp/bin/alive" WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" WAKER_DRAIN_CMD="" \
+  "$waker" --dry-run >"$W/out" 2>"$W/err"
+has "25 would-nudge" "$W/out" "seat=ndv would-nudge bead=n-7"
+check "25 nothing sent" "$(nudged)" ""
+ntick
+check "25 real tick after a dry run still nudges" "$(nudged)" "ndv n-7,"
+
+# 26. no nudge while Claude is down or the budget says stop; the seat stays running
+world; ready ndv n-7; live_idle ndv; touch "$W/seats/claude.down"; ntick
+has "26 claude.down: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; live_idle ndv; echo "0.95 0.50" >"$W/meter"; ntick
+has "26 budget stop: running" "$W/out" "seat=ndv running"
+check "26 nobody nudged" "$(nudged)" ""
+
+# 27. a nudge that fails is named, does not stop the tick, and does not start the gap
+world; ready ndv n-7; ready stack s-1; live_idle ndv; echo 4 >"$W/nudge-rc"; ntick
+has "27 failure named" "$W/out" "seat=ndv nudge-failed bead=n-7 rc=4"
+check "27 other seat still started" "$(started)" "stack s-1,"
+check "27 exit 0" "$(cat "$W/rc")" 0
+echo 0 >"$W/nudge-rc"; ntick
+check "27 retried on the next tick" "$(nudged)" "ndv n-7,ndv n-7,"
+
+# 28. a nudged seat still holds its slot, and the off switch still stops everything
+world; ready trading t-1; ready ndv n-7; ready stack s-1; live_idle ndv; ntick WAKER_CLAUDE_SLOTS=2
+has "28 trading started" "$W/out" "seat=trading started bead=t-1"
+has "28 stack has no slot" "$W/out" "seat=stack no-slot bead=s-1"
+world; ready ndv n-7; live_idle ndv; touch "$W/seats/waker.off"; ntick
+check "28 off: nobody nudged" "$(nudged)" ""
+
+# 29. the default idle check and nudge (fake tmux): a quiet screen is nudged; a screen showing a
+#     question is never typed into; a recently active or unreadable one is left alone
+dtick() { tick WAKER_IDLE_CMD= WAKER_NUDGE_CMD= "$@"; }
+quiet() { touch "$W/alive/ndv"; echo 1000 >"$W/activity"; printf '> \n' >"$W/screen"; }
+world; ready ndv n-7; quiet; dtick
+has "29 quiet screen nudged" "$W/out" "seat=ndv nudged bead=n-7"
+check "29 keys name the bead" "$(grep -c 'bd show n-7' "$W/keys")" "1"
+check "29 every tmux call names the exact session" "$(grep -vc -- '-t =ndv:' "$W/tmux.calls")" "0"
+world; ready ndv n-7; quiet; printf 'Do you want to proceed?\n❯ 1. Yes\n' >"$W/screen"; dtick
+has "29 dialog on screen: running" "$W/out" "seat=ndv running"
+check "29 dialog on screen: nothing typed" "$(cat "$W/keys" 2>/dev/null)" ""
+world; ready ndv n-7; quiet; date +%s >"$W/activity"; dtick
+has "29 recent activity: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; quiet; : >"$W/screen"; dtick
+has "29 unreadable screen: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; quiet; dtick WAKER_IDLE_S=soon
+has "29 bad idle seconds means the default" "$W/out" "seat=ndv nudged bead=n-7"
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
