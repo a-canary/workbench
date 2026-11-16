@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# public-push-review-test — review-then-receipt wrapper for public pushes (repos-ga1o), no network.
+# A stub defend-attack (DEFEND_ATTACK) answers CLEAR or BLOCK; each case checks exit code and receipt.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+cat > "$tmp/defend-attack" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --diff ] || exit 2
+cp "$2" "$STUB_DIFF_COPY"
+case "$STUB_VERDICT" in
+  CLEAR) echo "VERDICT: CLEAR by=local"; exit 0 ;;
+  BLOCK) echo "Blocking: bad"; echo "VERDICT: BLOCK by=local"; exit 1 ;;
+  *) echo "defend-attack: Opus reply unreadable"; exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/defend-attack"
+
+repo="$tmp/repo"
+git init -q -b master "$repo"
+git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+git -C "$repo" checkout -q -b feat
+echo hello > "$repo/f.txt"
+git -C "$repo" add f.txt
+git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m feat
+head_sha=$(git -C "$repo" rev-parse HEAD)
+
+# $1 name, $2 verdict, $3 expected rc, $4 expect receipt yes|no
+run() {
+  rm -rf "$tmp/receipts" "$tmp/diff"
+  (cd "$repo" && DEFEND_ATTACK="$tmp/defend-attack" STUB_VERDICT="$2" STUB_DIFF_COPY="$tmp/diff" \
+    PUBLIC_PUSH_RECEIPTS="$tmp/receipts" "$here/public-push-review" master >/dev/null 2>&1)
+  local rc=$? ok=1
+  [ $rc -eq "$3" ] || ok=0
+  if [ "$4" = yes ]; then
+    [ "$(head -1 "$tmp/receipts/$head_sha" 2>/dev/null)" = CLEAR ] || ok=0
+  else
+    [ ! -e "$tmp/receipts/$head_sha" ] || ok=0
+  fi
+  if [ $ok = 1 ]; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$rc)"; fail=1; fi
+}
+
+run "CLEAR writes receipt for HEAD"      CLEAR  0 yes
+run "BLOCK writes no receipt"            BLOCK  1 no
+run "unreadable writes no receipt"       BROKEN 2 no
+
+# the reviewed diff is base...HEAD
+run "diff reviewed is base...HEAD" CLEAR 0 yes
+if grep -q '^+hello$' "$tmp/diff" 2>/dev/null; then echo "PASS  diff content"; else echo "FAIL  diff content"; fail=1; fi
+
+# dirty worktree is refused: the receipt would name a sha whose tree differs from what was reviewed
+echo dirty >> "$repo/f.txt"
+run "dirty worktree refused, no receipt" CLEAR 1 no
+git -C "$repo" checkout -q -- f.txt
+
+exit $fail
