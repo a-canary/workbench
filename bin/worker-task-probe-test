@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# worker-task-probe-test — worker-task asks the private lane endpoint whether it answers before the worker starts.
+# A dead endpoint used to cost the whole worker timeout (2400 s and 900 s with zero output on 2026-11-16, repos-w6mh).
+# Seam: WORKER_LANE_PROBE is a command run as `$WORKER_LANE_PROBE <port>`; exit 0 = the endpoint answers.
+# A stub replaces worker-sandbox: --exec runs the command, --task plays a worker that makes the test pass.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+cat > "$tmp/stub" <<'EOF'
+#!/usr/bin/env bash
+wt=$2; cd "$wt" || exit 9
+while [ $# -gt 0 ]; do [ "$1" = --exec ] && { shift; exec "$@"; }; shift; done
+touch ok "$RAN"
+EOF
+printf '#!/usr/bin/env bash\necho "$1" >> "$PROBE_LOG"\nexit "$PROBE_RC"\n' > "$tmp/probe"
+chmod +x "$tmp/stub" "$tmp/probe"
+
+# $1 name  $2 lane  $3 probe exit code  -> sets rc, err, ran (yes|no), probed (ports seen, space separated)
+run() {
+  local wt; wt=$(mktemp -d "$tmp/wt-XXXXXX")
+  git init -q "$wt"; echo base > "$wt/base"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm base
+  echo 'test -f ok' > "$wt/t.sh"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm red
+  echo 'make ok exist' > "$tmp/task"
+  rm -f "$tmp/ran" "$tmp/probe.log"
+  err=$(env RAN="$tmp/ran" PROBE_LOG="$tmp/probe.log" PROBE_RC=$3 WORKER_LANE_PROBE="$tmp/probe" WORKER_SANDBOX="$tmp/stub" \
+    ${PORT:+WORKER_PRIVATE_PORT=$PORT} "$here/worker-task" --worktree "$wt" --lane "$2" --task "$tmp/task" --test "sh t.sh" 2>&1 >/dev/null)
+  rc=$?
+  ran=no; [ -e "$tmp/ran" ] && ran=yes
+  probed=; [ -f "$tmp/probe.log" ] && probed=$(tr '\n' ' ' < "$tmp/probe.log" | sed 's/ $//')
+}
+ok() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$rc ran=$ran probed='$probed')"; fail=1; fi; }
+
+run dead private 1
+ok "a dead private endpoint stops the run with exit 4" '[ "$rc" = 4 ]'
+ok "the worker never starts on a dead endpoint" '[ "$ran" = no ]'
+ok "the message names the endpoint and port" 'grep -q "not answering" <<<"$err" && grep -q 8099 <<<"$err"'
+ok "the probe is asked once, with the default port" '[ "$probed" = 8099 ]'
+
+PORT=8097 run dead-other-port private 1
+ok "the probe gets WORKER_PRIVATE_PORT" '[ "$probed" = 8097 ] && grep -q 8097 <<<"$err"'
+
+run alive private 0
+ok "an answering endpoint lets the run finish green" '[ "$rc" = 0 ] && [ "$ran" = yes ]'
+
+# the public lane has its own endpoint and key: the private probe says nothing about it
+run public public 1
+ok "the public lane is not probed" '[ -z "$probed" ]'
+
+[ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILED"
+exit "$fail"
