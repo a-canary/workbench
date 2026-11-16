@@ -15,7 +15,9 @@ while [ $# -gt 0 ]; do [ "$1" = --exec ] && { shift; exec "$@"; }; shift; done
 touch ok "$RAN"
 EOF
 printf '#!/usr/bin/env bash\necho "$1" >> "$PROBE_LOG"\nexit "$PROBE_RC"\n' > "$tmp/probe"
-chmod +x "$tmp/stub" "$tmp/probe"
+# repos-ns7m: with no port given worker-task picks a lane by depth; pin it to 8099 so these cases stay about the probe
+printf '#!/usr/bin/env bash\n[ "$1" = 8099 ] && echo 0 || exit 1\n' > "$tmp/depth"
+chmod +x "$tmp/stub" "$tmp/probe" "$tmp/depth"
 
 # $1 name  $2 lane  $3 probe exit code  -> sets rc, err, ran (yes|no), probed (ports seen, space separated)
 run() {
@@ -26,7 +28,7 @@ run() {
   git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm red
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/ran" "$tmp/probe.log"
-  err=$(env RAN="$tmp/ran" PROBE_LOG="$tmp/probe.log" PROBE_RC=$3 WORKER_LANE_PROBE="$tmp/probe" WORKER_SANDBOX="$tmp/stub" \
+  err=$(env RAN="$tmp/ran" PROBE_LOG="$tmp/probe.log" PROBE_RC=$3 WORKER_LANE_PROBE="$tmp/probe" WORKER_LANE_DEPTH="$tmp/depth" WORKER_SANDBOX="$tmp/stub" \
     ${PORT:+WORKER_PRIVATE_PORT=$PORT} "$here/worker-task" --worktree "$wt" --lane "$2" --task "$tmp/task" --test "sh t.sh" 2>&1 >/dev/null)
   rc=$?
   ran=no; [ -e "$tmp/ran" ] && ran=yes

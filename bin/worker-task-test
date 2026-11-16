@@ -18,6 +18,13 @@ touch ok && eval "$ATTACK"
 EOF
 chmod +x "$tmp/stub"
 
+# repos-ns7m seam: WORKER_LANE_DEPTH is run as `$WORKER_LANE_DEPTH <port>`; it prints the lane's queue depth
+# (waiting + in flight) and exits non-zero when the lane is down. DEPTH_<port>=down|<n> drives the stub.
+# The probe stub logs the port worker-task chose.
+printf '#!/usr/bin/env bash\nv=DEPTH_$1; v=${!v:-0}; [ "$v" = down ] && exit 1; echo "$v"\n' > "$tmp/depth"
+printf '#!/usr/bin/env bash\necho "$1" >> "$CHOSEN"\n' > "$tmp/probe"
+chmod +x "$tmp/depth" "$tmp/probe"
+
 # a git whose staged-names listing errors: the runner-config check must fail closed, not skip
 mkdir "$tmp/gitfail"
 printf '#!/usr/bin/env bash\ncase " $* " in *" --cached --no-renames "*) exit 128 ;; esac\nexec %q "$@"\n' "$(command -v git)" > "$tmp/gitfail/git"
@@ -50,7 +57,7 @@ run() {
   [ -z "${PUSH:-}" ] || { git init -q --bare "$wt.remote" && git -C "$wt" remote add origin "$wt.remote"; }
   echo 'make ok exist' > "$tmp/task"
   rm -f "$tmp/pwned"
-  ATTACK=$2 WORKER_LANE_PROBE=true WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
+  ATTACK=$2 WORKER_LANE_PROBE=${PROBE:-true} WORKER_LANE_DEPTH="$tmp/depth" WORKER_SANDBOX="$tmp/stub" "$here/worker-task" --worktree "$wt" --lane "${LANE:-private}" \
     --task "$tmp/task" --test "${TEST:-sh '$redf'}" ${PUSH:+--push} ${WT_EXTRA:-} >/dev/null 2>&1
   local rc=$?
   git -C "$wt" status >/dev/null 2>&1   # what any later human/agent would do
@@ -200,4 +207,20 @@ MERGE=big run "merge RED: a large conflicted file is still the work (no SIGPIPE 
 MERGE=1 run "merge RED: the test added in the merge stays protected" 'echo resolved > m.txt; echo true > t.sh' refused
 MERGE=notest run "merge RED with only marked files protects no test: refused" 'echo resolved > m.txt' refused
 REDF=m.txt REDBODY='<<<<<<< HEAD' TEST='test -f ok' run "linear RED: a file with markers stays protected" 'echo x > m.txt' refused
+# repos-ns7m: with no WORKER_PRIVATE_PORT, worker-task picks the private lane (8099 or 8097) by queue depth
+lane_case() {  # $1 name  $2 expected chosen port (or "none")  $3 expected rc class
+  rm -f "$tmp/chosen"; CHOSEN=$tmp/chosen WORKER_TASK_LOG=$tmp/lanelog PROBE=$tmp/probe run "$1" 'true' "$3"
+  local got; got=$(cat "$tmp/chosen" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'); [ -n "$got" ] || got=none
+  if [ "$got" = "$2" ]; then echo "PASS  $1: lane $2"; else echo "FAIL  $1: chose '$got', want $2"; fail=1; fi
+}
+DEPTH_8099=5 DEPTH_8097=1 lane_case "no port, 8099 busier than 8097" 8097 ok
+DEPTH_8099=0 DEPTH_8097=0 lane_case "no port, equal depth keeps 8099" 8099 ok
+DEPTH_8099=3 DEPTH_8097=down lane_case "no port, 8097 down" 8099 ok
+DEPTH_8099=down DEPTH_8097=4 lane_case "no port, 8099 down" 8097 ok
+WORKER_PRIVATE_PORT=8099 DEPTH_8099=9 DEPTH_8097=0 lane_case "explicit WORKER_PRIVATE_PORT wins" 8099 ok
+rm -f "$tmp/lanelog"
+DEPTH_8099=down DEPTH_8097=down lane_case "both lanes down: no worker, rc 4" none rc4
+if grep -q 'no private lane' "$tmp/lanelog" && grep -q 8099 "$tmp/lanelog" && grep -q 8097 "$tmp/lanelog"; then
+  echo "PASS  both lanes down: the log says no private lane and names both ports"
+else echo "FAIL  both lanes down: the log says no private lane and names both ports"; fail=1; fi
 exit $fail
