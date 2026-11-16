@@ -18,11 +18,27 @@ SWEEP_LOG="$WORKBENCH_DIR/BENCH/sweep-$(date -u +%Y-%m-%d).log"
 DRY_RUN=0
 if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; fi
 
+# last_tested per component lives outside the repo: committing it on the shared checkout diverged master (repos-ewmf)
+SWEEP_STATE="${SWEEP_STATE:-$HOME/.local/state/workbench/last-tested.json}"
+
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$SWEEP_LOG"; }
 
 # qualified <bench output> — a summary line with at least one pass (dry-run always qualifies).
 qualified() {
     [[ $DRY_RUN -eq 1 ]] || { grep -q 'passed [0-9]*/' <<<"$1" && ! grep -q 'passed 0/' <<<"$1"; }
+}
+
+# last_tested <component>: the last qualified sha, or empty.
+last_tested() {
+    jq -r --arg c "$1" '.[$c] // ""' "$SWEEP_STATE" 2>/dev/null || true
+}
+
+# record_tested <component> <sha>: store the qualified sha (atomic replace). A missing or corrupt state file
+# starts over from {} (costs one re-bench per component); a failed write returns non-zero for the caller to log.
+record_tested() {
+    mkdir -p "$(dirname "$SWEEP_STATE")" || return 1
+    local cur; cur=$(jq -ce 'objects' "$SWEEP_STATE" 2>/dev/null) || cur='{}'
+    jq --arg c "$1" --arg s "$2" '.[$c] = $s' <<<"$cur" > "$SWEEP_STATE.tmp" && mv "$SWEEP_STATE.tmp" "$SWEEP_STATE"
 }
 
 # inert_only <repo> <from> <to>: 0 iff every changed path is inert (docs/*.md, .beads/, .github/, LICENSE, README, CHANGELOG);
@@ -112,7 +128,7 @@ log "$COMPONENT: current=$CURRENT_REF latest=$LATEST"
 # If no new commits, skip
 if [[ "$CURRENT_REF" == "main" ]]; then
     # Check if the current HEAD matches what we already tested
-    LAST_TESTED=$(jq -r --arg c "$COMPONENT" ".components[\$c].last_tested // \"\"" "$WORKBENCH_DIR/manifest.json" 2>/dev/null || echo "")
+    LAST_TESTED=$(last_tested "$COMPONENT")
     if [[ "$LAST_TESTED" == "$LATEST" ]]; then
         log "$COMPONENT: no new commits since last sweep, skipping"
     else
@@ -133,22 +149,8 @@ if [[ "$CURRENT_REF" == "main" ]]; then
                 log "$COMPONENT: tests passed, updating manifest"
 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    # Update manifest.json with new last_tested
-                    python3 -c "
-import json
-with open('$WORKBENCH_DIR/manifest.json') as f:
-    m = json.load(f)
-m['components']['$COMPONENT']['last_tested'] = '$LATEST'
-m['qualified'] = '$(date -u +%Y-%m-%d)'
-with open('$WORKBENCH_DIR/manifest.json', 'w') as f:
-    json.dump(m, f, indent=2)
-"
-
-                    # Commit and push
-                    run git -C "$WORKBENCH_DIR" add manifest.json
-                    run git -C "$WORKBENCH_DIR" commit -m "sweep: $COMPONENT qualified at $LATEST"
-                    run git -C "$WORKBENCH_DIR" push
-                    log "$COMPONENT: published"
+                    record_tested "$COMPONENT" "$LATEST" || log "$COMPONENT: WARN could not write $SWEEP_STATE; it will re-bench next run"
+                    log "$COMPONENT: qualified at $LATEST"
 
                     # Auto-deploy qualified manifest to live workspace
                     apply_manifest
