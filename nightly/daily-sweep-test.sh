@@ -24,6 +24,18 @@ record_tested skills abc123 >/dev/null 2>&1
 check "record then read back" "$(last_tested skills 2>/dev/null)" "abc123"
 record_tested pi-extensions def456 >/dev/null 2>&1
 check "components are kept apart" "$(last_tested skills 2>/dev/null) $(last_tested pi-extensions 2>/dev/null)" "abc123 def456"
+echo 'garbage{' > "$SWEEP_STATE"
+record_tested skills ghi789 >/dev/null 2>&1
+check "a corrupt state file starts over" "$(last_tested skills 2>/dev/null)" "ghi789"
+echo '   ' > "$SWEEP_STATE"
+record_tested skills jkl012 >/dev/null 2>&1
+check "a whitespace-only state file starts over" "$(last_tested skills 2>/dev/null)" "jkl012"
+echo '["not","an","object"]' > "$SWEEP_STATE"
+record_tested skills mno345 >/dev/null 2>&1
+check "a non-object state file starts over" "$(last_tested skills 2>/dev/null)" "mno345"
+SWEEP_STATE=$st/state-file-not-dir/x.json; : > "$st/state-file-not-dir"
+check "a failed write returns non-zero" "$(record_tested skills x >/dev/null 2>&1; echo $?)" "1"
+SWEEP_STATE=$st/state/last-tested.json
 check "manifest.json is untouched" "$(cmp -s "$st/before" "$WORKBENCH_DIR/manifest.json" && echo same)" "same"
 check "the sweep never commits or pushes the workbench checkout" \
   "$(grep -cE 'git -C "?\$WORKBENCH_DIR"? (add|commit|push)' "$here/daily-sweep.sh")" "0"

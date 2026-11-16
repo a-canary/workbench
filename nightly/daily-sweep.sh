@@ -33,11 +33,12 @@ last_tested() {
     jq -r --arg c "$1" '.[$c] // ""' "$SWEEP_STATE" 2>/dev/null || true
 }
 
-# record_tested <component> <sha>: store the qualified sha (atomic replace).
+# record_tested <component> <sha>: store the qualified sha (atomic replace). A missing or corrupt state file
+# starts over from {} (costs one re-bench per component); a failed write returns non-zero for the caller to log.
 record_tested() {
-    mkdir -p "$(dirname "$SWEEP_STATE")"
-    local cur; cur=$(cat "$SWEEP_STATE" 2>/dev/null) || cur='{}'
-    jq --arg c "$1" --arg s "$2" '.[$c] = $s' <<<"${cur:-{\}}" > "$SWEEP_STATE.tmp" && mv "$SWEEP_STATE.tmp" "$SWEEP_STATE"
+    mkdir -p "$(dirname "$SWEEP_STATE")" || return 1
+    local cur; cur=$(jq -ce 'objects' "$SWEEP_STATE" 2>/dev/null) || cur='{}'
+    jq --arg c "$1" --arg s "$2" '.[$c] = $s' <<<"$cur" > "$SWEEP_STATE.tmp" && mv "$SWEEP_STATE.tmp" "$SWEEP_STATE"
 }
 
 # inert_only <repo> <from> <to>: 0 iff every changed path is inert (docs/*.md, .beads/, .github/, LICENSE, README, CHANGELOG);
@@ -148,7 +149,7 @@ if [[ "$CURRENT_REF" == "main" ]]; then
                 log "$COMPONENT: tests passed, updating manifest"
 
                 if [[ $DRY_RUN -eq 0 ]]; then
-                    record_tested "$COMPONENT" "$LATEST"
+                    record_tested "$COMPONENT" "$LATEST" || log "$COMPONENT: WARN could not write $SWEEP_STATE; it will re-bench next run"
                     log "$COMPONENT: qualified at $LATEST"
 
                     # Auto-deploy qualified manifest to live workspace
