@@ -106,6 +106,10 @@ r=$(SEAT_JUDGE_FALLBACK="echo the answer is ghc" run Bash 'sudo ls'); check "fal
 r=$(SEAT_JUDGE_FALLBACK="echo boss" run Bash 'sudo ls'); check "fallback misfit denied" "${r%%|*}" "2"
 r=$(SEAT_JUDGE_FALLBACK="echo nobody" run Bash 'sudo ls'); check "fallback unknown name denied" "${r%%|*}" "2"
 
+# a crash inside the python program (here a syntax error) must deny, never exit 1
+sed 's/^import json, sys/import json, sys (/' "$tmp/wb/bin/seat-judge" >"$tmp/wb/bin/broken" && chmod +x "$tmp/wb/bin/broken"
+"$tmp/wb/bin/broken" <<<'{"tool_name":"Read","tool_input":{}}' >/dev/null 2>&1; check "crashed judge denies" "$?" "2"
+
 check "log has judged lines" "$(grep -c ' ghc ' "$SEAT_JUDGE_LOG")" "29"
 has "log line shape" "$(head -1 "$SEAT_JUDGE_LOG")" " ghc deny boss sudo systemctl restart nginx"
 
