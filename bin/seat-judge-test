@@ -99,6 +99,11 @@ r=$(SEAT_JUDGE_DEADLINE=3 SEAT_JUDGE_FALLBACK="echo ghc" run Bash 'sudo ls'); rm
 check "slow-drip JEV denied" "${r%%|*}" "2"
 has "deadline named" "$r" "deadline"
 check "deadline held" "$(( SECONDS - t0 < 8 ))" "1"
+# ppr R4: DEADLINE=0 must not become alarm(0) (no deadline, fail open); the 1 s floor still denies a drip
+touch "$tmp/drip"; t0=$SECONDS
+r=$(SEAT_JUDGE_DEADLINE=0 SEAT_JUDGE_FALLBACK="echo ghc" run Bash 'sudo ls'); rm -f "$tmp/drip"
+check "deadline 0 still denies a drip" "${r%%|*}" "2"
+check "deadline 0 floored, held" "$(( SECONDS - t0 < 8 ))" "1"
 ( sleep 10 ) | SEAT_JUDGE_DEADLINE=2 "$tmp/wb/bin/seat-judge" >/dev/null 2>&1; check "stdin that never closes denied" "$?" "2"
 r=$(SEAT_JUDGE_DEADLINE=999 run Bash 'sudo ls'); check "deadline env cannot raise above 50 (still answers)" "${r%%|*}" "0"
 # ponytail: a source check, not a 50 s drip run; deleting the cap must fail here
