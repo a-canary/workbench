@@ -45,15 +45,16 @@ if not command:
     sys.exit(0)
 
 # 2. Privileged word at command position
-# ponytail: regex finds privileged words at command positions; bash -c "$(...)" or an alias evades it.
-# The hard stop is sudoers (only master has sudo); this gate routes, it does not contain.
+# ponytail: regex finds privileged words at command positions, through absolute paths, VAR=, env/exec/xargs-style
+# wrappers, backticks and $( ). bash -c strings, aliases and functions still evade it. The hard stop is sudoers
+# (only master has sudo); this gate routes, it does not contain.
 PRIV = r"sudo|su|ufw|crontab|docker|lxc|apt-get|apt|dpkg|snap|useradd|usermod|visudo"
-PRIV_RE = re.compile(r"(?:^|[;&|(\n]|&&|\|\|)\s*(?:" + PRIV + r")\b")
-SYSCTL_RE = re.compile(r"(?:^|[;&|(\n]|&&|\|\|)\s*systemctl\b")
+START = r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:env|exec|xargs|nohup|time|nice|command|builtin|[A-Za-z_]\w*=\S*)\s+)*(?:\S*/)?"
+PRIV_RE = re.compile(START + r"(?:" + PRIV + r")\b")
+# system scope unless --user appears in the same simple command
+SYSCTL_RE = re.compile(START + r"systemctl\b(?![^;&|\n]*--user)")
 
-privileged = bool(PRIV_RE.search(command))
-if not privileged and SYSCTL_RE.search(command) and "--user" not in command:
-    privileged = True
+privileged = bool(PRIV_RE.search(command) or SYSCTL_RE.search(command))
 
 if not privileged:
     sys.exit(0)
