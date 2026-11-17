@@ -124,6 +124,31 @@ REDBODY='[ -f ok ] || no-such-cmd-wb-s8v' \
   run "test command not found in RED is infra (rc 4)" 'true' rc4
 REDBODY='[ -f ok ] && exit 126; exit 1' \
   run "test command not executable in GREEN is infra (rc 4)" 'true' rc4
+# repos-v5j7: a test runner the jail does not have (pytest lives in the host's ~/.local, which the jail masks) exits 1,
+# not 127, inside `python3 -m` or a `|| exit 1` loop: infra, rc 4, before the worker spends its timeout (laneproxy 4lti.1)
+for msg in '/usr/bin/python3: No module named pytest' 'sh: 1: vitest: not found' 'bash: line 1: pytest: command not found'; do
+  REDBODY="echo '$msg' >&2; exit 1" run "infra RED: $msg (rc 4)" 'true' rc4
+done
+REDBODY='echo "ModuleNotFoundError: No module named impl" >&2; test -f ok' \
+  run "a module the worker is to write is still a valid RED" 'true' ok
+REDBODY='echo "sh: 1: ./bin/impl: not found" >&2; test -f ok' \
+  run "a script the worker is to write is still a valid RED" 'true' ok
+REDBODY='echo "/usr/bin/python3: No module named mytool" >&2; test -f ok' \
+  run "python -m on a module the worker is to write is still a valid RED" 'true' ok
+REDBODY='echo "sh: 1: mytool: not found" >&2; test -f ok' \
+  run "a bare tool the worker is to write is still a valid RED" 'true' ok
+# ...and in the baseline: the rest of the Test can never pass in the jail, so stop before the worker, not after it
+rm -f "$tmp/v5j7-ran"
+BASEF=lint.sh BASEBODY='echo "/usr/bin/python3: No module named pytest" >&2; exit 1' TEST="sh t.sh && sh lint.sh" \
+  run "runner missing in the baseline is infra (rc 4)" "touch $tmp/v5j7-ran" rc4
+if [ -e "$tmp/v5j7-ran" ]; then echo "FAIL  runner missing in the baseline spawns no worker"; fail=1; else echo "PASS  runner missing in the baseline spawns no worker"; fi
+# a red sibling suite whose failing case echoes a missing tool is the advisory baseline, not a stop
+BASEF=lint.sh BASEBODY='echo "sh: 1: foo: not found"; echo "FAIL lint"; exit 1' TEST="sh t.sh && sh lint.sh" \
+  run "sibling suite printing a missing tool is the advisory rc 7, not infra" 'touch ok' rc7
+# a hand-launched run lends the main checkout's .venv and node_modules, as lane-run does
+REDBODY="echo \"\$WORKER_VENV \$WORKER_DEPS\" > $tmp/v5j7-env; test -f ok" run "deps default: run completes" 'true' ok
+if grep -qE '^/.*/wt-[^/]+/\.venv /.*/wt-[^/]+/node_modules$' "$tmp/v5j7-env" 2>/dev/null
+then echo "PASS  deps default to the main checkout's"; else echo "FAIL  deps default to the main checkout's"; fail=1; fi
 run "ordinary src/config.ts edit allowed" 'mkdir -p src && echo "export {}" > src/config.ts' ok
 run "vite.config.ts refused" 'echo x > vite.config.ts' refused
 run "GNUmakefile refused" 'echo "test:;true" > GNUmakefile' refused

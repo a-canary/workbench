@@ -48,6 +48,9 @@ done
 # quotePath off so non-ASCII names match as pathspecs and patterns instead of slipping past them quoted
 g() { git -C "$wt" -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.quotePath=false "$@"; }
 g diff --quiet HEAD && [ -z "$(g status --porcelain --ignore-submodules=all)" ] || die "worktree not clean"
+# a hand-launched run lends the main checkout's deps, as lane-run does; a caller's value (even empty) wins (repos-v5j7)
+main=$(g worktree list --porcelain | sed -n '1s/^worktree //p')
+export WORKER_VENV=${WORKER_VENV-$main/.venv} WORKER_DEPS=${WORKER_DEPS-$main/node_modules}
 
 sbx() { "${WORKER_SANDBOX:-$here/worker-sandbox}" --worktree "$wt" --lane "$lane" "$@"; }
 
@@ -110,7 +113,7 @@ fi
 # a GREEN failure is errors the worker never protected (whole-project tsc, a red sibling suite; wb-e22), not the model.
 # Each &&-segment naming a RED file by stem as a whole word (foo for src/foo.test.ts) becomes `true`, so a cd or
 # setup segment still runs; a Test with no such segment (a glob, directory or -k/-t filter) is not judged.
-# Advisory only: it relabels a failed GREEN as rc 7 and never stops a run.
+# Advisory only: it relabels a failed GREEN as rc 7 and stops a run only for a runner the jail lacks.
 # ponytail: naive split on '&&'; a split that breaks the shell (a quoted or subshell &&) skips the baseline
 base_test= keep= scoped=
 while IFS= read -r seg; do
@@ -130,6 +133,12 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   fi
   rm -f "$basedir.idx"
   if [ $base_rc -eq 0 ]; then :
+  # first non-blank line only: a missing runner fails before any output, a red sibling's failing case may echo one
+  elif grep -aqE -- "$runner_pat" < <(grep -avm1 '^[[:space:]]*$' "$red_out"); then
+    # the one baseline result that stops a run: the worker cannot install a runner, so GREEN can never pass (repos-v5j7)
+    cat "$red_out" >&2
+    log "baseline: test runner missing in the sandbox; drop it from the Test, or lend it in the repo's .venv or node_modules"
+    exit 4
   elif [ $base_rc -eq 124 ] || [ $base_rc -eq 126 ] || [ $base_rc -eq 127 ] || [ $base_rc -eq 137 ] || startup_crash "$red_out" red; then
     log "baseline timed out or crashed at startup (rc $base_rc); not judged"
   else
