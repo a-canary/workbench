@@ -309,7 +309,10 @@ check "28 off: nobody nudged" "$(nudged)" ""
 # 29. the default idle check and nudge (fake tmux): a quiet screen is nudged; a screen showing a
 #     question is never typed into; a recently active or unreadable one is left alone
 dtick() { tick WAKER_IDLE_CMD= WAKER_NUDGE_CMD= "$@"; }
-quiet() { touch "$W/alive/ndv"; echo 1000 >"$W/activity"; printf '> \n' >"$W/screen"; }
+# repos-hjhwx: idle = screen text unchanged for WAKER_IDLE_S, kept in <seats>/.screen/<seat> (line 1 the
+# epoch it was first seen, then the text). window_activity is ignored: a pi status redraw keeps it fresh.
+quiet() { touch "$W/alive/ndv"; date +%s >"$W/activity"; printf '> \n' >"$W/screen"
+  mkdir -p "$W/seats/.screen"; printf '1000\n> \n' >"$W/seats/.screen/ndv"; }
 world; ready ndv n-7; quiet; dtick
 has "29 quiet screen nudged" "$W/out" "seat=ndv nudged bead=n-7"
 check "29 keys name the bead" "$(grep -c 'bd show n-7' "$W/keys")" "1"
@@ -322,8 +325,12 @@ check "29 every tmux call names the exact session" "$(grep -vc -- '-t =ndv:' "$W
 world; ready ndv n-7; quiet; printf 'Do you want to proceed?\n❯ 1. Yes\n' >"$W/screen"; dtick
 has "29 dialog on screen: running" "$W/out" "seat=ndv running"
 check "29 dialog on screen: nothing typed" "$(cat "$W/keys" 2>/dev/null)" ""
-world; ready ndv n-7; quiet; date +%s >"$W/activity"; dtick
-has "29 recent activity: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; quiet; printf 'working...\n' >"$W/screen"; dtick
+has "29 changed screen: running" "$W/out" "seat=ndv running"
+check "29 changed screen recorded" "$(tail -n +2 "$W/seats/.screen/ndv")" "working..."
+dtick; has "29 same screen, first seen just now: running" "$W/out" "seat=ndv running"
+world; ready ndv n-7; touch "$W/alive/ndv"; printf '> \n' >"$W/screen"; dtick
+has "29 first sight: running" "$W/out" "seat=ndv running"
 world; ready ndv n-7; quiet; : >"$W/screen"; dtick
 has "29 unreadable screen: running" "$W/out" "seat=ndv running"
 world; ready ndv n-7; quiet; dtick WAKER_IDLE_S=soon
