@@ -4,7 +4,8 @@ Reads only timestamps, tool names and short snippets from Claude Code session lo
 Usage: agent-profile OUTDIR FILE...   writes OUTDIR/<session8>.json and prints one line per session of 30+ minutes.
 Then: agent-profile-label OUTDIR      has a model label what each idle stretch was waiting on.
 AGENT_PROFILE_NOW=<ISO time> pins "now" (tests).
-ponytail: parallel tool calls each count their own duration in by-tool totals; wall split uses gaps, so it is exact.
+ponytail: parallel tool calls each count their own duration in by-tool totals; wall split uses gaps between
+in-order events, so the three buckets sum to the first..last span.
 ponytail: scans each whole file (about a minute for 700 MB); seek to the 24h offset if that ever matters.
 """
 import collections
@@ -128,6 +129,8 @@ def profile(path):
                         if gap >= MIN_IDLE_S:
                             stalls.append((gap, prev_ts.strftime("%H:%MZ"), ts.strftime("%H:%MZ"), src,
                                            last_text[-260:].replace("\n", " "), txt.strip()[:160].replace("\n", " ")))
+                    else:  # prompt after a tool result or another prompt (queued input): the model's turn
+                        add("model", ts, gap)
                     prev_kind = "prompt"
             prev_ts = ts
     if not first:
