@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# red-crash-test — startup crash detection ignores a passing test's own report lines (repos-uxhm), no network.
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+. "$here/red-crash.sh"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+
+# $1 name, $2 expected crash|clean, $3 output text
+run() {
+  printf '%b' "$3" > "$tmp/out"
+  if startup_crash "$tmp/out" red; then got=crash; else got=clean; fi
+  if [ "$got" = "$2" ]; then echo "PASS  $1"; else echo "FAIL  $1 (got $got)"; fail=1; fi
+}
+
+run "bare docker missing is a crash"           crash 'bash: docker: command not found\n'
+run "git missing after a FAIL is a crash"      crash 'FAIL  case one\nfatal: not a git repository\n'
+run "PASS line naming the pattern is clean"    clean 'PASS  infra RED: docker: command not found (rc 4)\nFAIL  other case\n'
+run "bun (pass) line naming it is clean"       clean '(pass) refuses when docker: not found [3ms]\n(fail) other\n'
+run "tap ok line naming it is clean"           clean 'ok 3 - ECONNREFUSED 127.0.0.1:5432 is reported\nnot ok 4 - other\n'
+run "indented check-mark line is clean"        clean '  ✓ Startup Error is surfaced\n  ✗ other\n'
+run "real crash after a PASS line still found" crash 'PASS  first\nError: EROFS: read-only file system, open x\n'
+run "crash after a NUL byte still found"      crash 'progress\x00bar\nfatal: not a git repository\n'
+
+exit $fail
