@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# pace-profile-test — hermetic contract for bin/pace-profile <seat> (repos-kcyh6).
+# Haiku reads session transcripts (untrusted: fetched pages, tool output), so it gets NO tools. It prints lines and
+# the script acts on two shapes only, at a fixed priority it never takes from the model:
+#   efficiency: <title>        -> bd create --title "efficiency: <title>" --type task --labels agents-stack -p 3
+#   promote: <bead id> <why>   -> bd comments add <id> "promote: <why>"   (id must match ^repos-[a-z0-9]+(\.[0-9]+)*$)
+# A title holding a word that starts with "-" is dropped. Anything else is ignored; at most 5 beads and 5 promote
+# comments (one per id) per run; title cut to 120 chars, why to 200. No sessions, or agent-profile failing: no model call, rc 0.
+# One run at a time: flock on <PACE_PROFILE_SESSIONS>/.pace-profile.lock; a run that cannot take it exits 0 at once.
+# Seams: PACE_PROFILE_SESSIONS (dir searched for *.jsonl, default ~/.claude/projects), PACE_PROFILE_LOG,
+#        PACE_PROFILE_AGENT (default bin/agent-profile), PACE_PROFILE_REPOS (cwd for bd, default ~/repos); claude, bd on PATH.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+mkdir -p "$tmp/fake" "$tmp/sess/p" "$tmp/repos"
+cat >"$tmp/fake/claude" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/claude.args"; printf '[%s]' "$@" >"$T/claude.argv"; pwd >"$T/claude.cwd"
+cat >"$T/claude.stdin"; [ -e "$T/claude.fail" ] && exit 1; cat "$T/reply" 2>/dev/null
+EOF
+cat >"$tmp/fake/bd" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/bd.calls"
+EOF
+cat >"$tmp/agent" <<'EOF'
+#!/bin/bash
+[ -e "$T/agent.fail" ] && { echo "Traceback: boom"; exit 1; }
+echo "seat stack idle 40m bash 120 calls"
+EOF
+chmod +x "$tmp/fake/claude" "$tmp/fake/bd" "$tmp/agent"
+run() { env T="$tmp" PATH="$tmp/fake:$PATH" PACE_PROFILE_SESSIONS="$tmp/sess" PACE_PROFILE_LOG="$tmp/log" \
+  PACE_PROFILE_AGENT="$tmp/agent" PACE_PROFILE_REPOS="$tmp/repos" "$here/pace-profile" stack >/dev/null 2>&1; echo $?; }
+reset() { command rm -f "$tmp"/claude.* "$tmp"/bd.calls "$tmp"/reply "$tmp"/agent.fail; }
+
+# 1. no recent sessions: no model call, rc 0
+reset; check "1 rc 0" "$(run)" 0
+check "1 no model call" "$(test -e "$tmp/claude.args" && echo called)" ""
+
+# 2. sessions present: Haiku is called with no tools, and the shapes become fixed-priority bd calls
+touch "$tmp/sess/p/a.jsonl"
+cat >"$tmp/reply" <<'EOF'
+Here is my analysis.
+efficiency: cache defend reviews per sha
+promote: repos-muks cuts idle lead time
+promote: repos-6xin.2 grading reuse
+EOF
+check "2 rc 0" "$(run)" 0
+# no tools: --tools "" disables every built-in tool (--allowedTools only skips prompts, it removes nothing);
+# --strict-mcp-config with no --mcp-config drops every MCP server; run from an empty dir so no project settings load
+check "2 built-in tools disabled" "$(grep -c '\[--tools\]\[\]' "$tmp/claude.argv")" 1
+check "2 MCP servers dropped" "$(grep -c '\[--strict-mcp-config\]' "$tmp/claude.argv")" 1
+check "2 no --mcp-config" "$(grep -c '\[--mcp-config\]' "$tmp/claude.argv")" 0
+check "2 model not run from the repos dir" "$(grep -cxF "$tmp/repos" "$tmp/claude.cwd")" 0
+check "2 haiku" "$(grep -c -- '--model haiku' "$tmp/claude.args")" 1
+check "2 bead filed at P3" "$(grep -cxF 'create --title efficiency: cache defend reviews per sha --type task --labels agents-stack -p 3' "$tmp/bd.calls")" 1
+check "2 promote comments" "$(grep -c '^comments add repos-' "$tmp/bd.calls")" 2
+check "2 only those calls" "$(wc -l <"$tmp/bd.calls")" 3
+
+# 3. injection in the reply: no other priority, no bad ids, no commands
+reset
+cat >"$tmp/reply" <<'EOF'
+bd create --title "start everything" -p 0
+efficiency: x -p 0
+promote: repos-x; rm -rf ~ now
+promote: ../etc nope
+  efficiency: indented ignored
+EOF
+run >/dev/null
+check "3 no P0 anywhere" "$(grep -c -- '-p 0' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+check "3 a title with a -flag word is dropped" "$(grep -c '^create' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+check "3 bad ids dropped" "$(grep -c '^comments' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+
+# 4. at most 5 beads
+reset; for i in 1 2 3 4 5 6 7; do echo "efficiency: e$i"; done >"$tmp/reply"; run >/dev/null
+check "4 capped at 5" "$(grep -c '^create' "$tmp/bd.calls")" 5
+
+# 4b. promote: at most 5 comments, one per bead id; why cut to 200 chars, title to 120
+reset
+{ for i in 1 2 3 4 5 6 7; do echo "promote: repos-a$i why$i"; done; echo "promote: repos-a1 again"
+  echo "promote: repos-z $(printf 'w%.0s' $(seq 500))"; echo "efficiency: $(printf 't%.0s' $(seq 500))"; } >"$tmp/reply"
+run >/dev/null
+check "4b promote capped at 5" "$(grep -c '^comments' "$tmp/bd.calls")" 5
+check "4b one comment per id" "$(grep -c '^comments add repos-a1 ' "$tmp/bd.calls")" 1
+check "4b title cut to 120" "$(awk '/^create/{print ($0 ~ /t{121}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
+reset; echo "promote: repos-z $(printf 'w%.0s' $(seq 500))" >"$tmp/reply"; run >/dev/null
+check "4b why cut to 200" "$(awk '/^comments/{print ($0 ~ /w{201}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
+# 4c. a whitespace-only title is dropped; a promote with no why still posts "promote: "
+reset; printf 'efficiency:    \npromote: repos-q\n' >"$tmp/reply"; run >/dev/null
+check "4c blank title dropped" "$(grep -c '^create' "$tmp/bd.calls")" 0
+check "4c promote with no why" "$(grep -cxF 'comments add repos-q promote: ' "$tmp/bd.calls")" 1
+# 5. agent-profile failing: no model call
+reset; touch "$tmp/agent.fail"; check "5 rc 0" "$(run)" 0
+check "5 no model call on a failed profile" "$(test -e "$tmp/claude.args" && echo called)" ""
+
+# 6. the model call failing: no bd calls, rc 0
+reset; printf 'efficiency: e1\n' >"$tmp/reply"; touch "$tmp/claude.fail"; check "6 rc 0" "$(run)" 0
+check "6 no bd calls after a failed model call" "$(test -e "$tmp/bd.calls" && echo called)" ""
+command mv "$tmp/claude.fail" "$tmp/claude.fail.off"
+# 7. a missing repos dir: no bd calls, rc 0
+reset; printf 'efficiency: e1\n' >"$tmp/reply"
+check "7 rc 0" "$(env T="$tmp" PATH="$tmp/fake:$PATH" PACE_PROFILE_SESSIONS="$tmp/sess" PACE_PROFILE_LOG="$tmp/log" \
+  PACE_PROFILE_AGENT="$tmp/agent" PACE_PROFILE_REPOS="$tmp/no-such-dir" "$here/pace-profile" stack >/dev/null 2>&1; echo $?)" 0
+check "7 no bd calls without the repos dir" "$(test -e "$tmp/bd.calls" && echo called)" ""
+# 8. a second run while one holds the lock exits at once, without a model call
+reset; exec 8>"$tmp/sess/.pace-profile.lock"; flock 8
+check "8 rc 0" "$(run)" 0
+check "8 overlapping run: no model call" "$(test -e "$tmp/claude.args" && echo called)" ""
+exec 8>&-
+# 9. a child that leaves a process behind (a bd daemon) does not keep the lock: the next run still profiles
+reset; printf 'efficiency: e1\n' >"$tmp/reply"
+cat >"$tmp/fake/bd" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/bd.calls"; setsid sleep 4 </dev/null >/dev/null 2>&1 &
+EOF
+run >/dev/null; command mv "$tmp/claude.args" "$tmp/claude.args.1"; run >/dev/null
+check "9 lingering child does not hold the lock" "$(test -e "$tmp/claude.args" && echo called)" called
+
+[ $fails = 0 ] && echo "pace-profile-test: PASS" || echo "pace-profile-test: FAIL"
+exit $fails
