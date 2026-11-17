@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# pre-push-test — RED for hooks/pre-push, the global pre-push hook (repos-ga1o slice 2, operator card repos-b7kks A:
+# guard every public push). Installed as ~/.git-hooks/pre-push (global core.hooksPath), so it runs in every clone,
+# including fresh clones made after install (live gap 11-17: a worker pushed workbench PR 141 from a fresh clone).
+#
+# Contract: hooks/pre-push <remote> <url>, pre-push stdin read ONCE and given to both checks:
+#   1. secret scan of added lines + suspicious added files (today's ~/.git-hooks/pre-push, unchanged behaviour);
+#   2. then $PUBLIC_PUSH_GUARD (default ~/repos/workbench/bin/public-push-guard) with the same args and stdin.
+#   Exit non-zero if either refuses. A github.com URL with the guard missing or not executable is refused (fail closed).
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+hook="$here/pre-push"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+ok() { if [ "$2" -eq 0 ]; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$2)"; fail=1; fi; }
+no() { if [ "$2" -ne 0 ]; then echo "PASS  $1"; else echo "FAIL  $1 (not refused)"; fail=1; fi; }
+
+# stub guard: logs its args + stdin, exits $GUARD_RC
+cat > "$tmp/guard" <<'EOF'
+#!/usr/bin/env bash
+{ echo "args: $*"; cat; } > "$GUARD_LOG"
+exit "${GUARD_RC:-0}"
+EOF
+chmod +x "$tmp/guard"
+export GUARD_LOG="$tmp/guard.log" PUBLIC_PUSH_GUARD="$tmp/guard"
+
+git init -q "$tmp/r"; cd "$tmp/r"
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+base=$(git rev-parse HEAD)
+echo hello > a.txt; git add a.txt; git -c user.name=t -c user.email=t@t commit -q -m clean
+clean=$(git rev-parse HEAD)
+printf 'k=%s\n' "ghp_$(printf 'A%.0s' {1..30})" > s.txt; git add s.txt; git -c user.name=t -c user.email=t@t commit -q -m secret
+secret=$(git rev-parse HEAD)
+url=git@github.com:own/repo.git
+line() { printf 'refs/heads/b %s refs/heads/b %s\n' "$1" "$base"; }
+
+: > "$GUARD_LOG"; line "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; ok "clean push, guard ok: ok" $?
+grep -q "args: origin $url" "$GUARD_LOG" && echo "PASS  guard got remote+url" || { echo "FAIL  guard args: $(head -1 "$GUARD_LOG")"; fail=1; }
+grep -q "refs/heads/b $clean" "$GUARD_LOG" && echo "PASS  guard got the pre-push stdin" || { echo "FAIL  guard stdin missing"; fail=1; }
+line "$clean" | GUARD_RC=1 "$hook" origin "$url" >/dev/null 2>&1; no "clean push, guard refuses: refused" $?
+line "$secret" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; no "secret in added line, guard ok: refused" $?
+out=$(line "$secret" | GUARD_RC=0 "$hook" origin "$url" 2>&1)
+grep -q "ghp_AAAA" <<<"$out" && { echo "FAIL  secret echoed in hook output"; fail=1; } || echo "PASS  secret not echoed"
+line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$url" >/dev/null 2>&1; no "github url, guard missing: refused" $?
+line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$tmp/bare.git" >/dev/null 2>&1; ok "local remote, guard missing: ok" $?
+
+# defend-attack 0e8fb34: endpoint diffs with errors silenced failed open.
+# a remote sha this clone does not have must not skip the scan (scan the pushed commits, or refuse)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$secret" 3333333333333333333333333333333333333333 | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "unknown remote sha, secret in pushed commits: refused" $?
+# a secret added then removed inside the pushed range is still in history: every pushed commit is scanned
+git rm -q s.txt; git -c user.name=t -c user.email=t@t commit -q -m scrub
+scrubbed=$(git rev-parse HEAD)
+line "$scrubbed" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; no "secret added then removed in range: refused" $?
+printf 'refs/heads/b %s refs/heads/b %s\n' "$scrubbed" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret in an intermediate commit vs real remote sha: refused" $?
+
+# defend-attack 4f52fad: --not --remotes trusted commits on ANY remote; a secret already on a private remote then
+# rode a new branch to the public one unscanned. Only the target remote's own refs may be excluded.
+# defend-attack ac8d14c: origin must really exist, or the exclusion path never runs.
+git remote add origin "$url"
+git update-ref refs/remotes/origin/main "$base"
+git update-ref refs/remotes/priv/b "$secret"
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "clean on top"
+ontop=$(git rev-parse HEAD)
+z=0000000000000000000000000000000000000000
+printf 'refs/heads/n %s refs/heads/n %s\n' "$ontop" "$z" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "new branch to origin, secret only on another remote's ref: refused" $?
+# the exclusion is live: commits origin already has are not rescanned (the secret is on origin itself)
+git update-ref refs/remotes/origin/main "$secret"
+printf 'refs/heads/n %s refs/heads/n %s\n' "$ontop" "$z" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+ok "new branch to origin, secret already on origin: ok (only new commits scanned)" $?
+git update-ref -d refs/remotes/priv/b; git update-ref -d refs/remotes/origin/main; git remote remove origin
+
+# defend-attack ac8d14c: a secret introduced only in a merge commit (evil merge) must be scanned
+git checkout -q -b side "$clean"; echo side > side.txt; git add side.txt; git -c user.name=t -c user.email=t@t commit -q -m side
+git checkout -q -b mainline "$clean"; echo main > main.txt; git add main.txt; git -c user.name=t -c user.email=t@t commit -q -m mainline
+git merge -q --no-commit side >/dev/null 2>&1
+printf 'k=%s\n' "ghp_$(printf 'B%.0s' {1..30})" > evil.txt; git add evil.txt
+git -c user.name=t -c user.email=t@t commit -q -m "merge side"
+evil=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$evil" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret only in a merge commit: refused" $?
+
+# defend-attack 34ff9fa: a no-op push (git runs the hook with empty stdin) must pass, and the guard sees no blank ref line
+: > "$GUARD_LOG"; printf '' | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; ok "empty stdin (nothing to push): ok" $?
+[ -z "$(sed 1d "$GUARD_LOG" | tr -d '[:space:]')" ] && echo "PASS  guard got no blank ref line" || { echo "FAIL  guard stdin not empty: $(sed 1d "$GUARD_LOG" | od -c | head -2)"; fail=1; }
+# defend-attack 34ff9fa: binary-looking content (-diff attribute or NUL byte) must still be scanned
+git checkout -q -b bin "$clean"
+echo '* -diff' > .gitattributes; printf 'k=%s\n' "ghp_$(printf 'C%.0s' {1..30})" > hidden.txt
+git add .gitattributes hidden.txt; git -c user.name=t -c user.email=t@t commit -q -m attrs
+attrs=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$attrs" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret behind a -diff gitattribute: refused" $?
+git checkout -q -b nul "$clean"
+printf 'x\0y\nk=%s\n' "ghp_$(printf 'D%.0s' {1..30})" > blob.dat; git add blob.dat; git -c user.name=t -c user.email=t@t commit -q -m nul
+nul=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$nul" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret in a file with a NUL byte: refused" $?
+
+# defend-attack d9448a9: triangular remote (fetch url private, pushurl github) must not trust fetched refs
+git remote add tri git@example.com:private/mirror.git
+git config remote.tri.pushurl "$url"
+git update-ref refs/remotes/tri/main "$secret"; git checkout -q -b trib "$secret"
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "clean on top tri"
+tri=$(git rev-parse HEAD)
+printf 'refs/heads/n %s refs/heads/n %s\n' "$tri" 0000000000000000000000000000000000000000 | GUARD_RC=0 "$hook" tri "$url" >/dev/null 2>&1
+no "pushurl differs from fetch url, secret only on fetched ref: refused" $?
+git update-ref -d refs/remotes/tri/main; git remote remove tri
+# defend-attack d9448a9: a rename into a blocked name must be caught
+git checkout -q -b ren "$clean"
+echo harmless > notes.txt; git add notes.txt; git -c user.name=t -c user.email=t@t commit -q -m notes
+git mv notes.txt .env; git -c user.name=t -c user.email=t@t commit -q -m rename
+ren=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$ren" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "rename into .env: refused" $?
+
+# defend-attack 5ff0532: a content line starting with ++ must still be scanned
+git checkout -q -b pp "$clean"
+printf '++k=%s\n' "ghp_$(printf 'E%.0s' {1..30})" > pp.txt; git add pp.txt; git -c user.name=t -c user.email=t@t commit -q -m pp
+pp=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$pp" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret on a line starting with ++: refused" $?
+# defend-attack 5ff0532: one invalid UTF-8 byte must not make grep treat the diff as binary
+git checkout -q -b lat "$clean"
+printf 'caf\351\nk=%s\n' "ghp_$(printf 'F%.0s' {1..30})" > lat.txt; git add lat.txt; git -c user.name=t -c user.email=t@t commit -q -m lat
+lat=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$lat" "$clean" | LC_ALL=C.UTF-8 GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret next to a Latin-1 byte: refused" $?
+# defend-attack 5ff0532: diff.external and forced color must not change the scanned patch
+printf 'refs/heads/b %s refs/heads/b %s\n' "$secret" "$base" | GUARD_RC=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=/bin/true GIT_CONFIG_KEY_1=color.diff GIT_CONFIG_VALUE_1=always "$hook" origin "$url" >/dev/null 2>&1
+no "secret with diff.external and color.diff=always set: refused" $?
+
+# defend-attack 9abcc8a: content line shaped like a header (++ b/<token>) must be scanned
+git checkout -q -b hdr "$clean"
+printf '++ b/%s\n' "ghp_$(printf 'G%.0s' {1..30})" > hdr.txt; git add hdr.txt; git -c user.name=t -c user.email=t@t commit -q -m hdr
+hdr=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$hdr" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret on a ++ b/ content line: refused" $?
+# defend-attack 9abcc8a: a blocked name under a non-ASCII dir (git C-quotes the path) must be caught
+git checkout -q -b qp "$clean"
+mkdir -p "$(printf 'caf\303\251')"; echo k > "$(printf 'caf\303\251')/id_rsa"; git add -A; git -c user.name=t -c user.email=t@t commit -q -m qp
+qp=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$qp" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "id_rsa under a non-ASCII dir: refused" $?
+
+# fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
+mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
+export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1
+git config --global core.hooksPath "$tmp/home/hooks"
+git init -q --bare "$tmp/bare.git"
+git clone -q "$tmp/r" "$tmp/fresh" 2>/dev/null; cd "$tmp/fresh"
+git push -q "$tmp/bare.git" "$secret:refs/heads/x" >/dev/null 2>&1; no "fresh clone: secret push refused by global hook" $?
+git push -q "$tmp/bare.git" "$clean:refs/heads/y" >/dev/null 2>&1; ok "fresh clone: clean push to local remote: ok" $?
+
+exit $fail
