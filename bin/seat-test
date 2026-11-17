@@ -75,6 +75,10 @@ deny=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))
 has "2 deny Edit" "$deny" "Edit"
 has "2 deny Write" "$deny" "Write"
 hasnt "2 Read not denied" "$deny" "Read"
+# 2b. prompt given as several words reaches the harness as ONE argument: claude and pi read each extra
+# positional as a separate message, so the live ghc proof (2026-11-17) got only "List".
+out=$("$seat" run ghc --harness claude --dry-run take bead x 2>&1)
+has "2b words joined into one prompt" "$(sed -n 2p <<<"$out")" "take\ bead\ x"
 # MCP servers from user or project config would bypass the bash prefix list.
 has "2 strict mcp" "$cmd" "--strict-mcp-config"
 

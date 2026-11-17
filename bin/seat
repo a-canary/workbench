@@ -101,7 +101,7 @@ cmd_run() {
     fi
     cmd=(pi --model "$model" --append-system-prompt "$rdir/AGENTS.md" --tools "$(paste -sd, - <<<"$tools")")
   fi
-  cmd+=("${prompt[@]}")
+  [ ${#prompt[@]} -gt 0 ] && cmd+=("${prompt[*]}")
 
   if [ $dry -eq 1 ]; then
     printf 'cd %q\n' "$repo"
