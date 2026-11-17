@@ -6,9 +6,10 @@ crash_pats=('EROFS: read-only file system' 'failed to load config' 'Startup Erro
 # RED-only: a missing git/docker/DB is fixed before any worker runs, so once RED ran clean a GREEN that
 # prints one of these is the worker's own output (or doing) and stays the model's failure, not infra.
 # The test runner itself is absent from the jail (repos-v5j7: pytest in the host's ~/.local, which the jail masks).
-# `python -m X` names the interpreter, an import inside a test says ModuleNotFoundError; a bare command name is a
-# tool, a path with a slash may be a script the worker is to write.
-runner_pat='^[^ ]*python[0-9.]*: No module named |^(sh|bash|dash): ((line )?[0-9]+: )?[^/ :]+: (command )?not found'
+# Known runners only: any other missing module or command may be what the worker is to write.
+# ponytail: fixed runner list, add a runner when a lane repo's Test uses one
+runners='pytest|py\.test|nose2|vitest|jest|mocha|tsx|ts-node|bun|deno|node|npx'
+runner_pat="^[^ ]*python[0-9.]*: No module named ($runners)\$|^(sh|bash|dash): ((line )?[0-9]+: )?($runners): (command )?not found"
 red_pats=('fatal: not a git repository' 'docker: (command )?not found' 'Cannot connect to the Docker daemon'
   'ECONNREFUSED 127\.0\.0\.1:5432' 'connect ECONNREFUSED .*:5432' 'This does not look like a tar archive' "$runner_pat")
 crash=

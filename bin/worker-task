@@ -133,7 +133,8 @@ if [ -n "$keep" ] && [ -n "$scoped" ] && sh -n -c "$base_test" 2>/dev/null && g 
   fi
   rm -f "$basedir.idx"
   if [ $base_rc -eq 0 ]; then :
-  elif grep -aqE -- "$runner_pat" "$red_out"; then
+  # first non-blank line only: a missing runner fails before any output, a red sibling's failing case may echo one
+  elif grep -aqE -- "$runner_pat" < <(grep -avm1 '^[[:space:]]*$' "$red_out"); then
     # the one baseline result that stops a run: the worker cannot install a runner, so GREEN can never pass (repos-v5j7)
     cat "$red_out" >&2
     log "baseline: test runner missing in the sandbox; drop it from the Test, or lend it in the repo's .venv or node_modules"
