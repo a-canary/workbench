@@ -12,9 +12,13 @@
 #           plus Bash(<prefix>:*) per bash prefix; no bare "Bash". permissions.deny = each of Claude's
 #           built-in tools (Read Grep Glob Bash Edit Write NotebookEdit WebFetch WebSearch) not in tools.
 #   No prompt word may start with "-" (refused even after "--"), so nothing reaches the harness as a flag.
-#   pi:     cd <repo>; pi --model <model> --append-system-prompt <AGENTS.md> --tools <pi_tools, no spaces> [prompt]
-#           pi cannot scope bash by prefix, so when permissions.yaml has a bash: list, bash is dropped from
-#           --tools (warning on stderr) instead of granted unscoped.
+#   pi:     cd <repo>; env SEAT_BASH_PREFIXES=<bash prefixes, trimmed, joined by ","> pi --no-extensions
+#           -e <workbench>/lib/pi-bash-guard.ts --model <model> --append-system-prompt <AGENTS.md>
+#           --tools <pi_tools, no spaces> [prompt]
+#           --no-extensions keeps the user's global pi extensions and roles out of the seat (live ghc proof
+#           2026-11-17 loaded role-assistant + ponytail). lib/pi-bash-guard.ts blocks every bash call whose
+#           command is not allowed(cmd, prefixes): cmd equals a prefix or starts with prefix + " ", and has no
+#           shell control characters (; & | ` $ < > ( ) newline), so `gh pr view 1; touch x` cannot ride a prefix.
 #   Flags may come before or after the prompt words.
 #   --dry-run prints `cd <repo>` on line 1 and the command as one line of shell-quoted words on line 2, runs nothing.
 #   Errors (exit non-zero, message on stderr): unknown seat, role without AGENTS.md, harness not claude|pi,
@@ -49,9 +53,11 @@ cmd=$(sed -n 2p <<<"$out")
 has "1 pi" "$cmd" "pi "
 has "1 model" "$cmd" "--model v100/fast"
 has "1 role prompt" "$cmd" "--append-system-prompt $role/AGENTS.md"
-# pi has no per-command bash scoping: with a bash: prefix list, bash is withheld rather than granted whole.
-has "1 tools" "$cmd" "--tools read,grep,find,ls"
-hasnt "1 no unscoped bash" "$cmd" "ls,bash"
+# bash is granted under pi only behind the prefix guard (repos-k1inp).
+has "1 tools" "$cmd" "--tools read,grep,find,ls,bash"
+has "1 no global extensions" "$cmd" "--no-extensions"
+has "1 bash guard loaded" "$cmd" "-e $here/lib/pi-bash-guard.ts"
+has "1 prefixes passed" "$cmd" "SEAT_BASH_PREFIXES=gh\\ pr\\ view,"
 hasnt "1 no claude settings" "$cmd" "--settings"
 
 # 2. claude via --harness, with a prompt
@@ -107,6 +113,17 @@ mkdir -p "$tmp/v/norepo"; printf 'role: github-controller\nrepo: %s/missing\nhar
 # No word starting with "-" ever reaches the harness: not after "--", not as a bare prompt word.
 "$seat" run ghc --dry-run -- --dangerously-skip-permissions >/dev/null 2>&1; check "3b -- does not smuggle a flag" "$([ $? -ne 0 ] && echo y)" "y"
 "$seat" run ghc --dry-run take -x >/dev/null 2>&1; check "3b dash word refused" "$([ $? -ne 0 ] && echo y)" "y"
+
+# 4. the pi bash guard's decision function
+guard="$here/lib/pi-bash-guard.ts"
+verdicts=$(cd "$tmp" && bun -e '
+import { allowed } from "'"$guard"'";
+const p = ["gh pr view", "git status"];
+for (const c of ["gh pr view 12", "gh pr view", "git status", "gh pr viewx", "gh api repos", "gh pr view 1; touch x",
+  "gh pr view 1 && touch x", "gh pr view 1 | sh", "gh pr view $(id)", "gh pr view `id`", "gh pr view 1 > f",
+  "gh pr view 1\ntouch x", " gh pr view 1", "touch x"]) console.log(allowed(c, p) ? "Y" : "N");
+' 2>&1 | tr -d '\n')
+check "4 guard verdicts" "$verdicts" "YYYNNNNNNNNNNN"
 
 [ $fails = 0 ] && echo "seat-test: PASS" || echo "seat-test: FAIL"
 exit $fails
