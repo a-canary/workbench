@@ -79,7 +79,7 @@ def profile(path):
             if not m:
                 continue
             ts = parse(m.group(1))
-            if ts < CUT:
+            if ts < CUT or (prev_ts and ts < prev_ts):  # out-of-order lines (replayed after compaction) would give negative gaps
                 continue
             try:
                 d = json.loads(line)
