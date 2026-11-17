@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Agent-stack profiler: per Claude session, split the last 24h of wall clock into model / tool / idle time.
+Reads only timestamps, tool names and short snippets from Claude Code session logs (.jsonl).
+Usage: agent-profile OUTDIR FILE...   writes OUTDIR/<session8>.json and prints one line per session of 30+ minutes.
+Then: agent-profile-label OUTDIR      has a model label what each idle stretch was waiting on.
+AGENT_PROFILE_NOW=<ISO time> pins "now" (tests).
+ponytail: parallel tool calls each count their own duration in by-tool totals; wall split uses gaps between
+in-order events, so the three buckets sum to the first..last span.
+ponytail: scans each whole file (about a minute for 700 MB); seek to the 24h offset if that ever matters.
+"""
+import collections
+import datetime as dt
+import json
+import os
+import re
+import sys
+
+NOW = (dt.datetime.fromisoformat(os.environ["AGENT_PROFILE_NOW"][:19]).replace(tzinfo=dt.timezone.utc)
+       if os.environ.get("AGENT_PROFILE_NOW") else dt.datetime.now(dt.timezone.utc))
+CUT = NOW - dt.timedelta(hours=24)
+MIN_IDLE_S = 600  # idle stretches shorter than this are summed but not listed
+# Tools expected to run for minutes; a chained call is theirs, and they are not counted as hung.
+LONG_TOOLS = {"defend-attack", "deploy-run.ts", "public-push-review", "worker-task", "sandbox-review", "lane-run"}
+TS = re.compile(r'"timestamp":"(20[0-9T:.\-]+)Z"')
+# What kind of input ended an idle stretch, from the first characters of that input.
+SOURCES = [("waker", r"^Waker:"), ("cron check-in", r"30-minute check-in"), ("feed-watch", r"^\[feed-watch"),
+           ("peer agent", r"^(Assistant|Master|[a-z-]+-lead):|^\[from |^\[[a-z-]+-lead\]|agent-message from"),
+           ("background task", r"task-notification|SYSTEM NOTIFICATION"),
+           ("compaction", r"^This session is being continued"), ("slash command", r"<command-name>|local-command")]
+
+
+def parse(ts):
+    return dt.datetime.fromisoformat(ts[:19]).replace(tzinfo=dt.timezone.utc)
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
+def bash_key(cmd):
+    """Name a Bash call by the step that owns its run time: a known long tool anywhere in the chain
+    (`gh pr view 1 && defend-attack 1` is a defend-attack call), else the first step that is not cd."""
+    first = None
+    for step in re.split(r"&&|\|\||[;|\n]", cmd):
+        words = [w.split("/")[-1] for w in re.sub(r"^\s*([A-Za-z_]+=\S+\s+)+", "", step).split()]
+        long = next((w for w in words if w in LONG_TOOLS), None)
+        if long:
+            return "Bash:" + long
+        if words and words[0] != "cd":
+            first = first or words[0][:20]
+    return "Bash:" + (first or "?")
+
+
+def source(txt):
+    for name, pat in SOURCES:
+        if re.search(pat, txt.strip()[:400]):
+            return name
+    return "operator or other"
+
+
+def profile(path):
+    wall = collections.Counter()
+    hourly = collections.defaultdict(collections.Counter)
+    tools = collections.defaultdict(lambda: [0, 0.0, 0.0])  # n, total s, max s
+    idle_src = collections.defaultdict(lambda: [0, 0.0])
+    slow, stalls, pending = [], [], {}
+    prev_ts = prev_kind = None
+    last_text = first_prompt = ""
+    first = last = None
+
+    def add(kind, ts, gap):
+        wall[kind] += gap
+        hourly[ts.strftime("%H")][kind] += gap
+
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = TS.search(line)
+            if not m:
+                continue
+            ts = parse(m.group(1))
+            if ts < CUT or (prev_ts and ts < prev_ts):  # out-of-order lines (replayed after compaction) would give negative gaps
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+                continue
+            content = (d.get("message") or {}).get("content") or ""
+            blocks = content if isinstance(content, list) else []
+            first = first or ts
+            last = ts
+            gap = (ts - prev_ts).total_seconds() if prev_ts else 0
+            if d["type"] == "assistant":
+                add("model", ts, gap)
+                for b in blocks:
+                    if b.get("type") == "tool_use":
+                        inp = b.get("input") or {}
+                        cmd = str(inp.get("command") or inp.get("description") or inp.get("file_path") or inp.get("prompt") or "")
+                        name = bash_key(cmd) if b.get("name") == "Bash" else b.get("name", "?")
+                        pending[b.get("id")] = (ts, name, cmd[:110].replace("\n", " "))
+                    elif b.get("type") == "text" and b.get("text", "").strip():
+                        last_text = b["text"].strip()
+                prev_kind = "assistant"
+            else:
+                results = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+                if results:
+                    add("tool", ts, gap)
+                    for b in results:
+                        p = pending.pop(b.get("tool_use_id"), None)
+                        if p:
+                            dur = (ts - p[0]).total_seconds()
+                            t = tools[p[1]]
+                            t[0] += 1
+                            t[1] += dur
+                            t[2] = max(t[2], dur)
+                            slow.append((dur, p[0].strftime("%H:%MZ"), p[1], p[2]))
+                    prev_kind = "tool_result"
+                else:
+                    txt = text_of(content)
+                    first_prompt = first_prompt or txt[:160]
+                    if prev_kind == "assistant":
+                        src = source(txt)
+                        add("idle", ts, gap)
+                        idle_src[src][0] += 1
+                        idle_src[src][1] += gap
+                        if gap >= MIN_IDLE_S:
+                            stalls.append((gap, prev_ts.strftime("%H:%MZ"), ts.strftime("%H:%MZ"), src,
+                                           last_text[-260:].replace("\n", " "), txt.strip()[:160].replace("\n", " ")))
+                    else:  # prompt after a tool result or another prompt (queued input): the model's turn
+                        add("model", ts, gap)
+                    prev_kind = "prompt"
+            prev_ts = ts
+    if not first:
+        return None
+    seat = re.search(r"You are the \*\*(.+?)\*\*", first_prompt)
+    return {
+        "file": os.path.basename(path), "dir": os.path.basename(os.path.dirname(path)),
+        "seat": seat.group(1) if seat else os.path.basename(path)[:8],
+        "first_event": first.strftime("%m-%d %H:%MZ"), "last_event": last.strftime("%m-%d %H:%MZ"),
+        "first_prompt": first_prompt,
+        "idle_since_last_event_min": round((NOW - last).total_seconds() / 60, 1) if prev_kind == "assistant" else 0,
+        "wall_minutes": {k: round(v / 60, 1) for k, v in wall.items()},
+        "idle_by_what_ended_it": {k: {"n": v[0], "min": round(v[1] / 60, 1)} for k, v in sorted(idle_src.items(), key=lambda x: -x[1][1])},
+        "tools_by_total_time": [{"tool": k, "n": v[0], "total_min": round(v[1] / 60, 1), "avg_s": round(v[1] / v[0], 1), "max_s": round(v[2])}
+                                for k, v in sorted(tools.items(), key=lambda x: -x[1][1])[:18]],
+        "slowest_tool_calls": [{"s": round(a), "at": b, "tool": c, "long_tool": c[5:] in LONG_TOOLS, "what": e}
+                               for a, b, c, e in sorted(slow, reverse=True)[:12]],
+        "hung_calls_over_500s": sum(1 for a, _, c, _ in slow if a >= 500 and c[5:] not in LONG_TOOLS),
+        "longest_idles": [{"min": round(a / 60, 1), "from": b, "to": c, "ended_by": s, "agent_last_said": t, "next_input": n}
+                          for a, b, c, s, t, n in sorted(stalls, reverse=True)[:80]],
+        "hourly_minutes_utc": {h: {k: round(v / 60, 1) for k, v in c.items()} for h, c in sorted(hourly.items())},
+    }
+
+
+if __name__ == "__main__":
+    out = sys.argv[1]
+    for p in sys.argv[2:]:
+        r = profile(p)
+        if not r:
+            continue
+        with open(os.path.join(out, r["file"][:8] + ".json"), "w") as f:
+            json.dump(r, f, indent=1)
+        w = r["wall_minutes"]
+        if sum(w.values()) >= 30:
+            print(f'{r["file"][:8]} {r["seat"]:18} {r["first_event"][6:]}-{r["last_event"][6:]} model {w.get("model", 0):6} '
+                  f'tool {w.get("tool", 0):6} idle {w.get("idle", 0):7} hung {r["hung_calls_over_500s"]:2}')
