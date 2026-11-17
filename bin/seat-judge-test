@@ -63,6 +63,9 @@ run() { # tool command -> "rc|stderr"
 }
 
 export SEAT=ghc
+for bad in '[1]' '{"tool_name":"Bash","tool_input":null}' '{"tool_name":"Bash","tool_input":{"command":7}}' 'not json'; do
+  "$tmp/wb/bin/seat-judge" <<<"$bad" >/dev/null 2>&1; check "malformed input denied: $bad" "$?" "2"
+done
 echo boss >"$tmp/answer"; rm -f "$tmp/req"
 check "non-Bash allowed" "$(run Read /etc/shadow)" "0|"
 check "plain command allowed" "$(run Bash 'gh pr view 3')" "0|"

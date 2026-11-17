@@ -28,6 +28,9 @@ def deny(msg):
     print(msg, file=sys.stderr)
     sys.exit(2)
 
+# Any uncaught error (odd payload shapes included) denies: Claude Code runs the tool on any exit but 2.
+sys.excepthook = lambda *_: (print("seat-judge: internal error; denied", file=sys.stderr), os._exit(2))
+
 # 1. Read hook JSON; non-Bash passes immediately
 try:
     hook = json.load(sys.stdin)
@@ -158,4 +161,5 @@ else:
     deny(f"seat-judge: this belongs to seat {owner}; route the request there (do not escalate)")
 PY
 )
+command -v python3 >/dev/null || { echo "seat-judge: python3 missing; denied" >&2; exit 2; }
 exec python3 -I -c "$prog" "$here"
