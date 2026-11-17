@@ -9,7 +9,9 @@
 #     tools = Claude tool names, pi_tools = pi tool names, bash = allowed command prefixes).
 #   Claude: cd <repo>; claude --model <claude_model> --append-system-prompt-file <AGENTS.md>
 #           --settings <generated json> [prompt]. Settings: permissions.allow = each tool except Bash,
-#           plus Bash(<prefix>:*) per bash prefix; no bare "Bash".
+#           plus Bash(<prefix>:*) per bash prefix; no bare "Bash". permissions.deny = each of Claude's
+#           built-in tools (Read Grep Glob Bash Edit Write NotebookEdit WebFetch WebSearch) not in tools.
+#   No prompt word may start with "-" (refused even after "--"), so nothing reaches the harness as a flag.
 #   pi:     cd <repo>; pi --model <model> --append-system-prompt <AGENTS.md> --tools <pi_tools, no spaces> [prompt]
 #           pi cannot scope bash by prefix, so when permissions.yaml has a bash: list, bash is dropped from
 #           --tools (warning on stderr) instead of granted unscoped.
@@ -68,6 +70,11 @@ has "2 allow gh pr merge" "$allow" "Bash(gh pr merge:*)"
 hasnt "2 no gh api" "$allow" "gh api"
 has "2 allow git status" "$allow" "Bash(git status:*)"
 check "2 no bare Bash" "$(grep -cx 'Bash' <<<"$allow")" "0"
+# allow only auto-approves; tools the role does not list are denied outright, not left behind a prompt.
+deny=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["permissions"].get("deny", [])))' "$settings" 2>/dev/null)
+has "2 deny Edit" "$deny" "Edit"
+has "2 deny Write" "$deny" "Write"
+hasnt "2 Read not denied" "$deny" "Read"
 
 # 2b. flags after the prompt are still flags
 out=$("$seat" run ghc "take bead x" --harness claude --dry-run 2>&1); rc=$?
@@ -88,9 +95,9 @@ mkdir -p "$tmp/v/norepo"; printf 'role: github-controller\nrepo: %s/missing\nhar
 
 # 3b. unknown options are refused, never passed to the harness (e.g. --dangerously-skip-permissions)
 "$seat" run ghc --dangerously-skip-permissions --dry-run >/dev/null 2>&1; check "3b unknown option fails" "$([ $? -ne 0 ] && echo y)" "y"
-out=$("$seat" run ghc --dry-run -- --not-a-flag 2>&1); rc=$?
-check "3b -- ends options" "$rc" "0"
-has "3b words after -- are prompt" "$(sed -n 2p <<<"$out")" "--not-a-flag"
+# No word starting with "-" ever reaches the harness: not after "--", not as a bare prompt word.
+"$seat" run ghc --dry-run -- --dangerously-skip-permissions >/dev/null 2>&1; check "3b -- does not smuggle a flag" "$([ $? -ne 0 ] && echo y)" "y"
+"$seat" run ghc --dry-run take -x >/dev/null 2>&1; check "3b dash word refused" "$([ $? -ne 0 ] && echo y)" "y"
 
 [ $fails = 0 ] && echo "seat-test: PASS" || echo "seat-test: FAIL"
 exit $fails
