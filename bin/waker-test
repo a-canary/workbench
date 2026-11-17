@@ -313,6 +313,11 @@ quiet() { touch "$W/alive/ndv"; echo 1000 >"$W/activity"; printf '> \n' >"$W/scr
 world; ready ndv n-7; quiet; dtick
 has "29 quiet screen nudged" "$W/out" "seat=ndv nudged bead=n-7"
 check "29 keys name the bead" "$(grep -c 'bd show n-7' "$W/keys")" "1"
+# repos-rkdda: text and Enter in one send-keys reach Claude Code as one paste, so the nudge sits unsent.
+# The text goes literal (-l) in its own call; Enter is a separate, later call.
+check "29 text sent literal" "$(grep -c -- '-l .*bd show n-7' "$W/keys")" "1"
+check "29 text call has no Enter" "$(grep 'bd show n-7' "$W/keys" | grep -c 'Enter$')" "0"
+check "29 Enter is its own call, last" "$(tail -1 "$W/keys")" "send-keys -t =ndv: Enter"
 check "29 every tmux call names the exact session" "$(grep -vc -- '-t =ndv:' "$W/tmux.calls")" "0"
 world; ready ndv n-7; quiet; printf 'Do you want to proceed?\n❯ 1. Yes\n' >"$W/screen"; dtick
 has "29 dialog on screen: running" "$W/out" "seat=ndv running"
