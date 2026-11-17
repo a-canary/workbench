@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# pre-push-test — RED for hooks/pre-push, the global pre-push hook (repos-ga1o slice 2, operator card repos-b7kks A:
+# guard every public push). Installed as ~/.git-hooks/pre-push (global core.hooksPath), so it runs in every clone,
+# including fresh clones made after install (live gap 11-17: a worker pushed workbench PR 141 from a fresh clone).
+#
+# Contract: hooks/pre-push <remote> <url>, pre-push stdin read ONCE and given to both checks:
+#   1. secret scan of added lines + suspicious added files (today's ~/.git-hooks/pre-push, unchanged behaviour);
+#   2. then $PUBLIC_PUSH_GUARD (default ~/repos/workbench/bin/public-push-guard) with the same args and stdin.
+#   Exit non-zero if either refuses. A github.com URL with the guard missing or not executable is refused (fail closed).
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+hook="$here/pre-push"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+ok() { if [ "$2" -eq 0 ]; then echo "PASS  $1"; else echo "FAIL  $1 (rc=$2)"; fail=1; fi; }
+no() { if [ "$2" -ne 0 ]; then echo "PASS  $1"; else echo "FAIL  $1 (not refused)"; fail=1; fi; }
+
+# stub guard: logs its args + stdin, exits $GUARD_RC
+cat > "$tmp/guard" <<'EOF'
+#!/usr/bin/env bash
+{ echo "args: $*"; cat; } > "$GUARD_LOG"
+exit "${GUARD_RC:-0}"
+EOF
+chmod +x "$tmp/guard"
+export GUARD_LOG="$tmp/guard.log" PUBLIC_PUSH_GUARD="$tmp/guard"
+
+git init -q "$tmp/r"; cd "$tmp/r"
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+base=$(git rev-parse HEAD)
+echo hello > a.txt; git add a.txt; git -c user.name=t -c user.email=t@t commit -q -m clean
+clean=$(git rev-parse HEAD)
+printf 'k=%s\n' "ghp_$(printf 'A%.0s' {1..30})" > s.txt; git add s.txt; git -c user.name=t -c user.email=t@t commit -q -m secret
+secret=$(git rev-parse HEAD)
+url=git@github.com:own/repo.git
+line() { printf 'refs/heads/b %s refs/heads/b %s\n' "$1" "$base"; }
+
+: > "$GUARD_LOG"; line "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; ok "clean push, guard ok: ok" $?
+grep -q "args: origin $url" "$GUARD_LOG" && echo "PASS  guard got remote+url" || { echo "FAIL  guard args: $(head -1 "$GUARD_LOG")"; fail=1; }
+grep -q "refs/heads/b $clean" "$GUARD_LOG" && echo "PASS  guard got the pre-push stdin" || { echo "FAIL  guard stdin missing"; fail=1; }
+line "$clean" | GUARD_RC=1 "$hook" origin "$url" >/dev/null 2>&1; no "clean push, guard refuses: refused" $?
+line "$secret" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; no "secret in added line, guard ok: refused" $?
+out=$(line "$secret" | GUARD_RC=0 "$hook" origin "$url" 2>&1)
+grep -q "ghp_AAAA" <<<"$out" && { echo "FAIL  secret echoed in hook output"; fail=1; } || echo "PASS  secret not echoed"
+line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$url" >/dev/null 2>&1; no "github url, guard missing: refused" $?
+line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$tmp/bare.git" >/dev/null 2>&1; ok "local remote, guard missing: ok" $?
+
+# fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
+mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
+export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1
+git config --global core.hooksPath "$tmp/home/hooks"
+git init -q --bare "$tmp/bare.git"
+git clone -q "$tmp/r" "$tmp/fresh" 2>/dev/null; cd "$tmp/fresh"
+git push -q "$tmp/bare.git" "$secret:refs/heads/x" >/dev/null 2>&1; no "fresh clone: secret push refused by global hook" $?
+git push -q "$tmp/bare.git" "$clean:refs/heads/y" >/dev/null 2>&1; ok "fresh clone: clean push to local remote: ok" $?
+
+exit $fail
