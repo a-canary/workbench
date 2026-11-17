@@ -125,7 +125,9 @@ check "baseline red is a known rc"     "$(grep -c 'rc=7' "$calls")" 0
 check "failed close is an outage"      "$(CLOSE_FAIL=1 go)" "rc=1 down=1"
 check "unexpected rc goes to a human"  "$(STUB_RC=1 go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
 G branch -q lane/x-1 origin/main
-check "existing local branch untouched" "$(go >/dev/null; grep -c 'label add X-1 human' "$calls"; G rev-parse lane/x-1)" "1
+# repos-0iq7g: a could-not-start is lane plumbing, not an operator decision -- lane-infra, never human
+check "existing local branch untouched" "$(go >/dev/null; grep -c 'label add X-1 lane-infra' "$calls"; grep -c 'label add X-1 human' "$calls"; G rev-parse lane/x-1)" "1
+0
 $(G rev-parse origin/main)"
 G branch -q -D lane/x-1
 # someone creates the branch while we fetch: worktree add -b fails and their branch survives
