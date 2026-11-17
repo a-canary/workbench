@@ -24,7 +24,7 @@
 #   WAKER_READY_CMD    "<cmd> <repo> <label>" prints top ready bead id or nothing
 #   WAKER_ALIVE_CMD    "<cmd> <seat>" exits 0 when seat has a live session
 #   WAKER_IDLE_CMD     "<cmd> <seat>" exits 0 when live session is idle
-#                      (default: tmux session no activity for WAKER_IDLE_S sec)
+#                      (default: tmux pane text unchanged for WAKER_IDLE_S sec)
 #   WAKER_IDLE_S       idle threshold seconds for default idle check (default 600)
 #   WAKER_NUDGE_CMD    "<cmd> <seat> <bead>" tells live session bead is ready
 #   WAKER_SESSION_CMD  prints the 5h session use as a fraction, or ? when unreadable
@@ -79,18 +79,23 @@ if [ -z "${WAKER_ALIVE_CMD:-}" ]; then
 fi
 if [ -z "${WAKER_IDLE_CMD:-}" ]; then
     default_idle() {
-        local seat="$1" activity now idle_s screen
+        local seat="$1" now idle_s screen state seen
         idle_s="${WAKER_IDLE_S:-600}"
         case "$idle_s" in ''|*[!0-9]*) idle_s=600 ;; esac
-        activity=$(tmux display-message -p -t "=$seat:" '#{window_activity}' 2>/dev/null) || return 1
-        [[ $activity =~ ^[0-9]+$ ]] || return 1
-        now=$(date +%s)
-        [ $((now - activity)) -ge "$idle_s" ] || return 1
+        # Idle = the screen text unchanged for idle_s (repos-hjhwx). tmux window_activity is no use:
+        # a TUI status-line redraw keeps it fresh on an idle pane. <seats>/.screen/<seat>: epoch, then text.
+        screen=$(tmux capture-pane -p -t "=$seat:" 2>/dev/null) || return 1
+        [ -n "$screen" ] || return 1
+        now=$(date +%s) state="$SEATS/.screen/$seat"
+        seen=$(head -n1 "$state" 2>/dev/null)
+        if [[ ! $seen =~ ^[0-9]+$ ]] || [ "$(tail -n +2 "$state")" != "$screen" ]; then
+            mkdir -p "$SEATS/.screen" && printf '%s\n%s\n' "$now" "$screen" >"$state"
+            return 1
+        fi
+        [ $((now - seen)) -ge "$idle_s" ] || return 1
         # A session waiting on a dialog is quiet too, and the nudge ends in Enter,
         # which would answer it. Any sign of a question on screen means not idle.
         # ponytail: text heuristic; replace with a harness idle signal when one exists.
-        screen=$(tmux capture-pane -p -t "=$seat:" 2>/dev/null) || return 1
-        [ -n "$screen" ] || return 1
         ! grep -qiE 'do you want|\(y/n\)|\[y/n\]|esc to cancel|enter to confirm|enter to select|❯ *[0-9]+\.|trust (this|the) (folder|files)' <<<"$screen"
     }
     WAKER_IDLE_CMD="default_idle"
