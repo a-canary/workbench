@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # seat-judge — PreToolUse gate: privileged commands must fit the caller's seat role (repos-oh6y).
-# Every failure path denies; never fails open.
+# Every failure path denies; never fails open. JEV 20s + fallback 30s stays under Claude Code's 60s hook
+# timeout (a killed hook lets the tool run); register it with "timeout": 60 or more, never less.
 here=$(cd "$(dirname "$0")/.." && pwd)
 # The program goes in via -c, not a heredoc on stdin: stdin carries the hook JSON.
 prog=$(cat <<'PY'
@@ -49,7 +50,7 @@ if not command:
 # in a comment) goes to the judge. A false hit costs one JEV call; a miss would skip the judge.
 # ponytail: bash -c with a built-up string ("su""do"), aliases and functions still evade it. The hard stop is
 # sudoers (only master has sudo); this gate routes, it does not contain.
-PRIV = r"sudo|su|ufw|crontab|docker|lxc|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl"
+PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl"
 PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
 # systemctl is user scope only when every occurrence is written `systemctl --user` directly
 USER_SYSCTL_RE = re.compile(r"(?<![\w.-])systemctl\s+--user(?![\w-])")
@@ -120,7 +121,7 @@ try:
         JUDGE_URL, data=body, method="POST",
         headers={"Content-Type": "application/json", "x-lane": "fast"}
     )
-    resp = urllib.request.urlopen(req, timeout=60)
+    resp = urllib.request.urlopen(req, timeout=20)
     data = json.loads(resp.read())
     ans = data.get("answers", [])
     if ans and ans[0].get("type") == "choice":
@@ -136,7 +137,7 @@ if owner is None:
                   + " Reply with exactly one of: " + " ".join(criteria))
         proc = subprocess.run(
             ["bash", "-c", FALLBACK],
-            input=prompt.encode(), capture_output=True, timeout=120
+            input=prompt.encode(), capture_output=True, timeout=30
         )
         words = proc.stdout.decode().strip().split()
         if words:
