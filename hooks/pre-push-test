@@ -57,12 +57,30 @@ no "secret in an intermediate commit vs real remote sha: refused" $?
 
 # defend-attack 4f52fad: --not --remotes trusted commits on ANY remote; a secret already on a private remote then
 # rode a new branch to the public one unscanned. Only the target remote's own refs may be excluded.
+# defend-attack ac8d14c: origin must really exist, or the exclusion path never runs.
+git remote add origin "$url"
+git update-ref refs/remotes/origin/main "$base"
 git update-ref refs/remotes/priv/b "$secret"
 git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "clean on top"
 ontop=$(git rev-parse HEAD)
-printf 'refs/heads/n %s refs/heads/n %s\n' "$ontop" 0000000000000000000000000000000000000000 | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+z=0000000000000000000000000000000000000000
+printf 'refs/heads/n %s refs/heads/n %s\n' "$ontop" "$z" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
 no "new branch to origin, secret only on another remote's ref: refused" $?
-git update-ref -d refs/remotes/priv/b
+# the exclusion is live: commits origin already has are not rescanned (the secret is on origin itself)
+git update-ref refs/remotes/origin/main "$secret"
+printf 'refs/heads/n %s refs/heads/n %s\n' "$ontop" "$z" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+ok "new branch to origin, secret already on origin: ok (only new commits scanned)" $?
+git update-ref -d refs/remotes/priv/b; git update-ref -d refs/remotes/origin/main; git remote remove origin
+
+# defend-attack ac8d14c: a secret introduced only in a merge commit (evil merge) must be scanned
+git checkout -q -b side "$clean"; echo side > side.txt; git add side.txt; git -c user.name=t -c user.email=t@t commit -q -m side
+git checkout -q -b mainline "$clean"; echo main > main.txt; git add main.txt; git -c user.name=t -c user.email=t@t commit -q -m mainline
+git merge -q --no-commit side >/dev/null 2>&1
+printf 'k=%s\n' "ghp_$(printf 'B%.0s' {1..30})" > evil.txt; git add evil.txt
+git -c user.name=t -c user.email=t@t commit -q -m "merge side"
+evil=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$evil" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret only in a merge commit: refused" $?
 
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
