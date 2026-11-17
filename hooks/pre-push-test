@@ -131,6 +131,19 @@ no "secret next to a Latin-1 byte: refused" $?
 printf 'refs/heads/b %s refs/heads/b %s\n' "$secret" "$base" | GUARD_RC=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=/bin/true GIT_CONFIG_KEY_1=color.diff GIT_CONFIG_VALUE_1=always "$hook" origin "$url" >/dev/null 2>&1
 no "secret with diff.external and color.diff=always set: refused" $?
 
+# defend-attack 9abcc8a: content line shaped like a header (++ b/<token>) must be scanned
+git checkout -q -b hdr "$clean"
+printf '++ b/%s\n' "ghp_$(printf 'G%.0s' {1..30})" > hdr.txt; git add hdr.txt; git -c user.name=t -c user.email=t@t commit -q -m hdr
+hdr=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$hdr" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret on a ++ b/ content line: refused" $?
+# defend-attack 9abcc8a: a blocked name under a non-ASCII dir (git C-quotes the path) must be caught
+git checkout -q -b qp "$clean"
+mkdir -p "$(printf 'caf\303\251')"; echo k > "$(printf 'caf\303\251')/id_rsa"; git add -A; git -c user.name=t -c user.email=t@t commit -q -m qp
+qp=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$qp" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "id_rsa under a non-ASCII dir: refused" $?
+
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
 export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1

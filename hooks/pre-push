@@ -29,7 +29,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
   fi
   if ! added=$(git log --diff-merges=on -p --no-ext-diff --no-color --text --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
-     ! names=$(git log --diff-merges=on --name-only --no-color --no-renames --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
+     ! names=$(git -c core.quotePath=false log --diff-merges=on --name-only --no-color --no-renames --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
     echo "pre-push: git scan FAILED for ${local_ref#refs/heads/}; refusing push" >&2
     hits=1
     continue
@@ -37,7 +37,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   # 1) secret patterns in ADDED lines
   # never echo the secret itself: hook output lands in terminals, logs, agent transcripts
-  if m=$(grep -aE '^\+' <<<"$added" | grep -avE '^\+\+\+ (b/|/dev/null)' | grep -ainE "$PATTERNS"); then
+  if m=$(grep -aE '^\+' <<<"$added" | grep -ainE "$PATTERNS"); then
     sed -E 's/[A-Za-z0-9_/+=-]{12,}/<REDACTED>/g' <<<"$m"
     echo "pre-push: SECRET PATTERN in ${local_ref#refs/heads/} (redacted line above)"
     hits=1
