@@ -23,9 +23,10 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
     echo "== $(date -Is) seat=$seat"
     mapfile -t files < <(find "$sessions" -name '*.jsonl' -mmin -600 2>/dev/null)
     [ "${#files[@]}" -gt 0 ] || { echo "no recent sessions"; exit 0; }
-    "$agent" "$out" "${files[@]}" >"$out/summary.txt" 2>&1 \
+    # 8>&- on every child: a process it leaves behind (a bd daemon) must not keep holding the run lock
+    "$agent" "$out" "${files[@]}" >"$out/summary.txt" 2>&1 8>&- \
         || { echo "agent-profile failed; no model call"; exit 0; }
-    [ -x "$here/agent-profile-label" ] && { "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 || true; }
+    [ -x "$here/agent-profile-label" ] && { "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 8>&- || true; }
     prompt=$({
         echo "Seat $seat went over its pace limit. From this usage profile, find the biggest token or time sinks."
         echo "Reply with lines only, each starting at column 0, in exactly these shapes:"
@@ -37,7 +38,7 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
     })
     # no tools at all: --tools "" disables the built-ins, --strict-mcp-config (no --mcp-config) drops MCP servers,
     # and the empty temp dir as cwd loads no project settings. --allowedTools would only skip prompts.
-    reply=$(cd "$out" && printf '%s\n' "$prompt" | claude -p --model haiku --tools "" --strict-mcp-config) \
+    reply=$(cd "$out" && printf '%s\n' "$prompt" | claude -p --model haiku --tools "" --strict-mcp-config 8>&-) \
         || { echo "claude failed"; exit 0; }
     cd "$repos" || { echo "no repos dir"; exit 0; }
     n=0 m=0 seen=" "
@@ -48,7 +49,7 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
             title=${line#efficiency: }; title=${title:0:120}
             [ -n "${title//[[:space:]]/}" ] || continue
             case " $title" in *" -"*) echo "dropped title: $title"; continue;; esac
-            bd create --title "efficiency: $title" --type task --labels agents-stack -p 3 </dev/null && n=$((n+1))
+            bd create --title "efficiency: $title" --type task --labels agents-stack -p 3 </dev/null 8>&- && n=$((n+1))
             ;;
         "promote: "*)
             rest=${line#promote: }
@@ -58,7 +59,7 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
             [ "$m" -lt 5 ] || continue
             case "$seen" in *" $id "*) continue;; esac
             seen="$seen$id "
-            bd comments add "$id" "promote: ${why:0:200}" </dev/null && m=$((m+1))
+            bd comments add "$id" "promote: ${why:0:200}" </dev/null 8>&- && m=$((m+1))
             ;;
         esac
     done <<<"$reply"

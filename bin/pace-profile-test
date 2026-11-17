@@ -104,6 +104,14 @@ reset; exec 8>"$tmp/sess/.pace-profile.lock"; flock 8
 check "8 rc 0" "$(run)" 0
 check "8 overlapping run: no model call" "$(test -e "$tmp/claude.args" && echo called)" ""
 exec 8>&-
+# 9. a child that leaves a process behind (a bd daemon) does not keep the lock: the next run still profiles
+reset; printf 'efficiency: e1\n' >"$tmp/reply"
+cat >"$tmp/fake/bd" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/bd.calls"; setsid sleep 4 </dev/null >/dev/null 2>&1 &
+EOF
+run >/dev/null; command mv "$tmp/claude.args" "$tmp/claude.args.1"; run >/dev/null
+check "9 lingering child does not hold the lock" "$(test -e "$tmp/claude.args" && echo called)" called
 
 [ $fails = 0 ] && echo "pace-profile-test: PASS" || echo "pace-profile-test: FAIL"
 exit $fails
