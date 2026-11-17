@@ -32,6 +32,12 @@
 #   WAKER_SESSION_MAX  session use at or above this is session-out (default 0.98)
 #   WAKER_NUDGE_GAP_S  seconds between nudges to same seat (default 1800)
 #   WAKER_DRAIN_CMD    run once at end of tick; "" = none
+#   WAKER_PRIO_CMD     "<cmd> <repo> <bead>" prints the bead's priority (default: bd show --json).
+#                      Over its pace (use under 0.90) a seat still starts or is nudged for a P0 bead
+#                      (priority exactly "0"); anything else, or unreadable, stays halted.
+#   WAKER_PROFILE_CMD  "<cmd> <seat>" runs detached once per pace breach (no override, readable meter,
+#                      pace > pace_max; marker $WAKER_BUDGET/profiled-<seat>, removed when pace <= pace_max).
+#                      Default: pace-profile next to this script. Never blocks the tick.
 # tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
 # would reach a session named "ndv-lead".
 set -u
@@ -95,6 +101,19 @@ if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
     }
     WAKER_NUDGE_CMD="default_nudge"
 fi
+if [ -z "${WAKER_PRIO_CMD:-}" ]; then
+    default_prio() {
+        cd "$1" && bd show "$2" --json | jq -r '.[0].priority // empty'
+    }
+    WAKER_PRIO_CMD="default_prio"
+fi
+if [ -z "${WAKER_PROFILE_CMD:-}" ]; then
+    WAKER_PROFILE_CMD="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/pace-profile"
+fi
+# P0 check: only the exact priority 0 counts
+is_p0() {
+    [ "$($WAKER_PRIO_CMD "$1" "$2" </dev/null 2>/dev/null 9>&-)" = "0" ]
+}
 NUDGE_GAP_S="${WAKER_NUDGE_GAP_S:-1800}"
 case "$NUDGE_GAP_S" in ''|*[!0-9]*) NUDGE_GAP_S=1800 ;; esac
 if [ -z "${WAKER_DRAIN_CMD:-}" ]; then
@@ -219,6 +238,27 @@ done
 # Use sort -t'|' -k2,2n -k1,1
 sorted_seats=$(printf '%s\n' "${seats[@]}" | sort -t'|' -k2,2n -k1,1)
 
+# Pace breach: profile once per breach, detached; the marker re-arms when pace is back under
+if [ "$override" -eq 0 ] && [ "$meter_ok" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    while IFS= read -r s; do
+        [ -z "$s" ] && continue
+        IFS='|' read -r name priority pace_max _ <<<"$s"
+        marker="$BUDGET/profiled-$name"
+        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
+            [ -e "$marker" ] && continue
+            mkdir -p "$BUDGET" && : >"$marker"
+            setsid nohup $WAKER_PROFILE_CMD "$name" </dev/null >/dev/null 2>&1 9>&- &
+            pp=$!
+            for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                kill -0 "$pp" 2>/dev/null || break
+                sleep 0.1
+            done
+        else
+            rm -f "$marker"
+        fi
+    done <<<"$sorted_seats"
+fi
+
 # First pass: count running seats; nudge live idle seats that have a ready bead
 used=0
 declare -a running=()
@@ -244,8 +284,10 @@ while IFS= read -r s; do
         if [ -n "$nudge_bead" ] && [ ! -e "$SEATS/claude.down" ]; then
             if [ "$override" -eq 1 ]; then
                 should_nudge=1
-            elif [ "$meter_ok" -eq 1 ] && ! awk -v a="$util" -v b="0.90" 'BEGIN{exit !(a>=b)}' && ! awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
-                should_nudge=1
+            elif [ "$meter_ok" -eq 1 ] && ! awk -v a="$util" -v b="0.90" 'BEGIN{exit !(a>=b)}'; then
+                if ! awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}' || is_p0 "$repo" "$nudge_bead"; then
+                    should_nudge=1
+                fi
             fi
         fi
         if [ "$should_nudge" -eq 0 ]; then
@@ -328,7 +370,7 @@ while IFS= read -r s; do
             echo "seat=$name budget-stop bead=$bead use $util >= 0.90"
             continue
         fi
-        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
+        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}' && ! is_p0 "$repo" "$bead"; then
             echo "seat=$name budget-stop bead=$bead pace $pace > $pace_max"
             continue
         fi

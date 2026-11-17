@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# pace-profile <seat> — a seat went over its pace limit: profile recent Claude sessions, have Haiku file
+# efficiency beads and promote worthwhile open ones. Spends model quota; the waker runs it once per breach.
+set -u
+seat="${1:?usage: pace-profile <seat>}"
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+log="$HOME/vault/director/.budget/profile-$seat.log"
+mkdir -p "$(dirname "$log")"
+out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXIT
+{
+    echo "== $(date -Is) seat=$seat"
+    mapfile -t files < <(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -600 2>/dev/null)
+    [ "${#files[@]}" -gt 0 ] || { echo "no recent sessions"; exit 0; }
+    "$here/agent-profile" "$out" "${files[@]}" >"$out/summary.txt" 2>&1
+    "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 || true
+    cd "$HOME/repos" || exit 1
+    {
+        echo "Seat $seat went over its pace limit. From this usage profile, find the biggest token or time sinks."
+        echo "For each, file a bead: bd create --label agents-stack --type task with a title starting 'efficiency:'."
+        echo "Then list existing open beads (bd list --label agents-stack --status open) worth promoting because they"
+        echo "improve efficiency or local-lane throughput, and for each run: bd comments add <id> \"promote: <why>\"."
+        echo "--- profile ---"
+        head -c 20000 "$out/summary.txt"
+    } | claude -p --model haiku
+} >>"$log" 2>&1
