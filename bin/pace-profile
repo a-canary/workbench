@@ -40,12 +40,12 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
     reply=$(cd "$out" && printf '%s\n' "$prompt" | claude -p --model haiku --tools "" --strict-mcp-config) \
         || { echo "claude failed"; exit 0; }
     cd "$repos" || { echo "no repos dir"; exit 0; }
-    n=0
+    n=0 m=0 seen=" "
     while IFS= read -r line; do
         case "$line" in
         "efficiency: "*)
             [ "$n" -lt 5 ] || continue
-            title=${line#efficiency: }
+            title=${line#efficiency: }; title=${title:0:120}
             [ -n "${title//[[:space:]]/}" ] || continue
             case " $title" in *" -"*) echo "dropped title: $title"; continue;; esac
             bd create --title "efficiency: $title" --type task --labels agents-stack -p 3 </dev/null && n=$((n+1))
@@ -55,7 +55,10 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
             id=${rest%% *}
             why=""; [ "$rest" != "$id" ] && why=${rest#* }
             [[ "$id" =~ ^repos-[a-z0-9]+(\.[0-9]+)*$ ]] || { echo "dropped bad id"; continue; }
-            bd comments add "$id" "promote: $why" </dev/null
+            [ "$m" -lt 5 ] || continue
+            case "$seen" in *" $id "*) continue;; esac
+            seen="$seen$id "
+            bd comments add "$id" "promote: ${why:0:200}" </dev/null && m=$((m+1))
             ;;
         esac
     done <<<"$reply"

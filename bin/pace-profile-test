@@ -4,7 +4,8 @@
 # the script acts on two shapes only, at a fixed priority it never takes from the model:
 #   efficiency: <title>        -> bd create --title "efficiency: <title>" --type task --labels agents-stack -p 3
 #   promote: <bead id> <why>   -> bd comments add <id> "promote: <why>"   (id must match ^repos-[a-z0-9]+(\.[0-9]+)*$)
-# A title holding a word that starts with "-" is dropped. Anything else is ignored; at most 5 beads per run. No sessions, or agent-profile failing: no model call, rc 0.
+# A title holding a word that starts with "-" is dropped. Anything else is ignored; at most 5 beads and 5 promote
+# comments (one per id) per run; title cut to 120 chars, why to 200. No sessions, or agent-profile failing: no model call, rc 0.
 # One run at a time: flock on <PACE_PROFILE_SESSIONS>/.pace-profile.lock; a run that cannot take it exits 0 at once.
 # Seams: PACE_PROFILE_SESSIONS (dir searched for *.jsonl, default ~/.claude/projects), PACE_PROFILE_LOG,
 #        PACE_PROFILE_AGENT (default bin/agent-profile), PACE_PROFILE_REPOS (cwd for bd, default ~/repos); claude, bd on PATH.
@@ -75,6 +76,16 @@ check "3 bad ids dropped" "$(grep -c '^comments' "$tmp/bd.calls" 2>/dev/null || 
 reset; for i in 1 2 3 4 5 6 7; do echo "efficiency: e$i"; done >"$tmp/reply"; run >/dev/null
 check "4 capped at 5" "$(grep -c '^create' "$tmp/bd.calls")" 5
 
+# 4b. promote: at most 5 comments, one per bead id; why cut to 200 chars, title to 120
+reset
+{ for i in 1 2 3 4 5 6 7; do echo "promote: repos-a$i why$i"; done; echo "promote: repos-a1 again"
+  echo "promote: repos-z $(printf 'w%.0s' $(seq 500))"; echo "efficiency: $(printf 't%.0s' $(seq 500))"; } >"$tmp/reply"
+run >/dev/null
+check "4b promote capped at 5" "$(grep -c '^comments' "$tmp/bd.calls")" 5
+check "4b one comment per id" "$(grep -c '^comments add repos-a1 ' "$tmp/bd.calls")" 1
+check "4b title cut to 120" "$(awk '/^create/{print ($0 ~ /t{121}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
+reset; echo "promote: repos-z $(printf 'w%.0s' $(seq 500))" >"$tmp/reply"; run >/dev/null
+check "4b why cut to 200" "$(awk '/^comments/{print ($0 ~ /w{201}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
 # 5. agent-profile failing: no model call
 reset; touch "$tmp/agent.fail"; check "5 rc 0" "$(run)" 0
 check "5 no model call on a failed profile" "$(test -e "$tmp/claude.args" && echo called)" ""
