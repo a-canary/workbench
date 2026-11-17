@@ -397,14 +397,41 @@ has "36 P0 nudged over pace" "$W/out" "seat=stack nudged bead=s-0"
 world; echo "0.92 0.95" >"$W/meter"; ready stack s-0; mkdir -p "$W/prio"; echo 0 >"$W/prio/s-0"; ptick
 pre "37 P0 stopped at 90% use" "$W/out" "seat=stack budget-stop bead=s-0 use "
 # 38. the first breach profiles once; later ticks over pace do not; back under pace re-arms it
-world; echo "0.50 0.95" >"$W/meter"; ptick; ptick
+# the profile runs detached: wait (up to 3 s) for the stub to have written n lines
+waitprof() { for _ in $(seq 30); do [ "$(wc -l <"$W/profiled" 2>/dev/null || echo 0)" -ge "$1" ] && return; sleep 0.1; done; }
+world; echo "0.50 0.95" >"$W/meter"; ptick; ptick; waitprof 1; sleep 0.3
 check "38 one profile per breach, only the seat over pace" "$(profiled)" "stack,"
-echo "0.50 0.50" >"$W/meter"; ptick; echo "0.50 0.95" >"$W/meter"; ptick
+echo "0.50 0.50" >"$W/meter"; ptick; echo "0.50 0.95" >"$W/meter"; ptick; waitprof 2
 check "38 a new breach profiles again" "$(profiled)" "stack,stack,"
 # 39. the operator override suppresses the halt and the profile
 world; echo "0.50 0.95" >"$W/meter"; ready stack s-1; echo $(( $(date +%s) + 600 )) >"$W/budget/ignore-until"; ptick
 has "39 override starts P1" "$W/out" "seat=stack started bead=s-1"
 check "39 override: no profile" "$(profiled)" ""
+# 40. one breach crossing every seat's pace_max profiles once (the profile reads every session, not one seat's),
+#     named for the first seat over pace in priority order
+world; echo "0.50 1.50" >"$W/meter"; ptick; waitprof 1; sleep 0.3
+check "40 one profile for a multi-seat breach" "$(profiled)" "trading,"
+# 41. a slow profile never holds the tick
+cat >"$tmp/bin/slowprofile" <<'EOF'
+#!/bin/bash
+sleep 5; echo "$1" >>"$W/profiled"
+EOF
+chmod +x "$tmp/bin/slowprofile"
+world; echo "0.50 0.95" >"$W/meter"; t0=$(date +%s%N)
+tick WAKER_PRIO_CMD="$tmp/bin/prio" WAKER_PROFILE_CMD="$tmp/bin/slowprofile"
+check "41 tick under 1.5 s with a slow profile" "$(( ($(date +%s%N) - t0) / 1000000 < 1500 ))" 1
+# 42. unreadable meter: no profile
+world; echo "? ?" >"$W/meter"; ptick; sleep 0.3
+check "42 unreadable meter: no profile" "$(profiled)" ""
+# 43. the default priority lookup reads `bd show <bead> --json` (an array) in the seat's repo
+cat >"$tmp/fake/bd" <<'EOF'
+#!/bin/bash
+[ "$1 $3" = "show --json" ] && [ "$2" = s-0 ] && echo '[{"id":"s-0","priority":0}]'
+EOF
+chmod +x "$tmp/fake/bd"
+world; echo "0.50 0.95" >"$W/meter"; ready stack s-0; tick WAKER_PROFILE_CMD="$tmp/bin/profile"
+has "43 default lookup sees P0" "$W/out" "seat=stack started bead=s-0"
+command rm -f "$tmp/fake/bd"
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails

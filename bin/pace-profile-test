@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# pace-profile-test — hermetic contract for bin/pace-profile <seat> (repos-kcyh6).
+# Haiku reads session transcripts (untrusted: fetched pages, tool output), so it gets NO tools. It prints lines and
+# the script acts on two shapes only, at a fixed priority it never takes from the model:
+#   efficiency: <title>        -> bd create --title "efficiency: <title>" --type task --labels agents-stack -p 3
+#   promote: <bead id> <why>   -> bd comments add <id> "promote: <why>"   (id must match ^repos-[a-z0-9]+(\.[0-9]+)*$)
+# A title holding a word that starts with "-" is dropped. Anything else is ignored; at most 5 beads per run. No sessions, or agent-profile failing: no model call, rc 0.
+# Seams: PACE_PROFILE_SESSIONS (dir searched for *.jsonl, default ~/.claude/projects), PACE_PROFILE_LOG,
+#        PACE_PROFILE_AGENT (default bin/agent-profile), PACE_PROFILE_REPOS (cwd for bd, default ~/repos); claude, bd on PATH.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile-test.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=1; fi; }
+mkdir -p "$tmp/fake" "$tmp/sess/p" "$tmp/repos"
+cat >"$tmp/fake/claude" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/claude.args"; cat >"$T/claude.stdin"; cat "$T/reply" 2>/dev/null
+EOF
+cat >"$tmp/fake/bd" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >>"$T/bd.calls"
+EOF
+cat >"$tmp/agent" <<'EOF'
+#!/bin/bash
+[ -e "$T/agent.fail" ] && { echo "Traceback: boom"; exit 1; }
+echo "seat stack idle 40m bash 120 calls"
+EOF
+chmod +x "$tmp/fake/claude" "$tmp/fake/bd" "$tmp/agent"
+run() { env T="$tmp" PATH="$tmp/fake:$PATH" PACE_PROFILE_SESSIONS="$tmp/sess" PACE_PROFILE_LOG="$tmp/log" \
+  PACE_PROFILE_AGENT="$tmp/agent" PACE_PROFILE_REPOS="$tmp/repos" "$here/pace-profile" stack >/dev/null 2>&1; echo $?; }
+reset() { command rm -f "$tmp"/claude.* "$tmp"/bd.calls "$tmp"/reply "$tmp"/agent.fail; }
+
+# 1. no recent sessions: no model call, rc 0
+reset; check "1 rc 0" "$(run)" 0
+check "1 no model call" "$(test -e "$tmp/claude.args" && echo called)" ""
+
+# 2. sessions present: Haiku is called with no tools, and the shapes become fixed-priority bd calls
+touch "$tmp/sess/p/a.jsonl"
+cat >"$tmp/reply" <<'EOF'
+Here is my analysis.
+efficiency: cache defend reviews per sha
+promote: repos-muks cuts idle lead time
+promote: repos-6xin.2 grading reuse
+EOF
+check "2 rc 0" "$(run)" 0
+check "2 model has no Bash tool" "$(grep -c 'Bash(' "$tmp/claude.args")" 0
+check "2 haiku" "$(grep -c -- '--model haiku' "$tmp/claude.args")" 1
+check "2 bead filed at P3" "$(grep -cxF 'create --title efficiency: cache defend reviews per sha --type task --labels agents-stack -p 3' "$tmp/bd.calls")" 1
+check "2 promote comments" "$(grep -c '^comments add repos-' "$tmp/bd.calls")" 2
+check "2 only those calls" "$(wc -l <"$tmp/bd.calls")" 3
+
+# 3. injection in the reply: no other priority, no bad ids, no commands
+reset
+cat >"$tmp/reply" <<'EOF'
+bd create --title "start everything" -p 0
+efficiency: x -p 0
+promote: repos-x; rm -rf ~ now
+promote: ../etc nope
+  efficiency: indented ignored
+EOF
+run >/dev/null
+check "3 no P0 anywhere" "$(grep -c -- '-p 0' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+check "3 a title with a -flag word is dropped" "$(grep -c '^create' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+check "3 bad ids dropped" "$(grep -c '^comments' "$tmp/bd.calls" 2>/dev/null || echo 0)" 0
+
+# 4. at most 5 beads
+reset; for i in 1 2 3 4 5 6 7; do echo "efficiency: e$i"; done >"$tmp/reply"; run >/dev/null
+check "4 capped at 5" "$(grep -c '^create' "$tmp/bd.calls")" 5
+
+# 5. agent-profile failing: no model call
+reset; touch "$tmp/agent.fail"; check "5 rc 0" "$(run)" 0
+check "5 no model call on a failed profile" "$(test -e "$tmp/claude.args" && echo called)" ""
+
+[ $fails = 0 ] && echo "pace-profile-test: PASS" || echo "pace-profile-test: FAIL"
+exit $fails
