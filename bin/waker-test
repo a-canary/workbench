@@ -329,5 +329,40 @@ has "29 unreadable screen: running" "$W/out" "seat=ndv running"
 world; ready ndv n-7; quiet; dtick WAKER_IDLE_S=soon
 has "29 bad idle seconds means the default" "$W/out" "seat=ndv nudged bead=n-7"
 
+
+# --- repos-pii1v: the Claude session window (5h limit) ---
+# WAKER_SESSION_CMD prints the 5h session use as a fraction, or "?" when unreadable. At or above
+# WAKER_SESSION_MAX (default 0.98) every Claude seat gets "session-out": no start, no nudge, even under the
+# operator override (the override lifts pace rules; it cannot make an exhausted window answer).
+# On the first tick after the window comes back, every live idle seat with a ready bead is nudged once,
+# ignoring the nudge gap: one wake for all seats at reset. The window state lives in <seats>/.session-out.
+cat >"$tmp/bin/session" <<'EOF'
+#!/bin/bash
+cat "$W/session" 2>/dev/null || echo "?"
+EOF
+chmod +x "$tmp/bin/session"
+stick() { ntick WAKER_SESSION_CMD="$tmp/bin/session" "$@"; }
+
+# 30. window exhausted, override on: nobody nudged or started, each Claude seat says session-out
+world; echo $(( $(date +%s) + 600 )) >"$W/budget/ignore-until"; echo "1.00" >"$W/session"
+ready ndv n-7; ready trading t-1; live_idle ndv; stick
+pre "30 live seat session-out" "$W/out" "seat=ndv session-out"
+pre "30 dead seat session-out" "$W/out" "seat=trading session-out"
+check "30 nobody nudged" "$(nudged)" ""
+check "30 nothing started" "$(started)" ""
+
+# 31. next tick the window is back: the live idle seat is nudged at once, inside its nudge gap
+mkdir -p "$W/seats/.nudge"; date +%s >"$W/seats/.nudge/ndv"
+echo "0.02" >"$W/session"; stick
+has "31 reset wakes the live seat" "$W/out" "seat=ndv nudged bead=n-7"
+check "31 one wake" "$(nudged)" "ndv n-7,"
+# 32. the tick after that: the gap applies again, no second wake
+stick
+check "32 no second wake" "$(nudged)" "ndv n-7,"
+
+# 33. unreadable session meter changes nothing (fail open to today's rules)
+world; ready ndv n-7; live_idle ndv; echo "?" >"$W/session"; stick
+has "33 unreadable window: normal nudge" "$W/out" "seat=ndv nudged bead=n-7"
+
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
