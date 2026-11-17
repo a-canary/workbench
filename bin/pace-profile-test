@@ -15,7 +15,8 @@ check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2
 mkdir -p "$tmp/fake" "$tmp/sess/p" "$tmp/repos"
 cat >"$tmp/fake/claude" <<'EOF'
 #!/bin/bash
-printf '%s\n' "$*" >>"$T/claude.args"; cat >"$T/claude.stdin"; cat "$T/reply" 2>/dev/null
+printf '%s\n' "$*" >>"$T/claude.args"; printf '[%s]' "$@" >"$T/claude.argv"; pwd >"$T/claude.cwd"
+cat >"$T/claude.stdin"; cat "$T/reply" 2>/dev/null
 EOF
 cat >"$tmp/fake/bd" <<'EOF'
 #!/bin/bash
@@ -44,7 +45,12 @@ promote: repos-muks cuts idle lead time
 promote: repos-6xin.2 grading reuse
 EOF
 check "2 rc 0" "$(run)" 0
-check "2 model has no Bash tool" "$(grep -c 'Bash(' "$tmp/claude.args")" 0
+# no tools: --tools "" disables every built-in tool (--allowedTools only skips prompts, it removes nothing);
+# --strict-mcp-config with no --mcp-config drops every MCP server; run from an empty dir so no project settings load
+check "2 built-in tools disabled" "$(grep -c '\[--tools\]\[\]' "$tmp/claude.argv")" 1
+check "2 MCP servers dropped" "$(grep -c '\[--strict-mcp-config\]' "$tmp/claude.argv")" 1
+check "2 no --mcp-config" "$(grep -c '\[--mcp-config\]' "$tmp/claude.argv")" 0
+check "2 model not run from the repos dir" "$(grep -cxF "$tmp/repos" "$tmp/claude.cwd")" 0
 check "2 haiku" "$(grep -c -- '--model haiku' "$tmp/claude.args")" 1
 check "2 bead filed at P3" "$(grep -cxF 'create --title efficiency: cache defend reviews per sha --type task --labels agents-stack -p 3' "$tmp/bd.calls")" 1
 check "2 promote comments" "$(grep -c '^comments add repos-' "$tmp/bd.calls")" 2

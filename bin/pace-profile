@@ -33,7 +33,10 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
         echo "--- profile ---"
         head -c 20000 "$out/summary.txt"
     })
-    reply=$(printf '%s\n' "$prompt" | claude -p --model haiku --allowedTools "") || { echo "claude failed"; exit 0; }
+    # no tools at all: --tools "" disables the built-ins, --strict-mcp-config (no --mcp-config) drops MCP servers,
+    # and the empty temp dir as cwd loads no project settings. --allowedTools would only skip prompts.
+    reply=$(cd "$out" && printf '%s\n' "$prompt" | claude -p --model haiku --tools "" --strict-mcp-config) \
+        || { echo "claude failed"; exit 0; }
     cd "$repos" || { echo "no repos dir"; exit 0; }
     n=0
     while IFS= read -r line; do
