@@ -1,25 +1,57 @@
 #!/usr/bin/env bash
-# pace-profile <seat> — a seat went over its pace limit: profile recent Claude sessions, have Haiku file
-# efficiency beads and promote worthwhile open ones. Spends model quota; the waker runs it once per breach.
+# pace-profile <seat> — a seat went over its pace limit: profile recent Claude sessions and let Haiku
+# propose efficiency work. Spends model quota; the waker runs it once per breach, detached.
+# Contract: bin/pace-profile-test. Haiku gets NO tools (transcripts are untrusted). It prints lines and this
+# script acts on two shapes only, at column 0, at a fixed priority it never takes from the model:
+#   efficiency: <title>        -> bd create --title "efficiency: <title>" --type task --labels agents-stack -p 3
+#   promote: <bead id> <why>   -> bd comments add <id> "promote: <why>"  (id ^repos-[a-z0-9]+(\.[0-9]+)*$)
+# A title with a word starting "-" is dropped; at most 5 beads per run. No sessions (none modified in 600 min)
+# or agent-profile failing: logged, no model call, exit 0. bd runs in PACE_PROFILE_REPOS, args never eval'd.
+# Seams: PACE_PROFILE_SESSIONS, PACE_PROFILE_LOG, PACE_PROFILE_AGENT, PACE_PROFILE_REPOS.
 set -u
 seat="${1:?usage: pace-profile <seat>}"
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-log="$HOME/vault/director/.budget/profile-$seat.log"
+sessions="${PACE_PROFILE_SESSIONS:-$HOME/.claude/projects}"
+log="${PACE_PROFILE_LOG:-$HOME/vault/director/.budget/profile-$seat.log}"
+agent="${PACE_PROFILE_AGENT:-$here/agent-profile}"
+repos="${PACE_PROFILE_REPOS:-$HOME/repos}"
 mkdir -p "$(dirname "$log")"
 out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXIT
 {
     echo "== $(date -Is) seat=$seat"
-    mapfile -t files < <(find "$HOME/.claude/projects" -name '*.jsonl' -mmin -600 2>/dev/null)
+    mapfile -t files < <(find "$sessions" -name '*.jsonl' -mmin -600 2>/dev/null)
     [ "${#files[@]}" -gt 0 ] || { echo "no recent sessions"; exit 0; }
-    "$here/agent-profile" "$out" "${files[@]}" >"$out/summary.txt" 2>&1
-    "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 || true
-    cd "$HOME/repos" || exit 1
-    {
+    "$agent" "$out" "${files[@]}" >"$out/summary.txt" 2>&1 \
+        || { echo "agent-profile failed; no model call"; exit 0; }
+    [ -x "$here/agent-profile-label" ] && { "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 || true; }
+    prompt=$({
         echo "Seat $seat went over its pace limit. From this usage profile, find the biggest token or time sinks."
-        echo "For each, file a bead: bd create --label agents-stack --type task with a title starting 'efficiency:'."
-        echo "Then list existing open beads (bd list --label agents-stack --status open) worth promoting because they"
-        echo "improve efficiency or local-lane throughput, and for each run: bd comments add <id> \"promote: <why>\"."
+        echo "Reply with lines only, each starting at column 0, in exactly these shapes:"
+        echo "efficiency: <short title of one sink to fix>"
+        echo "promote: <existing bead id, e.g. repos-abc1> <why it improves efficiency or local-lane throughput>"
+        echo "Anything else is ignored. You have no tools."
         echo "--- profile ---"
         head -c 20000 "$out/summary.txt"
-    } | claude -p --model haiku --allowedTools "Bash(bd create:*)" "Bash(bd list:*)" "Bash(bd comments add:*)"
+    })
+    reply=$(printf '%s\n' "$prompt" | claude -p --model haiku --allowedTools "") || { echo "claude failed"; exit 0; }
+    cd "$repos" || { echo "no repos dir"; exit 0; }
+    n=0
+    while IFS= read -r line; do
+        case "$line" in
+        "efficiency: "*)
+            [ "$n" -lt 5 ] || continue
+            title=${line#efficiency: }
+            [ -n "${title//[[:space:]]/}" ] || continue
+            case " $title" in *" -"*) echo "dropped title: $title"; continue;; esac
+            bd create --title "efficiency: $title" --type task --labels agents-stack -p 3 </dev/null && n=$((n+1))
+            ;;
+        "promote: "*)
+            rest=${line#promote: }
+            id=${rest%% *}
+            why=""; [ "$rest" != "$id" ] && why=${rest#* }
+            [[ "$id" =~ ^repos-[a-z0-9]+(\.[0-9]+)*$ ]] || { echo "dropped bad id"; continue; }
+            bd comments add "$id" "promote: $why" </dev/null
+            ;;
+        esac
+    done <<<"$reply"
 } >>"$log" 2>&1

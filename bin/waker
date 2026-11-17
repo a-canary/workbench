@@ -35,9 +35,12 @@
 #   WAKER_PRIO_CMD     "<cmd> <repo> <bead>" prints the bead's priority (default: bd show --json).
 #                      Over its pace (use under 0.90) a seat still starts or is nudged for a P0 bead
 #                      (priority exactly "0"); anything else, or unreadable, stays halted.
-#   WAKER_PROFILE_CMD  "<cmd> <seat>" runs detached once per pace breach (no override, readable meter,
-#                      pace > pace_max; marker $WAKER_BUDGET/profiled-<seat>, removed when pace <= pace_max).
-#                      Default: pace-profile next to this script. Never blocks the tick.
+#   WAKER_PROFILE_CMD  "<cmd> <seat>" runs once per pace breach, not per seat (no override, readable meter,
+#                      not --dry-run). Launched on the first tick where any seat is over its pace_max, with
+#                      the first such seat in priority order. Global marker $WAKER_BUDGET/profiled is written
+#                      only after a successful launch (command exists, executable), cleared on a tick where
+#                      no seat is over pace. Fully detached (setsid, redirected, backgrounded); never waited.
+#                      Default: pace-profile next to this script.
 # tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
 # would reach a session named "ndv-lead".
 set -u
@@ -103,7 +106,7 @@ if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
 fi
 if [ -z "${WAKER_PRIO_CMD:-}" ]; then
     default_prio() {
-        cd "$1" && bd show "$2" --json | jq -r '.[0].priority // empty'
+        cd "$1" && timeout 10 bd show "$2" --json | jq -r '.[0].priority // empty'
     }
     WAKER_PRIO_CMD="default_prio"
 fi
@@ -240,23 +243,22 @@ sorted_seats=$(printf '%s\n' "${seats[@]}" | sort -t'|' -k2,2n -k1,1)
 
 # Pace breach: profile once per breach, detached; the marker re-arms when pace is back under
 if [ "$override" -eq 0 ] && [ "$meter_ok" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    breach_seat=""
     while IFS= read -r s; do
         [ -z "$s" ] && continue
         IFS='|' read -r name priority pace_max _ <<<"$s"
-        marker="$BUDGET/profiled-$name"
-        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
-            [ -e "$marker" ] && continue
-            mkdir -p "$BUDGET" && : >"$marker"
-            setsid nohup $WAKER_PROFILE_CMD "$name" </dev/null >/dev/null 2>&1 9>&- &
-            pp=$!
-            for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-                kill -0 "$pp" 2>/dev/null || break
-                sleep 0.1
-            done
-        else
-            rm -f "$marker"
-        fi
+        if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then breach_seat="$name"; break; fi
     done <<<"$sorted_seats"
+    marker="$BUDGET/profiled"
+    if [ -z "$breach_seat" ]; then
+        rm -f "$marker"
+    elif [ ! -e "$marker" ]; then
+        read -r -a profile_argv <<<"$WAKER_PROFILE_CMD"
+        if [ "${#profile_argv[@]}" -gt 0 ] && command -v "${profile_argv[0]}" >/dev/null 2>&1; then
+            setsid "${profile_argv[@]}" "$breach_seat" </dev/null >/dev/null 2>&1 9>&- &
+            mkdir -p "$BUDGET" && : >"$marker"
+        fi
+    fi
 fi
 
 # First pass: count running seats; nudge live idle seats that have a ready bead
