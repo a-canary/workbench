@@ -20,5 +20,6 @@ run "bun (pass) line naming it is clean"       clean '(pass) refuses when docker
 run "tap ok line naming it is clean"           clean 'ok 3 - ECONNREFUSED 127.0.0.1:5432 is reported\nnot ok 4 - other\n'
 run "indented check-mark line is clean"        clean '  ✓ Startup Error is surfaced\n  ✗ other\n'
 run "real crash after a PASS line still found" crash 'PASS  first\nError: EROFS: read-only file system, open x\n'
+run "crash after a NUL byte still found"      crash 'progress\x00bar\nfatal: not a git repository\n'
 
 exit $fail

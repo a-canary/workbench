@@ -13,6 +13,6 @@ startup_crash() { # $1 output file; $2=red also matches red_pats
   # the runner's passing-report lines before matching
   local p; for p in "${crash_pats[@]}" ${2:+"${red_pats[@]}"}; do
     # process substitution, not a pipe: under the callers' pipefail grep -q's early exit would SIGPIPE the filter
-    grep -qE -- "$p" < <(grep -vE '^[[:space:]]*(PASS|\(pass\)|ok |✓)' "$1") && { crash=$p; return 0; }
+    grep -qE -- "$p" < <(grep -avE '^[[:space:]]*(PASS|\(pass\)|ok |✓)' "$1") && { crash=$p; return 0; }
   done; return 1
 }
