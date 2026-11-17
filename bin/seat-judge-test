@@ -101,6 +101,8 @@ has "deadline named" "$r" "deadline"
 check "deadline held" "$(( SECONDS - t0 < 8 ))" "1"
 ( sleep 10 ) | SEAT_JUDGE_DEADLINE=2 "$tmp/wb/bin/seat-judge" >/dev/null 2>&1; check "stdin that never closes denied" "$?" "2"
 r=$(SEAT_JUDGE_DEADLINE=999 run Bash 'sudo ls'); check "deadline env cannot raise above 50 (still answers)" "${r%%|*}" "0"
+# ponytail: a source check, not a 50 s drip run; deleting the cap must fail here
+grep -q "deadline = min(50, " "$tmp/wb/bin/seat-judge"; check "deadline env capped at 50 in source" "$?" "0"
 
 kill $stub; wait $stub 2>/dev/null
 r=$(run Bash 'sudo ls'); check "JEV down, fallback fails: denied" "${r%%|*}" "2"; has "says unavailable" "$r" "unavailable"
