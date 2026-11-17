@@ -631,23 +631,25 @@ export async function saveSeat(dir: string, name: string, form: FormData): Promi
     }
   }
   if (changed.length === 0) return null;
-  if (inFlight.has(`seat:${name}`)) return { status: 409, msg: "this seat is being saved right now" };
-  inFlight.add(`seat:${name}`);
+  // ponytail: one lock for all seats, since saves share one git index; per-repo locks if seats ever span repos.
+  if (inFlight.has("seats")) return { status: 409, msg: "a seat is being saved right now; try again" };
+  inFlight.add("seats");
   const file = `${name}.json`;
   const path = `${dir}/${file}`;
-  const before = readFileSync(path, "utf8");
   const vc = async (...a: string[]) => {
     const p = Bun.spawn(["git", "-C", dir, ...a], { stdout: "ignore", stderr: "ignore", timeout: 15000 });
     return (await p.exited) === 0;
   };
+  let before: string | undefined;
   try {
+    before = readFileSync(path, "utf8");
     writeFileSync(path, JSON.stringify(seat, null, 2) + "\n");
     if ((await vc("add", "--", file)) && (await vc("commit", "-q", "-m", `seats: ${name}: edit ${changed.join(", ")}`, "--", file))) return null;
-    writeFileSync(path, before);
+    writeFileSync(path, before!);
     await vc("reset", "-q", "--", file);
     return { status: 500, msg: "could not commit the seat file; nothing was changed" };
   } finally {
-    inFlight.delete(`seat:${name}`);
+    inFlight.delete("seats");
   }
 }
 
