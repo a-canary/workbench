@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# seat-test — RED for bin/seat (repos-n98vs.1, spec ~/vault/agents/assistant/spec-layout-2026-11-17.md).
+#
+# Contract:
+#   seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]
+#   Instance: $SEAT_VAULT/<seat>/seat.yaml (default ~/vault/seats). Flat `key: value` lines:
+#     role, repo, harness (claude|pi), model (pi model, provider/id), claude_model.
+#   Role template: <workbench>/seats/<role>/AGENTS.md and permissions.yaml (flat `key: a, b` lines:
+#     tools = Claude tool names, pi_tools = pi tool names, bash = allowed command prefixes).
+#   Claude: cd <repo>; claude --model <claude_model> --append-system-prompt-file <AGENTS.md>
+#           --settings <generated json> [prompt]. Settings: permissions.allow = each tool except Bash,
+#           plus Bash(<prefix>:*) per bash prefix; no bare "Bash". permissions.deny = each of Claude's
+#           built-in tools (Read Grep Glob Bash Edit Write NotebookEdit WebFetch WebSearch) not in tools.
+#   No prompt word may start with "-" (refused even after "--"), so nothing reaches the harness as a flag.
+#   pi:     cd <repo>; pi --model <model> --append-system-prompt <AGENTS.md> --tools <pi_tools, no spaces> [prompt]
+#           pi cannot scope bash by prefix, so when permissions.yaml has a bash: list, bash is dropped from
+#           --tools (warning on stderr) instead of granted unscoped.
+#   Flags may come before or after the prompt words.
+#   --dry-run prints `cd <repo>` on line 1 and the command as one line of shell-quoted words on line 2, runs nothing.
+#   Errors (exit non-zero, message on stderr): unknown seat, role without AGENTS.md, harness not claude|pi,
+#     empty model for the chosen harness, repo that is not a directory.
+#   Only --dry-run is tested; the cd + exec path launches a real harness.
+set -u
+here=$(cd "$(dirname "$0")/.." && pwd)
+seat="$here/bin/seat"
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=$((fails + 1)); fi; }
+has() { if grep -qF -- "$3" <<<"$2"; then echo "PASS  $1"; else echo "FAIL  $1: '$3' not in: $2"; fails=$((fails + 1)); fi; }
+hasnt() { if grep -qF -- "$3" <<<"$2"; then echo "FAIL  $1: '$3' found in: $2"; fails=$((fails + 1)); else echo "PASS  $1"; fi; }
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/v/ghc" "$tmp/repo"
+cat >"$tmp/v/ghc/seat.yaml" <<EOF
+# comment line
+role: github-controller
+repo: $tmp/repo
+harness: pi
+model: v100/fast
+claude_model: opus
+EOF
+role="$here/seats/github-controller"
+export SEAT_VAULT="$tmp/v"
+
+# 1. pi, harness from seat.yaml
+out=$("$seat" run ghc --dry-run 2>&1); rc=$?
+check "1 rc" "$rc" "0"
+check "1 cd repo" "$(sed -n 1p <<<"$out")" "cd $tmp/repo"
+cmd=$(sed -n 2p <<<"$out")
+has "1 pi" "$cmd" "pi "
+has "1 model" "$cmd" "--model v100/fast"
+has "1 role prompt" "$cmd" "--append-system-prompt $role/AGENTS.md"
+# pi has no per-command bash scoping: with a bash: prefix list, bash is withheld rather than granted whole.
+has "1 tools" "$cmd" "--tools read,grep,find,ls"
+hasnt "1 no unscoped bash" "$cmd" "ls,bash"
+hasnt "1 no claude settings" "$cmd" "--settings"
+
+# 2. claude via --harness, with a prompt
+out=$("$seat" run ghc --harness claude --dry-run "take bead x" 2>&1); rc=$?
+check "2 rc" "$rc" "0"
+cmd=$(sed -n 2p <<<"$out")
+has "2 claude" "$cmd" "claude "
+has "2 model" "$cmd" "--model opus"
+has "2 role file" "$cmd" "--append-system-prompt-file $role/AGENTS.md"
+has "2 prompt kept as one word" "$cmd" "take\ bead\ x"
+settings=$(grep -oE -- "--settings [^ ]+" <<<"$cmd" | cut -d' ' -f2)
+[ -r "$settings" ] || { echo "FAIL  2 settings file readable: '$settings'"; fails=$((fails + 1)); }
+allow=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["permissions"]["allow"]))' "$settings" 2>/dev/null)
+has "2 allow Read" "$allow" "Read"
+has "2 allow gh pr merge" "$allow" "Bash(gh pr merge:*)"
+hasnt "2 no gh api" "$allow" "gh api"
+has "2 allow git status" "$allow" "Bash(git status:*)"
+check "2 no bare Bash" "$(grep -cx 'Bash' <<<"$allow")" "0"
+# allow only auto-approves; tools the role does not list are denied outright, not left behind a prompt.
+deny=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["permissions"].get("deny", [])))' "$settings" 2>/dev/null)
+has "2 deny Edit" "$deny" "Edit"
+has "2 deny Write" "$deny" "Write"
+hasnt "2 Read not denied" "$deny" "Read"
+# MCP servers from user or project config would bypass the bash prefix list.
+has "2 strict mcp" "$cmd" "--strict-mcp-config"
+
+# 2b. flags after the prompt are still flags
+out=$("$seat" run ghc "take bead x" --harness claude --dry-run 2>&1); rc=$?
+check "2b rc" "$rc" "0"
+has "2b dry run honoured" "$(sed -n 1p <<<"$out")" "cd $tmp/repo"
+has "2b claude" "$(sed -n 2p <<<"$out")" "claude "
+
+# 3. errors
+"$seat" run nosuch --dry-run >/dev/null 2>&1; check "3 unknown seat fails" "$([ $? -ne 0 ] && echo y)" "y"
+"$seat" run ghc --harness codex --dry-run >/dev/null 2>&1; check "3 bad harness fails" "$([ $? -ne 0 ] && echo y)" "y"
+mkdir -p "$tmp/v/bad"; printf 'role: nosuchrole\nrepo: %s\nharness: pi\nmodel: m\n' "$tmp/repo" >"$tmp/v/bad/seat.yaml"
+"$seat" run bad --dry-run >/dev/null 2>&1; check "3 role without AGENTS.md fails" "$([ $? -ne 0 ] && echo y)" "y"
+
+mkdir -p "$tmp/v/nomodel"; printf 'role: github-controller\nrepo: %s\nharness: pi\n' "$tmp/repo" >"$tmp/v/nomodel/seat.yaml"
+"$seat" run nomodel --dry-run >/dev/null 2>&1; check "3 empty model fails" "$([ $? -ne 0 ] && echo y)" "y"
+mkdir -p "$tmp/v/norepo"; printf 'role: github-controller\nrepo: %s/missing\nharness: pi\nmodel: m\n' "$tmp" >"$tmp/v/norepo/seat.yaml"
+"$seat" run norepo --dry-run >/dev/null 2>&1; check "3 missing repo fails" "$([ $? -ne 0 ] && echo y)" "y"
+
+# 3b. unknown options are refused, never passed to the harness (e.g. --dangerously-skip-permissions)
+"$seat" run ghc --dangerously-skip-permissions --dry-run >/dev/null 2>&1; check "3b unknown option fails" "$([ $? -ne 0 ] && echo y)" "y"
+# No word starting with "-" ever reaches the harness: not after "--", not as a bare prompt word.
+"$seat" run ghc --dry-run -- --dangerously-skip-permissions >/dev/null 2>&1; check "3b -- does not smuggle a flag" "$([ $? -ne 0 ] && echo y)" "y"
+"$seat" run ghc --dry-run take -x >/dev/null 2>&1; check "3b dash word refused" "$([ $? -ne 0 ] && echo y)" "y"
+
+[ $fails = 0 ] && echo "seat-test: PASS" || echo "seat-test: FAIL"
+exit $fails

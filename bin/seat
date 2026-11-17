@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# seat — launch a seat (role template + instance) under Claude Code or pi.
+#
+#   seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]
+#
+# Instance: $SEAT_VAULT/<seat>/seat.yaml (default ~/vault/seats).
+# Role:     <workbench>/seats/<role>/{AGENTS.md,permissions.yaml}.
+# --dry-run prints `cd <repo>` then the command line; runs nothing.
+# Contract and tests: bin/seat-test.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+
+die() { echo "seat: $*" >&2; exit 1; }
+
+# ponytail: flat `key: value` lines only (no nesting, quoting, or lists) — swap in a YAML parser if seats outgrow that.
+yget() { # file key -> value ("" when absent)
+  local line
+  line=$(grep -E "^$2:" "$1" | head -n1) || true
+  line=${line#*:}
+  line=${line#"${line%%[![:space:]]*}"}
+  printf '%s' "${line%"${line##*[![:space:]]}"}"
+}
+
+split_csv() { tr ',' '\n' <<<"$1" | sed 's/^ *//; s/ *$//' | grep -v '^$' || true; }
+
+claude_settings() { # tools bash -> path of a settings json
+  local f
+  f=$(mktemp "${TMPDIR:-/tmp}/seat-settings.XXXXXX.json")
+  python3 -c '
+import json, sys
+tools, bash = sys.argv[1].split(","), sys.argv[2].split(",")
+allow = [t.strip() for t in tools if t.strip() and t.strip() != "Bash"]
+allow += ["Bash(%s:*)" % p.strip() for p in bash if p.strip()]
+have = [t.strip() for t in tools]
+builtin = "Read Grep Glob Bash Edit Write NotebookEdit WebFetch WebSearch".split()
+deny = [t for t in builtin if t not in have]
+print(json.dumps({"permissions": {"allow": allow, "deny": deny}}, indent=2))
+' "$1" "$2" >"$f"
+  printf '%s' "$f"
+}
+
+quote_words() { # shell-quote each word; leave plain words (incl. commas) bare
+  local w out=()
+  for w in "$@"; do
+    if [[ $w =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then out+=("$w"); else out+=("$(printf '%q' "$w")"); fi
+  done
+  echo "${out[*]}"
+}
+
+cmd_run() {
+  local seat=${1:-} harness="" dry=0
+  [ -n "$seat" ] || die "usage: seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]"
+  shift
+  local -a prompt=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --harness) [ $# -ge 2 ] || die "--harness needs a value"; harness=$2; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) prompt+=("$1"); shift ;;
+    esac
+  done
+
+  local vault=${SEAT_VAULT:-$HOME/vault/seats} yaml
+  yaml="$vault/$seat/seat.yaml"
+  [ -r "$yaml" ] || die "unknown seat: $seat ($yaml)"
+
+  local role repo
+  role=$(yget "$yaml" role)
+  repo=$(yget "$yaml" repo)
+  case $role in */*) die "role must not contain '/': $role" ;; esac
+  [ -n "$harness" ] || harness=$(yget "$yaml" harness)
+  case $harness in claude | pi) ;; *) die "harness must be claude or pi: '$harness'" ;; esac
+
+  local rdir="$here/seats/$role"
+  [ -r "$rdir/AGENTS.md" ] || die "role without AGENTS.md: $role"
+  [ -r "$rdir/permissions.yaml" ] || die "role without permissions.yaml: $role"
+  [ -d "$repo" ] || die "repo is not a directory: '$repo'"
+
+  local mkey=model bashlist warn=""
+  [ "$harness" = claude ] && mkey=claude_model
+  local model
+  model=$(yget "$yaml" "$mkey")
+  [ -n "$model" ] || die "seat.yaml has empty $mkey for harness $harness"
+  bashlist=$(yget "$rdir/permissions.yaml" bash)
+
+  local -a cmd
+  if [ "$harness" = claude ]; then
+    # ponytail: real runs exec, so the settings temp file is left behind; upgrade = wrapper that cleans up after the child exits.
+    local settings
+    settings=$(claude_settings "$(yget "$rdir/permissions.yaml" tools)" "$bashlist")
+    cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings" --strict-mcp-config)
+  else
+    local tools
+    tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)")
+    # ponytail: pi cannot scope bash by prefix, so withhold it; upgrade = a pi extension that enforces the bash prefix list.
+    if [ -n "$bashlist" ]; then
+      tools=$(grep -vx bash <<<"$tools" || true)
+      warn="seat: warning: pi cannot scope bash by prefix; bash withheld from --tools"
+    fi
+    cmd=(pi --model "$model" --append-system-prompt "$rdir/AGENTS.md" --tools "$(paste -sd, - <<<"$tools")")
+  fi
+  cmd+=("${prompt[@]}")
+
+  if [ $dry -eq 1 ]; then
+    printf 'cd %q\n' "$repo"
+    quote_words "${cmd[@]}"
+    [ -z "$warn" ] || echo "$warn" >&2
+    return 0
+  fi
+  [ -z "$warn" ] || echo "$warn" >&2
+  cd "$repo"
+  exec "${cmd[@]}"
+}
+
+case ${1:-} in
+  run) shift; cmd_run "$@" ;;
+  *) die "usage: seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]" ;;
+esac
