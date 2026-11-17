@@ -393,6 +393,8 @@ world; echo "0.50 0.95" >"$W/meter"; ready stack s-1; live_idle stack; mkdir -p 
 has "36 P1 not nudged over pace" "$W/out" "seat=stack running"
 world; echo "0.50 0.95" >"$W/meter"; ready stack s-0; live_idle stack; mkdir -p "$W/prio"; echo 0 >"$W/prio/s-0"; ptick
 has "36 P0 nudged over pace" "$W/out" "seat=stack nudged bead=s-0"
+world; echo "0.50 0.95" >"$W/meter"; ready stack s-9; live_idle stack; ptick
+has "36 unreadable priority not nudged over pace" "$W/out" "seat=stack running"
 # 37. use at 90% still stops a P0
 world; echo "0.92 0.95" >"$W/meter"; ready stack s-0; mkdir -p "$W/prio"; echo 0 >"$W/prio/s-0"; ptick
 pre "37 P0 stopped at 90% use" "$W/out" "seat=stack budget-stop bead=s-0 use "
@@ -408,6 +410,10 @@ check "38 a new breach profiles again" "$(profiled)" "stack,stack,"
 world; echo "0.50 0.95" >"$W/meter"; ptick; waitprof 1
 echo "0.50 0.50" >"$W/meter"; ptick; echo "0.50 0.95" >"$W/meter"; ptick; sleep 0.3
 check "38b re-crossing inside the gap: no second profile" "$(profiled)" "stack,"
+# 38e. a non-numeric WAKER_PROFILE_GAP_S falls back to the 10 h gap: no second profile
+world; echo "0.50 0.95" >"$W/meter"; ptick; waitprof 1
+echo "0.50 0.50" >"$W/meter"; ptick WAKER_PROFILE_GAP_S=soon; echo "0.50 0.95" >"$W/meter"; ptick WAKER_PROFILE_GAP_S=soon; sleep 0.3
+check "38e bad gap falls back" "$(profiled)" "stack,"
 # 38c. --dry-run never spends: no profile, no marker
 world; echo "0.50 0.95" >"$W/meter"; mkdir -p "$W/prio"
 env W="$W" PATH="$tmp/fake:$PATH" WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" WAKER_METER_CMD="$tmp/bin/meter" \

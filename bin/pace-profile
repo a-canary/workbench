@@ -26,7 +26,6 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXI
     # 8>&- on every child: a process it leaves behind (a bd daemon) must not keep holding the run lock
     "$agent" "$out" "${files[@]}" >"$out/summary.txt" 2>&1 8>&- \
         || { echo "agent-profile failed; no model call"; exit 0; }
-    [ -x "$here/agent-profile-label" ] && { "$here/agent-profile-label" "$out" >>"$out/summary.txt" 2>&1 8>&- || true; }
     prompt=$({
         echo "Seat $seat went over its pace limit. From this usage profile, find the biggest token or time sinks."
         echo "Reply with lines only, each starting at column 0, in exactly these shapes:"

@@ -86,6 +86,10 @@ check "4b one comment per id" "$(grep -c '^comments add repos-a1 ' "$tmp/bd.call
 check "4b title cut to 120" "$(awk '/^create/{print ($0 ~ /t{121}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
 reset; echo "promote: repos-z $(printf 'w%.0s' $(seq 500))" >"$tmp/reply"; run >/dev/null
 check "4b why cut to 200" "$(awk '/^comments/{print ($0 ~ /w{201}/) ? "long" : "ok"}' "$tmp/bd.calls")" ok
+# 4c. a whitespace-only title is dropped; a promote with no why still posts "promote: "
+reset; printf 'efficiency:    \npromote: repos-q\n' >"$tmp/reply"; run >/dev/null
+check "4c blank title dropped" "$(grep -c '^create' "$tmp/bd.calls")" 0
+check "4c promote with no why" "$(grep -cxF 'comments add repos-q promote: ' "$tmp/bd.calls")" 1
 # 5. agent-profile failing: no model call
 reset; touch "$tmp/agent.fail"; check "5 rc 0" "$(run)" 0
 check "5 no model call on a failed profile" "$(test -e "$tmp/claude.args" && echo called)" ""
