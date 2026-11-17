@@ -54,6 +54,8 @@ cmd_run() {
     case $1 in
       --harness) [ $# -ge 2 ] || die "--harness needs a value"; harness=$2; shift 2 ;;
       --dry-run) dry=1; shift ;;
+      --) shift; prompt+=("$@"); break ;;
+      -*) die "unknown option: $1" ;;
       *) prompt+=("$1"); shift ;;
     esac
   done
@@ -65,6 +67,7 @@ cmd_run() {
   local role repo
   role=$(yget "$yaml" role)
   repo=$(yget "$yaml" repo)
+  case $role in */*) die "role must not contain '/': $role" ;; esac
   [ -n "$harness" ] || harness=$(yget "$yaml" harness)
   case $harness in claude | pi) ;; *) die "harness must be claude or pi: '$harness'" ;; esac
 
@@ -82,6 +85,7 @@ cmd_run() {
 
   local -a cmd
   if [ "$harness" = claude ]; then
+    # ponytail: real runs exec, so the settings temp file is left behind; upgrade = wrapper that cleans up after the child exits.
     local settings
     settings=$(claude_settings "$(yget "$rdir/permissions.yaml" tools)" "$bashlist")
     cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings")
