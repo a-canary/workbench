@@ -32,7 +32,10 @@ import json, sys
 tools, bash = sys.argv[1].split(","), sys.argv[2].split(",")
 allow = [t.strip() for t in tools if t.strip() and t.strip() != "Bash"]
 allow += ["Bash(%s:*)" % p.strip() for p in bash if p.strip()]
-print(json.dumps({"permissions": {"allow": allow}}, indent=2))
+have = [t.strip() for t in tools]
+builtin = "Read Grep Glob Bash Edit Write NotebookEdit WebFetch WebSearch".split()
+deny = [t for t in builtin if t not in have]
+print(json.dumps({"permissions": {"allow": allow, "deny": deny}}, indent=2))
 ' "$1" "$2" >"$f"
   printf '%s' "$f"
 }
@@ -54,7 +57,6 @@ cmd_run() {
     case $1 in
       --harness) [ $# -ge 2 ] || die "--harness needs a value"; harness=$2; shift 2 ;;
       --dry-run) dry=1; shift ;;
-      --) shift; prompt+=("$@"); break ;;
       -*) die "unknown option: $1" ;;
       *) prompt+=("$1"); shift ;;
     esac
