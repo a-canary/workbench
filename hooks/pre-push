@@ -25,8 +25,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       [ -z "$n" ] && rargs=("$local_sha")         # nothing known on target: scan all of local_sha
     fi
   fi
-  if ! added=$(git log -p --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
-     ! names=$(git log --name-only --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
+  if ! added=$(git log --diff-merges=on -p --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
+     ! names=$(git log --diff-merges=on --name-only --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
     echo "pre-push: git scan FAILED for ${local_ref#refs/heads/}; refusing push" >&2
     hits=1
     continue
