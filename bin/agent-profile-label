@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Label each listed idle stretch from agent-profile output with a wait category, using a local model.
+Usage: agent-profile-label DIR   (reads DIR/*.json, writes DIR/labels.tsv, prints idle minutes per seat per category)
+Env: AGENT_PROFILE_LLM (OpenAI-style chat URL), AGENT_PROFILE_MODEL.
+ponytail: one pass, serial, no retries; rows the model skips, and batches that fail or come back empty,
+stay 'unlabelled' and are shown as such. Run batches in parallel if the lane ever has spare slots.
+"""
+import collections
+import glob
+import json
+import os
+import sys
+import urllib.request
+
+CATS = ["budget window", "operator", "peer agent", "merge review or permission denial", "local model or GPU job",
+        "a clock time", "no work queued", "unclear"]
+URL = os.environ.get("AGENT_PROFILE_LLM", "http://127.0.0.1:8099/v1/chat/completions")
+MODEL = os.environ.get("AGENT_PROFILE_MODEL", "qwen3.8-27b")
+d = sys.argv[1]
+rows = []
+for p in sorted(glob.glob(d + "/*.json")):
+    with open(p) as f:
+        r = json.load(f)
+    rows += [(r["seat"], s) for s in r["longest_idles"]]
+labels = ["unlabelled"] * len(rows)
+for i in range(0, len(rows), 20):
+    body = "\n".join(f"{i + j}\t{s['agent_last_said'][-220:]} || woken by: {s['next_input'][:90]}" for j, (_, s) in enumerate(rows[i:i + 20]))
+    prompt = ("Each line is an AI agent's idle stretch: id, TAB, the last thing it said before going idle, then what woke it.\n"
+              f"Label what the agent was waiting on. Categories: {'; '.join(CATS)}.\n"
+              "Answer with one line per id, exactly: id<TAB>category. No other text.\n\n" + body)
+    req = urllib.request.Request(URL, json.dumps({"model": MODEL, "stream": False, "max_tokens": 4000, "temperature": 0,
+                                                  "messages": [{"role": "user", "content": prompt}]}).encode(),
+                                 {"content-type": "application/json", "user-agent": "agent-profile"})
+    try:
+        out = json.load(urllib.request.urlopen(req, timeout=900))["choices"][0]["message"].get("content") or ""
+        if not out.strip():
+            raise ValueError("empty completion")
+    except Exception as e:  # infra fault: say so, never guess a label
+        print(f"batch {i}: model call failed: {e}", file=sys.stderr)
+        continue
+    for line in out.splitlines():
+        rid, _, cat = line.strip().partition("\t")
+        if rid.isdigit() and int(rid) < len(rows) and cat.strip() in CATS:
+            labels[int(rid)] = cat.strip()
+    print(f"batch {i}: {len(rows) - labels.count('unlabelled')}/{len(rows)} labelled", file=sys.stderr, flush=True)
+table = collections.defaultdict(collections.Counter)
+with open(d + "/labels.tsv", "w") as f:
+    for (seat, s), c in zip(rows, labels):
+        table[seat][c] += s["min"]
+        f.write(f"{seat}\t{s['min']}\t{s['from']}-{s['to']}\t{c}\t{s['agent_last_said'][-120:]}\n")
+for seat, c in table.items():
+    print(f"{seat:20}", {k: round(v) for k, v in c.most_common()})
