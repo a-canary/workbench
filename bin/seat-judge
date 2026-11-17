@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# seat-judge — see bin/seat-judge-test for the contract (repos-oh6y).
+echo "seat-judge: not implemented" >&2
+exit 2
