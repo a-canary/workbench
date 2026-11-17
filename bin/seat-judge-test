@@ -71,7 +71,7 @@ check "non-Bash allowed" "$(run Read /etc/shadow)" "0|"
 check "plain command allowed" "$(run Bash 'gh pr view 3')" "0|"
 check "judge not called for plain" "$([ -e "$tmp/req" ] && echo called || echo no)" "no"
 check "systemctl --user allowed" "$(run Bash 'systemctl --user restart waker')" "0|"
-check "sudo word inside an argument is not privileged" "$(run Bash 'git log --grep sudo')" "0|"
+check "pseudo/sudoku/su-like words are not privileged" "$(run Bash 'echo pseudo sudoku result.su docker-compose.yml')" "0|"
 
 r=$(run Bash 'sudo systemctl restart nginx')
 check "misfit denied" "${r%%|*}" "2"
@@ -86,7 +86,9 @@ has "request carries command" "$req" "sudo systemctl restart nginx"
 r=$(run Bash 'cd /tmp && crontab -l'); check "crontab after && judged" "${r%%|*}" "2"
 r=$(run Bash 'echo x | sudo tee /etc/x'); check "sudo after pipe judged" "${r%%|*}" "2"
 r=$(run Bash 'systemctl restart nginx'); check "system systemctl judged" "${r%%|*}" "2"
-for c in '/usr/bin/apt install x' 'env sudo ls' 'FOO=1 sudo ls' 'echo `sudo id`' 'echo $(sudo id)' 'find . | xargs sudo rm' 'systemctl --user status w; systemctl restart nginx'; do
+for c in '/usr/bin/apt install x' 'env sudo ls' 'FOO=1 sudo ls' 'echo `sudo id`' 'echo $(sudo id)' 'find . | xargs sudo rm' 'systemctl --user status w; systemctl restart nginx' \
+  'if :; then sudo ls; fi' 'eval sudo ls' 'timeout 5 sudo ls' 'nice -n 5 sudo ls' 'env -i sudo ls' '\\sudo ls' "'sudo' ls" \
+  'systemctl restart nginx # --user' 'systemctl restart "nginx --user"' 'systemctl restart nginx --userx'; do
   r=$(run Bash "$c"); check "evasion judged: $c" "${r%%|*}" "2"
 done
 
@@ -104,7 +106,7 @@ r=$(SEAT_JUDGE_FALLBACK="echo the answer is ghc" run Bash 'sudo ls'); check "fal
 r=$(SEAT_JUDGE_FALLBACK="echo boss" run Bash 'sudo ls'); check "fallback misfit denied" "${r%%|*}" "2"
 r=$(SEAT_JUDGE_FALLBACK="echo nobody" run Bash 'sudo ls'); check "fallback unknown name denied" "${r%%|*}" "2"
 
-check "log has judged lines" "$(grep -c ' ghc ' "$SEAT_JUDGE_LOG")" "17"
+check "log has judged lines" "$(grep -c ' ghc ' "$SEAT_JUDGE_LOG")" "27"
 has "log line shape" "$(head -1 "$SEAT_JUDGE_LOG")" " ghc deny boss sudo systemctl restart nginx"
 
 [ $fails -eq 0 ] && echo "ALL PASS" || { echo "$fails FAIL"; exit 1; }

@@ -45,16 +45,16 @@ if not command:
     sys.exit(0)
 
 # 2. Privileged word at command position
-# ponytail: regex finds privileged words at command positions, through absolute paths, VAR=, env/exec/xargs-style
-# wrappers, backticks and $( ). bash -c strings, aliases and functions still evade it. The hard stop is sudoers
-# (only master has sudo); this gate routes, it does not contain.
-PRIV = r"sudo|su|ufw|crontab|docker|lxc|apt-get|apt|dpkg|snap|useradd|usermod|visudo"
-START = r"(?:^|[;&|(\n`{]|\$\()\s*(?:(?:env|exec|xargs|nohup|time|nice|command|builtin|[A-Za-z_]\w*=\S*)\s+)*(?:\S*/)?"
-PRIV_RE = re.compile(START + r"(?:" + PRIV + r")\b")
-# system scope unless --user appears in the same simple command
-SYSCTL_RE = re.compile(START + r"systemctl\b(?![^;&|\n]*--user)")
+# Over-detect on purpose: a privileged word as a whole token anywhere (quoted, escaped, after then/eval/timeout,
+# in a comment) goes to the judge. A false hit costs one JEV call; a miss would skip the judge.
+# ponytail: bash -c with a built-up string ("su""do"), aliases and functions still evade it. The hard stop is
+# sudoers (only master has sudo); this gate routes, it does not contain.
+PRIV = r"sudo|su|ufw|crontab|docker|lxc|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl"
+PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
+# systemctl is user scope only when every occurrence is written `systemctl --user` directly
+USER_SYSCTL_RE = re.compile(r"(?<![\w.-])systemctl\s+--user(?![\w-])")
 
-privileged = bool(PRIV_RE.search(command) or SYSCTL_RE.search(command))
+privileged = bool(PRIV_RE.search(USER_SYSCTL_RE.sub(" ", command)))
 
 if not privileged:
     sys.exit(0)
