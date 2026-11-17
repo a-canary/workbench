@@ -5,7 +5,7 @@
 here=$(cd "$(dirname "$0")/.." && pwd)
 # The program goes in via -c, not a heredoc on stdin: stdin carries the hook JSON.
 prog=$(cat <<'PY'
-import json, sys, os, re, signal, subprocess, urllib.request
+import json, sys, os, re, signal, subprocess, urllib.request, tempfile, shutil
 from datetime import datetime, timezone
 
 HERE = sys.argv[1]
@@ -64,7 +64,7 @@ if not command:
 # ponytail: this is word matching, not a shell parser. Globs (/usr/bin/s?do), variables ($c), $'\x73udo',
 # bash -c on a built string, aliases and functions still evade it. It routes honest seats; it does not contain
 # a hostile one. The hard stop is sudoers (only master has sudo); polkit-scoped systemctl needs the same lock.
-PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl|pkexec|run0|doas|machinectl|systemd-run|busctl|loginctl"
+PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl|pkexec|run0|doas|machinectl|systemd-run|busctl|loginctl|service|dbus-send|gdbus"
 PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
 stripped = re.sub(r"[\\'\"]", "", command)
 privileged = bool(PRIV_RE.search(command) or PRIV_RE.search(stripped))
@@ -159,10 +159,14 @@ if owner is None:
     try:
         prompt = (state + "\n\n" + question["instructions"]
                   + " Reply with exactly one of: " + " ".join(criteria))
-        proc = subprocess.run(
-            ["bash", "-c", FALLBACK],
-            input=prompt.encode(), capture_output=True, timeout=30
-        )
+        empty = tempfile.mkdtemp()  # empty cwd: a planted CLAUDE.md/.claude/ in the caller's dir must not steer the judge
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", FALLBACK],
+                input=prompt.encode(), capture_output=True, timeout=30, cwd=empty
+            )
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
         words = proc.stdout.decode().strip().split()
         # exactly one word, or no verdict: a reply that quotes or argues is not parsed for a name
         if len(words) == 1:
