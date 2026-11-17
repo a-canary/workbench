@@ -98,6 +98,23 @@ nul=$(git rev-parse HEAD)
 printf 'refs/heads/b %s refs/heads/b %s\n' "$nul" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
 no "secret in a file with a NUL byte: refused" $?
 
+# defend-attack d9448a9: triangular remote (fetch url private, pushurl github) must not trust fetched refs
+git remote add tri git@example.com:private/mirror.git
+git config remote.tri.pushurl "$url"
+git update-ref refs/remotes/tri/main "$secret"; git checkout -q -b trib "$secret"
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "clean on top tri"
+tri=$(git rev-parse HEAD)
+printf 'refs/heads/n %s refs/heads/n %s\n' "$tri" 0000000000000000000000000000000000000000 | GUARD_RC=0 "$hook" tri "$url" >/dev/null 2>&1
+no "pushurl differs from fetch url, secret only on fetched ref: refused" $?
+git update-ref -d refs/remotes/tri/main; git remote remove tri
+# defend-attack d9448a9: a rename into a blocked name must be caught
+git checkout -q -b ren "$clean"
+echo harmless > notes.txt; git add notes.txt; git -c user.name=t -c user.email=t@t commit -q -m notes
+git mv notes.txt .env; git -c user.name=t -c user.email=t@t commit -q -m rename
+ren=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$ren" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "rename into .env: refused" $?
+
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
 export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1

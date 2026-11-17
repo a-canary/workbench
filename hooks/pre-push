@@ -19,7 +19,9 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     rargs=("$remote_sha..$local_sha")
   else
     rargs=("$local_sha")
-    if git config --get "remote.$1.url" >/dev/null 2>&1; then
+    # tracking refs come from the fetch url: trust them only if push url is the same
+    purl=$(git config --get "remote.$1.pushurl" 2>/dev/null || true)
+    if [ "$(git config --get "remote.$1.url" 2>/dev/null)" = "$2" ] && { [ -z "$purl" ] || [ "$purl" = "$2" ]; }; then
       # exclude only the target remote own refs; other remotes may be private
       rargs=("$local_sha" --not --remotes="$1")
       n=$(git rev-list "${rargs[@]}" 2>/dev/null | head -1)
@@ -27,7 +29,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
   fi
   if ! added=$(git log --diff-merges=on -p --text --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
-     ! names=$(git log --diff-merges=on --name-only --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
+     ! names=$(git log --diff-merges=on --name-only --no-renames --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
     echo "pre-push: git scan FAILED for ${local_ref#refs/heads/}; refusing push" >&2
     hits=1
     continue
