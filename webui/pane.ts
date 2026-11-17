@@ -620,8 +620,10 @@ export async function saveSeat(dir: string, name: string, form: FormData): Promi
   if (!seat) return { status: 404, msg: "no such seat" };
   const changed: string[] = [];
   for (const f of SEAT_FIELDS) {
-    const v = form.get(f);
-    if (v === null) continue;
+    const raw = form.get(f);
+    if (raw === null) continue;
+    // Browsers submit textarea newlines as CRLF; store LF so an unchanged multi-line field is not a change.
+    const v = typeof raw === "string" ? raw.replace(/\r\n?/g, "\n") : raw;
     if (typeof v !== "string" || v.length > SEAT_MAX) return { status: 400, msg: `${f} must be text of at most ${SEAT_MAX} characters` };
     if (v !== seatText(seat, f)) {
       seat[f] = v;

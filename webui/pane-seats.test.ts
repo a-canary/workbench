@@ -97,6 +97,14 @@ test("POST save: nothing changed means no commit", async () => {
   expect(git("rev-parse", "HEAD")).toBe(before);
 });
 
+test("POST save: CRLF from a browser textarea is stored as LF, and resubmitting it is not a change", async () => {
+  await post("/seats/alpha/save", { responsibilities: "one\r\ntwo" });
+  expect(JSON.parse(readFileSync(seatFile("alpha"), "utf8")).responsibilities).toBe("one\ntwo");
+  const before = git("rev-parse", "HEAD");
+  await post("/seats/alpha/save", { responsibilities: "one\r\ntwo" });
+  expect(git("rev-parse", "HEAD")).toBe(before);
+});
+
 test("POST save: unrelated dirty files in the repo are not swept into the commit", async () => {
   writeFileSync(join(dir, "notes.txt"), "scratch");
   git("add", "notes.txt");
