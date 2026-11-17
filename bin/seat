@@ -49,11 +49,12 @@ cmd_run() {
   local seat=${1:-} harness="" dry=0
   [ -n "$seat" ] || die "usage: seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]"
   shift
+  local -a prompt=()
   while [ $# -gt 0 ]; do
     case $1 in
-      --harness) harness=${2:?--harness needs a value}; shift 2 ;;
+      --harness) [ $# -ge 2 ] || die "--harness needs a value"; harness=$2; shift 2 ;;
       --dry-run) dry=1; shift ;;
-      *) break ;;
+      *) prompt+=("$1"); shift ;;
     esac
   done
 
@@ -70,25 +71,39 @@ cmd_run() {
   local rdir="$here/seats/$role"
   [ -r "$rdir/AGENTS.md" ] || die "role without AGENTS.md: $role"
   [ -r "$rdir/permissions.yaml" ] || die "role without permissions.yaml: $role"
-  [ -n "$repo" ] || die "seat.yaml has no repo"
+  [ -d "$repo" ] || die "repo is not a directory: '$repo'"
+
+  local mkey=model bashlist warn=""
+  [ "$harness" = claude ] && mkey=claude_model
+  local model
+  model=$(yget "$yaml" "$mkey")
+  [ -n "$model" ] || die "seat.yaml has empty $mkey for harness $harness"
+  bashlist=$(yget "$rdir/permissions.yaml" bash)
 
   local -a cmd
   if [ "$harness" = claude ]; then
     local settings
-    settings=$(claude_settings "$(yget "$rdir/permissions.yaml" tools)" "$(yget "$rdir/permissions.yaml" bash)")
-    cmd=(claude --model "$(yget "$yaml" claude_model)" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings")
+    settings=$(claude_settings "$(yget "$rdir/permissions.yaml" tools)" "$bashlist")
+    cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings")
   else
     local tools
-    tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)" | paste -sd, -)
-    cmd=(pi --model "$(yget "$yaml" model)" --append-system-prompt "$rdir/AGENTS.md" --tools "$tools")
+    tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)")
+    # ponytail: pi cannot scope bash by prefix, so withhold it; upgrade = a pi extension that enforces the bash prefix list.
+    if [ -n "$bashlist" ]; then
+      tools=$(grep -vx bash <<<"$tools" || true)
+      warn="seat: warning: pi cannot scope bash by prefix; bash withheld from --tools"
+    fi
+    cmd=(pi --model "$model" --append-system-prompt "$rdir/AGENTS.md" --tools "$(paste -sd, - <<<"$tools")")
   fi
-  [ $# -eq 0 ] || cmd+=("$@")
+  cmd+=("${prompt[@]}")
 
   if [ $dry -eq 1 ]; then
     printf 'cd %q\n' "$repo"
     quote_words "${cmd[@]}"
+    [ -z "$warn" ] || echo "$warn" >&2
     return 0
   fi
+  [ -z "$warn" ] || echo "$warn" >&2
   cd "$repo"
   exec "${cmd[@]}"
 }
