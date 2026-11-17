@@ -75,6 +75,8 @@ deny=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))
 has "2 deny Edit" "$deny" "Edit"
 has "2 deny Write" "$deny" "Write"
 hasnt "2 Read not denied" "$deny" "Read"
+# MCP servers from user or project config would bypass the bash prefix list.
+has "2 strict mcp" "$cmd" "--strict-mcp-config"
 
 # 2b. flags after the prompt are still flags
 out=$("$seat" run ghc "take bead x" --harness claude --dry-run 2>&1); rc=$?
