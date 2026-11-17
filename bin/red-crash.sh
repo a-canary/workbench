@@ -9,5 +9,9 @@ red_pats=('fatal: not a git repository' 'docker: (command )?not found' 'Cannot c
   'ECONNREFUSED 127\.0\.0\.1:5432' 'connect ECONNREFUSED .*:5432' 'This does not look like a tar archive')
 crash=
 startup_crash() { # $1 output file; $2=red also matches red_pats
-  local p; for p in "${crash_pats[@]}" ${2:+"${red_pats[@]}"}; do grep -qE -- "$p" "$1" && { crash=$p; return 0; }; done; return 1
+  # a passing test may print an infra pattern as its own case name (repos-uxhm): filter out
+  # the runner's passing-report lines before matching
+  local p; for p in "${crash_pats[@]}" ${2:+"${red_pats[@]}"}; do
+    grep -vE '^[[:space:]]*(PASS|\(pass\)|ok |✓)' "$1" | grep -qE -- "$p" && { crash=$p; return 0; };
+  done; return 1
 }
