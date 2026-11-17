@@ -44,6 +44,17 @@ grep -q "ghp_AAAA" <<<"$out" && { echo "FAIL  secret echoed in hook output"; fai
 line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$url" >/dev/null 2>&1; no "github url, guard missing: refused" $?
 line "$clean" | PUBLIC_PUSH_GUARD="$tmp/nosuch" "$hook" origin "$tmp/bare.git" >/dev/null 2>&1; ok "local remote, guard missing: ok" $?
 
+# defend-attack 0e8fb34: endpoint diffs with errors silenced failed open.
+# a remote sha this clone does not have must not skip the scan (scan the pushed commits, or refuse)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$secret" 3333333333333333333333333333333333333333 | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "unknown remote sha, secret in pushed commits: refused" $?
+# a secret added then removed inside the pushed range is still in history: every pushed commit is scanned
+git rm -q s.txt; git -c user.name=t -c user.email=t@t commit -q -m scrub
+scrubbed=$(git rev-parse HEAD)
+line "$scrubbed" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; no "secret added then removed in range: refused" $?
+printf 'refs/heads/b %s refs/heads/b %s\n' "$scrubbed" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret in an intermediate commit vs real remote sha: refused" $?
+
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
 export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1
