@@ -20,10 +20,12 @@ def log_line(seat, verdict, owner, command):
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cmd_short = " ".join(command.split())[:200]
         line = f"{ts} {seat} {verdict} {owner} {cmd_short}\n"
+        os.makedirs(os.path.dirname(LOG) or ".", exist_ok=True)
         with open(LOG, "a") as f:
             f.write(line)
     except Exception:
-        pass
+        if verdict.lower().startswith("allow"):
+            print(f"seat-judge: audit log write failed: {LOG}", file=sys.stderr)
 
 def deny(msg):
     print(msg, file=sys.stderr)
@@ -59,12 +61,12 @@ if not command:
 # 2. Privileged word anywhere in the text
 # Over-detect on purpose: a privileged word as a whole token anywhere (after then/eval/timeout, in a comment,
 # inside quotes) goes to the judge, matched on the raw text and again with quotes and backslashes removed
-# (s\udo, su""do). Every systemctl is judged, --user included: no exemption means no scope-flag parsing to evade.
+# (s\udo, su""do). Every *ctl (the whole class) is judged, --user included: no exemption means no scope-flag parsing to evade.
 # A false hit costs one JEV call; a miss would skip the judge.
 # ponytail: this is word matching, not a shell parser. Globs (/usr/bin/s?do), variables ($c), $'\x73udo',
 # bash -c on a built string, aliases and functions still evade it. It routes honest seats; it does not contain
-# a hostile one. The hard stop is sudoers (only master has sudo); polkit-scoped systemctl needs the same lock.
-PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl|pkexec|run0|doas|machinectl|systemd-run|busctl|loginctl|service|dbus-send|gdbus"
+# a hostile one. The hard stop is sudoers (only master has sudo); polkit-scoped *ctl needs the same lock.
+PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|[\w-]*ctl|nmcli|sudoedit|pkexec|run0|doas|systemd-run|service|dbus-send|gdbus"
 PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
 stripped = re.sub(r"[\\'\"]", "", command)
 privileged = bool(PRIV_RE.search(command) or PRIV_RE.search(stripped))
