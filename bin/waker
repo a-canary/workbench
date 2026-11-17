@@ -76,7 +76,10 @@ fi
 if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
     default_nudge() {
         local seat="$1" bead="$2"
-        tmux send-keys -t "=$seat:" "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." Enter
+        # Text and Enter must be separate calls: one call looks like a paste and is never submitted.
+        tmux send-keys -t "=$seat:" -l "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." || return $?
+        sleep 0.3
+        tmux send-keys -t "=$seat:" Enter
     }
     WAKER_NUDGE_CMD="default_nudge"
 fi
