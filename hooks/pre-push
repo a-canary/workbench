@@ -12,6 +12,7 @@ BAD_NAMES='(^|/)\.env($|\.)|\.pem$|\.p12$|\.pfx$|id_rsa($|\.pub$)|id_ed25519$|.*
 
 hits=0
 while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "$local_ref" ] && continue                 # blank line (no-op push)
   [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
   # which commits: everything pushed, not the endpoint diff (add-then-remove must still be scanned)
   if [ "$remote_sha" != "$ZERO" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
@@ -25,7 +26,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       [ -z "$n" ] && rargs=("$local_sha")         # nothing known on target: scan all of local_sha
     fi
   fi
-  if ! added=$(git log --diff-merges=on -p --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
+  if ! added=$(git log --diff-merges=on -p --text --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
      ! names=$(git log --diff-merges=on --name-only --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
     echo "pre-push: git scan FAILED for ${local_ref#refs/heads/}; refusing push" >&2
     hits=1
@@ -48,7 +49,7 @@ done <<<"$stdin"
 
 # 3) public-push-guard, same args and stdin
 if [ -x "$GUARD" ]; then
-  printf '%s\n' "$stdin" | "$GUARD" "$@" || hits=1
+  { [ -n "$stdin" ] && printf '%s\n' "$stdin"; true; } | "$GUARD" "$@" || hits=1
 elif [[ "${2:-}" == *[Gg][Ii][Tt][Hh][Uu][Bb].[Cc][Oo][Mm]* ]]; then
   echo "pre-push: public-push-guard missing or not executable ($GUARD); refusing GitHub push" >&2
   hits=1
