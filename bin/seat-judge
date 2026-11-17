@@ -96,6 +96,13 @@ def role_text(role):
 if not SEAT or SEAT not in registry:
     deny("seat-judge: no seat for this session; privileged commands need a seat (operator)")
 
+# Injection guard, deterministic: a privileged command whose text names a seat or talks about the judge is denied
+# before any model sees it, so command bytes can never steer the verdict toward the caller.
+NAMES_RE = re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, sorted(registry))) + r"|judge|seat|answer)(?![\w-])", re.I)
+if NAMES_RE.search(command):
+    log_line(SEAT, "deny", "guard", command)
+    deny("seat-judge: privileged command text names a seat or the judge; denied (injection guard)")
+
 # 5. Build state and question
 lines = ["Seats and roles:"]
 for name in sorted(registry):
@@ -141,8 +148,9 @@ if owner is None:
             input=prompt.encode(), capture_output=True, timeout=30
         )
         words = proc.stdout.decode().strip().split()
-        if words:
-            cleaned = words[-1].strip(".,;:!?'\")(")
+        # exactly one word, or no verdict: a reply that quotes or argues is not parsed for a name
+        if len(words) == 1:
+            cleaned = words[0].strip(".,;:!?'\")(")
             if cleaned in criteria:
                 owner = cleaned
     except Exception:
