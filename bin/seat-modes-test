@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# seat-modes-test — RED for `seat modes` (repos-n98vs.8, spec ~/vault/agents/assistant/spec-layout-2026-11-17.md
+# "Approval modes are data in the seat files").
+#
+# Contract:
+#   seat modes <seat>   prints one `<class> <mode>` line per action class, in the fixed class order below.
+#   Modes: passive < advise < active (active = ask first).
+#   Classes: read local-edit ledger commit push-private push-public merge service root-grant cross-seat
+#            guard money live-order force-git exposure constitution
+#   Hard-line classes (guard money live-order force-git exposure constitution) are always active.
+#   Role default: `mode_<class>: <mode>` in <workbench>/seats/<role>/permissions.yaml; missing or invalid = active.
+#   Seat override: `mode_<class>: <mode>` in $SEAT_VAULT/<seat>/seat.yaml applies only when stricter; a looser or
+#     invalid override is ignored with a warning on stderr naming the class.
+#   Errors (exit non-zero, message on stderr): unknown seat.
+set -u
+here=$(cd "$(dirname "$0")/.." && pwd)
+seat="$here/bin/seat"
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=$((fails + 1)); fi; }
+mode() { awk -v c="$2" '$1 == c { print $2 }' <<<"$1"; }
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/v/s" "$tmp/repo" "$tmp/wb/seats/r" "$tmp/wb/bin"
+cp "$seat" "$tmp/wb/bin/seat"
+echo "# role r" >"$tmp/wb/seats/r/AGENTS.md"
+cat >"$tmp/wb/seats/r/permissions.yaml" <<EOF
+tools: Read
+mode_read: passive
+mode_commit: advise
+mode_merge: advise
+mode_service: passive
+mode_money: passive
+mode_push-public: bogus
+EOF
+cat >"$tmp/v/s/seat.yaml" <<EOF
+role: r
+repo: $tmp/repo
+harness: pi
+model: m
+mode_merge: active
+mode_read: advise
+mode_commit: passive
+mode_service: whatever
+EOF
+export SEAT_VAULT="$tmp/v"
+
+out=$("$tmp/wb/bin/seat" modes s 2>"$tmp/err"); rc=$?
+err=$(cat "$tmp/err")
+check "rc" "$rc" "0"
+check "16 lines" "$(wc -l <<<"$out" | tr -d ' ')" "16"
+check "order first" "$(sed -n 1p <<<"$out")" "read advise"
+check "order last" "$(sed -n 16p <<<"$out")" "constitution active"
+check "stricter override applies" "$(mode "$out" merge)" "active"
+check "stricter override read" "$(mode "$out" read)" "advise"
+check "looser override ignored" "$(mode "$out" commit)" "advise"
+check "invalid override ignored" "$(mode "$out" service)" "passive"
+check "hard line beats role" "$(mode "$out" money)" "active"
+check "invalid role value = active" "$(mode "$out" push-public)" "active"
+check "missing = active" "$(mode "$out" ledger)" "active"
+check "warns looser" "$(grep -c 'commit' <<<"$err")" "1"
+check "warns invalid" "$(grep -c 'service' <<<"$err")" "1"
+
+"$tmp/wb/bin/seat" modes nope >/dev/null 2>&1; check "unknown seat fails" "$?" "1"
+
+[ $fails -eq 0 ] && echo "ALL PASS" || { echo "$fails FAIL"; exit 1; }
