@@ -8,7 +8,10 @@
 #   seat=<name> <verdict> [bead=<id>] [reason]
 # Verdicts: started, running, idle, budget-stop, claude-down, no-slot,
 #           bad-seat, drainer, would-start (--dry-run), start-failed,
-#           nudged, would-nudge (--dry-run), nudge-failed.
+#           nudged, would-nudge (--dry-run), nudge-failed, session-out.
+# session-out: the 5h session window is used up; no start, no nudge, even under
+# the override. When it comes back, one nudge wakes every live idle seat with a
+# ready bead, ignoring the nudge gap.
 #
 # Off switch: while <seats>/waker.off exists the tick prints "waker: off" and
 # does nothing else (exit 0).
@@ -24,6 +27,9 @@
 #                      (default: tmux session no activity for WAKER_IDLE_S sec)
 #   WAKER_IDLE_S       idle threshold seconds for default idle check (default 600)
 #   WAKER_NUDGE_CMD    "<cmd> <seat> <bead>" tells live session bead is ready
+#   WAKER_SESSION_CMD  prints the 5h session use as a fraction, or ? when unreadable
+#                      (default: "5h".util in $WAKER_BUDGET/meter.json)
+#   WAKER_SESSION_MAX  session use at or above this is session-out (default 0.98)
 #   WAKER_NUDGE_GAP_S  seconds between nudges to same seat (default 1800)
 #   WAKER_DRAIN_CMD    run once at end of tick; "" = none
 # tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
@@ -42,6 +48,12 @@ if [ -z "${WAKER_METER_CMD:-}" ]; then
         jq -L "$HOME/vault/director/scripts" -r 'include "budget"; "\(cur_util // "?") \(cur_pace // "?")"' "$BUDGET/meter.json"
     }
     WAKER_METER_CMD="default_meter"
+fi
+if [ -z "${WAKER_SESSION_CMD:-}" ]; then
+    default_session() {
+        jq -r '.["5h"].util // "?"' "$BUDGET/meter.json" 2>/dev/null || echo "?"
+    }
+    WAKER_SESSION_CMD="default_session"
 fi
 if [ -z "${WAKER_READY_CMD:-}" ]; then
     default_ready() {
@@ -133,6 +145,22 @@ if [ -e "$BUDGET/ignore-until" ]; then
     esac
 fi
 
+# Session window: out at or above the max; the marker file remembers it across ticks
+SESSION_MAX="${WAKER_SESSION_MAX:-0.98}"
+[[ $SESSION_MAX =~ $num ]] || SESSION_MAX=0.98
+session_out=0
+session_reset=0
+session=$($WAKER_SESSION_CMD 2>/dev/null </dev/null 9>&-) || session=""
+if [[ $session =~ $num ]]; then
+    if awk -v a="$session" -v b="$SESSION_MAX" 'BEGIN{exit !(a>=b)}'; then
+        session_out=1
+        : >"$SEATS/.session-out"
+    elif [ -e "$SEATS/.session-out" ]; then
+        rm -f "$SEATS/.session-out"
+        session_reset=1
+    fi
+fi
+
 # Validate seats: single jq expression per file
 # Prints "ok" or a short reason
 validate_seat() {
@@ -200,6 +228,12 @@ while IFS= read -r s; do
     if $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
         # Live seat: is it idle and does it have a ready bead?
         nudge_bead=""
+        if [ "$session_out" -eq 1 ]; then
+            echo "seat=$name session-out"
+            used=$((used + 1))
+            running+=("$name")
+            continue
+        fi
         if $WAKER_IDLE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
             nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
             # the id is typed into a live session: anything but a plain id is dropped
@@ -220,7 +254,7 @@ while IFS= read -r s; do
             # Check nudge gap
             nudge_file="$SEATS/.nudge/$name"
             gap_expired=1
-            if [ -f "$nudge_file" ]; then
+            if [ "$session_reset" -eq 0 ] && [ -f "$nudge_file" ]; then
                 last_nudge=$(cat "$nudge_file" 2>/dev/null)
                 if [[ $last_nudge =~ ^[0-9]+$ ]]; then
                     now=$(date +%s)
@@ -263,6 +297,11 @@ while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
     if is_running "$name"; then
+        continue
+    fi
+
+    if [ "$session_out" -eq 1 ]; then
+        echo "seat=$name session-out"
         continue
     fi
 
