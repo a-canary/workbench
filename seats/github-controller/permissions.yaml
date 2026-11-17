@@ -1,0 +1,5 @@
+# Seat permissions. Flat `key: a, b, c` lines only; bin/seat reads them without a YAML library.
+# tools: Claude Code tool names.  pi_tools: pi tool names.  bash: allowed command prefixes (both harnesses).
+tools: Read, Grep, Glob, Bash
+pi_tools: read, grep, find, ls, bash
+bash: gh pr, gh api, git status, git log, git fetch, git branch, bd show, bd comments
