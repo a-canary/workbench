@@ -5,6 +5,7 @@
 #   efficiency: <title>        -> bd create --title "efficiency: <title>" --type task --labels agents-stack -p 3
 #   promote: <bead id> <why>   -> bd comments add <id> "promote: <why>"   (id must match ^repos-[a-z0-9]+(\.[0-9]+)*$)
 # A title holding a word that starts with "-" is dropped. Anything else is ignored; at most 5 beads per run. No sessions, or agent-profile failing: no model call, rc 0.
+# One run at a time: flock on <PACE_PROFILE_SESSIONS>/.pace-profile.lock; a run that cannot take it exits 0 at once.
 # Seams: PACE_PROFILE_SESSIONS (dir searched for *.jsonl, default ~/.claude/projects), PACE_PROFILE_LOG,
 #        PACE_PROFILE_AGENT (default bin/agent-profile), PACE_PROFILE_REPOS (cwd for bd, default ~/repos); claude, bd on PATH.
 set -u
@@ -16,7 +17,7 @@ mkdir -p "$tmp/fake" "$tmp/sess/p" "$tmp/repos"
 cat >"$tmp/fake/claude" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >>"$T/claude.args"; printf '[%s]' "$@" >"$T/claude.argv"; pwd >"$T/claude.cwd"
-cat >"$T/claude.stdin"; cat "$T/reply" 2>/dev/null
+cat >"$T/claude.stdin"; [ -e "$T/claude.fail" ] && exit 1; cat "$T/reply" 2>/dev/null
 EOF
 cat >"$tmp/fake/bd" <<'EOF'
 #!/bin/bash
@@ -77,6 +78,21 @@ check "4 capped at 5" "$(grep -c '^create' "$tmp/bd.calls")" 5
 # 5. agent-profile failing: no model call
 reset; touch "$tmp/agent.fail"; check "5 rc 0" "$(run)" 0
 check "5 no model call on a failed profile" "$(test -e "$tmp/claude.args" && echo called)" ""
+
+# 6. the model call failing: no bd calls, rc 0
+reset; printf 'efficiency: e1\n' >"$tmp/reply"; touch "$tmp/claude.fail"; check "6 rc 0" "$(run)" 0
+check "6 no bd calls after a failed model call" "$(test -e "$tmp/bd.calls" && echo called)" ""
+command mv "$tmp/claude.fail" "$tmp/claude.fail.off"
+# 7. a missing repos dir: no bd calls, rc 0
+reset; printf 'efficiency: e1\n' >"$tmp/reply"
+check "7 rc 0" "$(env T="$tmp" PATH="$tmp/fake:$PATH" PACE_PROFILE_SESSIONS="$tmp/sess" PACE_PROFILE_LOG="$tmp/log" \
+  PACE_PROFILE_AGENT="$tmp/agent" PACE_PROFILE_REPOS="$tmp/no-such-dir" "$here/pace-profile" stack >/dev/null 2>&1; echo $?)" 0
+check "7 no bd calls without the repos dir" "$(test -e "$tmp/bd.calls" && echo called)" ""
+# 8. a second run while one holds the lock exits at once, without a model call
+reset; exec 8>"$tmp/sess/.pace-profile.lock"; flock 8
+check "8 rc 0" "$(run)" 0
+check "8 overlapping run: no model call" "$(test -e "$tmp/claude.args" && echo called)" ""
+exec 8>&-
 
 [ $fails = 0 ] && echo "pace-profile-test: PASS" || echo "pace-profile-test: FAIL"
 exit $fails

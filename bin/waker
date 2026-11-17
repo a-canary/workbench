@@ -37,9 +37,10 @@
 #                      (priority exactly "0"); anything else, or unreadable, stays halted.
 #   WAKER_PROFILE_CMD  "<cmd> <seat>" runs once per pace breach, not per seat (no override, readable meter,
 #                      not --dry-run). Launched on the first tick where any seat is over its pace_max, with
-#                      the first such seat in priority order. Global marker $WAKER_BUDGET/profiled is written
-#                      only after a successful launch (command exists, executable), cleared on a tick where
-#                      no seat is over pace. Fully detached (setsid, redirected, backgrounded); never waited.
+#                      the first such seat in priority order. Global marker $WAKER_BUDGET/profiled holds the
+#                      last launch time, written only after a launch (command exists, executable); no new
+#                      launch within WAKER_PROFILE_GAP_S (default 36000, the profile's 10 h window).
+#                      Fully detached (setsid, redirected, backgrounded); never waited.
 #                      Default: pace-profile next to this script.
 # tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
 # would reach a session named "ndv-lead".
@@ -249,14 +250,15 @@ if [ "$override" -eq 0 ] && [ "$meter_ok" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
         IFS='|' read -r name priority pace_max _ <<<"$s"
         if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then breach_seat="$name"; break; fi
     done <<<"$sorted_seats"
+    # the marker holds the last launch time: pace oscillating around pace_max launches at most once per gap
     marker="$BUDGET/profiled"
-    if [ -z "$breach_seat" ]; then
-        rm -f "$marker"
-    elif [ ! -e "$marker" ]; then
+    gap=${WAKER_PROFILE_GAP_S:-36000}; [[ $gap =~ ^[0-9]+$ ]] || gap=36000
+    last=$(cat "$marker" 2>/dev/null); [[ $last =~ ^[0-9]+$ ]] || last=0
+    if [ -n "$breach_seat" ] && [ $(( $(date +%s) - last )) -ge "$gap" ]; then
         read -r -a profile_argv <<<"$WAKER_PROFILE_CMD"
         if [ "${#profile_argv[@]}" -gt 0 ] && command -v "${profile_argv[0]}" >/dev/null 2>&1; then
             setsid "${profile_argv[@]}" "$breach_seat" </dev/null >/dev/null 2>&1 9>&- &
-            mkdir -p "$BUDGET" && : >"$marker"
+            mkdir -p "$BUDGET" && date +%s >"$marker"
         fi
     fi
 fi

@@ -16,6 +16,8 @@ log="${PACE_PROFILE_LOG:-$HOME/vault/director/.budget/profile-$seat.log}"
 agent="${PACE_PROFILE_AGENT:-$here/agent-profile}"
 repos="${PACE_PROFILE_REPOS:-$HOME/repos}"
 mkdir -p "$(dirname "$log")"
+# one run at a time: a second breach launch while one is profiling exits at once
+exec 8>>"$sessions/.pace-profile.lock" && flock -n 8 || { echo "$(date -Is) seat=$seat: a run holds the lock" >>"$log"; exit 0; }
 out=$(mktemp -d "${TMPDIR:-/tmp}/pace-profile.XXXXXX"); trap 'rm -rf "$out"' EXIT
 {
     echo "== $(date -Is) seat=$seat"
