@@ -28,8 +28,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       [ -z "$n" ] && rargs=("$local_sha")         # nothing known on target: scan all of local_sha
     fi
   fi
-  if ! added=$(git log --diff-merges=on -p --text --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
-     ! names=$(git log --diff-merges=on --name-only --no-renames --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
+  if ! added=$(git log --diff-merges=on -p --no-ext-diff --no-color --text --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
+     ! names=$(git log --diff-merges=on --name-only --no-color --no-renames --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
     echo "pre-push: git scan FAILED for ${local_ref#refs/heads/}; refusing push" >&2
     hits=1
     continue
@@ -37,13 +37,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   # 1) secret patterns in ADDED lines
   # never echo the secret itself: hook output lands in terminals, logs, agent transcripts
-  if m=$(grep -E '^\+' <<<"$added" | grep -vE '^\+\+\+' | grep -inE "$PATTERNS"); then
+  if m=$(grep -aE '^\+' <<<"$added" | grep -avE '^\+\+\+ (b/|/dev/null)' | grep -ainE "$PATTERNS"); then
     sed -E 's/[A-Za-z0-9_/+=-]{12,}/<REDACTED>/g' <<<"$m"
     echo "pre-push: SECRET PATTERN in ${local_ref#refs/heads/} (redacted line above)"
     hits=1
   fi
   # 2) suspicious files being added
-  if grep -E "$BAD_NAMES" <<<"$names"; then
+  if grep -aE "$BAD_NAMES" <<<"$names"; then
     echo "pre-push: SUSPICIOUS FILE added to ${local_ref#refs/heads/} (should be gitignored?)"
     hits=1
   fi

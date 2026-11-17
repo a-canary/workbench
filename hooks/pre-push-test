@@ -115,6 +115,22 @@ ren=$(git rev-parse HEAD)
 printf 'refs/heads/b %s refs/heads/b %s\n' "$ren" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
 no "rename into .env: refused" $?
 
+# defend-attack 5ff0532: a content line starting with ++ must still be scanned
+git checkout -q -b pp "$clean"
+printf '++k=%s\n' "ghp_$(printf 'E%.0s' {1..30})" > pp.txt; git add pp.txt; git -c user.name=t -c user.email=t@t commit -q -m pp
+pp=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$pp" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret on a line starting with ++: refused" $?
+# defend-attack 5ff0532: one invalid UTF-8 byte must not make grep treat the diff as binary
+git checkout -q -b lat "$clean"
+printf 'caf\351\nk=%s\n' "ghp_$(printf 'F%.0s' {1..30})" > lat.txt; git add lat.txt; git -c user.name=t -c user.email=t@t commit -q -m lat
+lat=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$lat" "$clean" | LC_ALL=C.UTF-8 GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret next to a Latin-1 byte: refused" $?
+# defend-attack 5ff0532: diff.external and forced color must not change the scanned patch
+printf 'refs/heads/b %s refs/heads/b %s\n' "$secret" "$base" | GUARD_RC=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=/bin/true GIT_CONFIG_KEY_1=color.diff GIT_CONFIG_VALUE_1=always "$hook" origin "$url" >/dev/null 2>&1
+no "secret with diff.external and color.diff=always set: refused" $?
+
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
 export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1
