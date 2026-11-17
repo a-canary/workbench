@@ -5,7 +5,7 @@
 here=$(cd "$(dirname "$0")/.." && pwd)
 # The program goes in via -c, not a heredoc on stdin: stdin carries the hook JSON.
 prog=$(cat <<'PY'
-import json, sys, os, re, subprocess, urllib.request
+import json, sys, os, re, signal, subprocess, urllib.request
 from datetime import datetime, timezone
 
 HERE = sys.argv[1]
@@ -52,13 +52,26 @@ if not command:
 # sudoers (only master has sudo); this gate routes, it does not contain.
 PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl"
 PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
-# systemctl is user scope only when every occurrence is written `systemctl --user` directly
-USER_SYSCTL_RE = re.compile(r"(?<![\w.-])systemctl\s+--user(?![\w-])")
+# systemctl is user scope only when written `systemctl --user` directly and nothing later in that simple command
+# switches scope back (--system, -M/--machine, -H/--host, also bundled short flags like -qM)
+USER_SYSCTL_RE = re.compile(r"(?<![\w.-])systemctl\s+--user(?![\w-])"
+                            r"(?![^;&|\n]*\s-(?:-system|-machine|-host|[A-Za-z]*[MH]))")
 
 privileged = bool(PRIV_RE.search(USER_SYSCTL_RE.sub(" ", command)))
 
 if not privileged:
     sys.exit(0)
+
+# One total deadline: the alarm denies, so a slow JEV or fallback can never run past the hook timeout and fail open.
+# SEAT_JUDGE_DEADLINE may only shorten it (tests); it is capped at 50.
+def _deadline(*_):
+    deny("seat-judge: judge deadline passed; denied, never fail open")
+signal.signal(signal.SIGALRM, _deadline)
+try:
+    deadline = min(50, max(1, int(os.environ.get("SEAT_JUDGE_DEADLINE", "50"))))
+except ValueError:
+    deadline = 50
+signal.alarm(deadline)
 
 # 3. Load seat registry
 registry = {}
@@ -75,7 +88,7 @@ try:
                 for line in f:
                     if line.startswith("role:"):
                         role = line[5:].strip()
-                        if role:
+                        if re.fullmatch(r"[\w-]+", role) and entry != "na":
                             registry[entry] = role
                         break
         except Exception:
@@ -96,12 +109,16 @@ def role_text(role):
 if not SEAT or SEAT not in registry:
     deny("seat-judge: no seat for this session; privileged commands need a seat (operator)")
 
-# Injection guard, deterministic: a privileged command whose text names a seat or talks about the judge is denied
-# before any model sees it, so command bytes can never steer the verdict toward the caller.
-NAMES_RE = re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, sorted(registry))) + r"|judge|seat|answer)(?![\w-])", re.I)
-if NAMES_RE.search(command):
+# Injection guard, deterministic, before any model sees the command: deny a privileged command that holds non-ASCII
+# (homoglyphs) or any seat name, role name or judge-steering word. Words real commands need stay out (ufw allow,
+# --ignore-*, systemd paths). Over-detect on purpose; a false hit goes to the operator. ponytail: this narrows prompt injection, it does not prove it away (a paraphrase with none of
+# these words still reaches the model); the hard stop is sudoers, where only master has sudo.
+STEER = r"judge|seat|answer|choice|criteri\w*|caller|operator|approve\w*|authori[sz]\w*|instruction\w*|prompt|na"
+names = sorted(set(registry) | set(registry.values()), key=len, reverse=True)
+NAMES_RE = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, names)) + "|" + STEER + r")(?![A-Za-z0-9])", re.I)
+if not command.isascii() or NAMES_RE.search(command):
     log_line(SEAT, "deny", "guard", command)
-    deny("seat-judge: privileged command text names a seat or the judge; denied (injection guard)")
+    deny("seat-judge: denied by the injection guard; ask the operator")
 
 # 5. Build state and question
 lines = ["Seats and roles:"]
