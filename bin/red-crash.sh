@@ -12,6 +12,7 @@ startup_crash() { # $1 output file; $2=red also matches red_pats
   # a passing test may print an infra pattern as its own case name (repos-uxhm): filter out
   # the runner's passing-report lines before matching
   local p; for p in "${crash_pats[@]}" ${2:+"${red_pats[@]}"}; do
-    grep -vE '^[[:space:]]*(PASS|\(pass\)|ok |✓)' "$1" | grep -qE -- "$p" && { crash=$p; return 0; };
+    # process substitution, not a pipe: under the callers' pipefail grep -q's early exit would SIGPIPE the filter
+    grep -qE -- "$p" < <(grep -vE '^[[:space:]]*(PASS|\(pass\)|ok |✓)' "$1") && { crash=$p; return 0; }
   done; return 1
 }
