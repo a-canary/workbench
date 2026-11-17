@@ -17,9 +17,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [ "$remote_sha" != "$ZERO" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
     rargs=("$remote_sha..$local_sha")
   else
-    rargs=("$local_sha" --not --remotes)
-    n=$(git rev-list "${rargs[@]}" 2>/dev/null | head -1)
-    [ -z "$n" ] && rargs=("$local_sha")           # nothing known on remotes: scan all of local_sha
+    rargs=("$local_sha")
+    if git config --get "remote.$1.url" >/dev/null 2>&1; then
+      # exclude only the target remote own refs; other remotes may be private
+      rargs=("$local_sha" --not --remotes="$1")
+      n=$(git rev-list "${rargs[@]}" 2>/dev/null | head -1)
+      [ -z "$n" ] && rargs=("$local_sha")         # nothing known on target: scan all of local_sha
+    fi
   fi
   if ! added=$(git log -p --no-textconv --unified=0 --format= "${rargs[@]}" 2>/dev/null) ||
      ! names=$(git log --name-only --diff-filter=A --format= "${rargs[@]}" 2>/dev/null); then
