@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# seat-judge-test — RED for bin/seat-judge (repos-oh6y; spec: repos-5zfq comment v2, operator order 2026-11-17 01:30Z).
+#
+# Contract:
+#   bin/seat-judge reads a Claude Code PreToolUse hook JSON on stdin ({tool_name, tool_input: {command}}).
+#   Caller seat: env SEAT. Registry: $SEAT_VAULT/<seat>/seat.yaml (role: line); role text: <workbench>/seats/<role>/AGENTS.md.
+#   Allow = exit 0, no output. Deny = exit 2, one line on stderr starting "seat-judge:".
+#   - tool_name other than Bash: allow.
+#   - Bash command with no privileged word: allow, judge not called.
+#     Privileged words, as a command word (line start or after ; & | ( or `sudo`-style prefix): sudo su ufw crontab docker
+#     lxc apt apt-get dpkg snap useradd usermod visudo; and systemctl unless the call has --user.
+#   - Privileged and SEAT unset or not in the registry: deny ("no seat").
+#   - Privileged: ask JEV ($SEAT_JUDGE_URL, default http://localhost:8099/v1/systemone, header x-lane: fast) one choice
+#     question whose criteria are every registry seat name plus "na"; state lists each seat with its role text, then
+#     the command. Fit iff answers[0].choice == SEAT: allow. Other seat X: deny naming X ("route to X").
+#     "na": deny naming the operator.
+#   - JEV unreachable or unparsable: run $SEAT_JUDGE_FALLBACK (default: claude -p --model haiku) with the same
+#     question on stdin; its stdout's last word is the seat name (or na). Fallback also fails or answers a name not
+#     in the list: deny ("judge unavailable"). Never fail open.
+#   - Every judged call appends one line to $SEAT_JUDGE_LOG: <utc ts> <seat> <allow|deny> <owner> <command, first 200 chars>.
+set -u
+here=$(cd "$(dirname "$0")/.." && pwd)
+judge="$here/bin/seat-judge"
+fails=0
+check() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$2' want '$3'"; fails=$((fails + 1)); fi; }
+has() { if grep -qF -- "$3" <<<"$2"; then echo "PASS  $1"; else echo "FAIL  $1: '$3' not in: $2"; fails=$((fails + 1)); fi; }
+
+tmp=$(mktemp -d)
+mkdir -p "$tmp/v/ghc" "$tmp/v/boss" "$tmp/wb/seats/github-controller" "$tmp/wb/seats/master" "$tmp/wb/bin"
+cp "$judge" "$tmp/wb/bin/seat-judge" 2>/dev/null
+echo "Views and merges GitHub PRs. No host changes." >"$tmp/wb/seats/github-controller/AGENTS.md"
+echo "Last-resort root seat: system services, packages, firewall, users." >"$tmp/wb/seats/master/AGENTS.md"
+printf 'role: github-controller\nrepo: %s\n' "$tmp" >"$tmp/v/ghc/seat.yaml"
+printf 'role: master\nrepo: %s\n' "$tmp" >"$tmp/v/boss/seat.yaml"
+export SEAT_VAULT="$tmp/v" SEAT_JUDGE_LOG="$tmp/judge.log"
+
+# stub JEV: answers the choice in $tmp/answer, records each request body in $tmp/req
+port=$((20000 + RANDOM % 20000))
+cat >"$tmp/stub.py" <<'PY'
+import http.server, json, sys, os
+d = sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        open(os.path.join(d, "req"), "wb").write(body)
+        open(os.path.join(d, "lane"), "w").write(self.headers.get("x-lane", ""))
+        ans = open(os.path.join(d, "answer")).read().strip()
+        out = json.dumps({"answers": [{"type": "choice", "choice": ans, "confidence": 0.99}]}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+python3 -I "$tmp/stub.py" "$port" "$tmp" & stub=$!
+trap 'kill $stub 2>/dev/null; rm -rf "$tmp"' EXIT
+sleep 0.5
+export SEAT_JUDGE_URL="http://127.0.0.1:$port/v1/systemone" SEAT_JUDGE_FALLBACK="false"
+
+run() { # tool command -> "rc|stderr"
+  local in err rc
+  in=$(python3 -c 'import json,sys; print(json.dumps({"tool_name": sys.argv[1], "tool_input": {"command": sys.argv[2]}}))' "$1" "$2")
+  err=$("$tmp/wb/bin/seat-judge" <<<"$in" 2>&1 >/dev/null); rc=$?
+  echo "$rc|$err"
+}
+
+export SEAT=ghc
+echo boss >"$tmp/answer"; rm -f "$tmp/req"
+check "non-Bash allowed" "$(run Read /etc/shadow)" "0|"
+check "plain command allowed" "$(run Bash 'gh pr view 3')" "0|"
+check "judge not called for plain" "$([ -e "$tmp/req" ] && echo called || echo no)" "no"
+check "systemctl --user allowed" "$(run Bash 'systemctl --user restart waker')" "0|"
+check "sudo word inside an argument is not privileged" "$(run Bash 'git log --grep sudo')" "0|"
+
+r=$(run Bash 'sudo systemctl restart nginx')
+check "misfit denied" "${r%%|*}" "2"
+has "misfit names owner" "$r" "boss"
+has "deny line prefix" "$r" "seat-judge:"
+check "lane fast" "$(cat "$tmp/lane")" "fast"
+req=$(cat "$tmp/req")
+has "request lists seats as criteria" "$req" '"ghc"'
+has "request has na" "$req" '"na"'
+has "request carries role text" "$req" "Last-resort root seat"
+has "request carries command" "$req" "sudo systemctl restart nginx"
+r=$(run Bash 'cd /tmp && crontab -l'); check "crontab after && judged" "${r%%|*}" "2"
+r=$(run Bash 'echo x | sudo tee /etc/x'); check "sudo after pipe judged" "${r%%|*}" "2"
+r=$(run Bash 'systemctl restart nginx'); check "system systemctl judged" "${r%%|*}" "2"
+
+echo ghc >"$tmp/answer"
+check "fit allowed" "$(run Bash 'docker ps')" "0|"
+echo na >"$tmp/answer"
+r=$(run Bash 'apt install foo'); check "na denied" "${r%%|*}" "2"; has "na names operator" "$r" "operator"
+
+r=$(SEAT= run Bash 'sudo ls'); check "no seat denied" "${r%%|*}" "2"
+r=$(SEAT=ghost run Bash 'sudo ls'); check "unknown seat denied" "${r%%|*}" "2"
+
+kill $stub; wait $stub 2>/dev/null
+r=$(run Bash 'sudo ls'); check "JEV down, fallback fails: denied" "${r%%|*}" "2"; has "says unavailable" "$r" "unavailable"
+r=$(SEAT_JUDGE_FALLBACK="echo the answer is ghc" run Bash 'sudo ls'); check "fallback fit allowed" "$r" "0|"
+r=$(SEAT_JUDGE_FALLBACK="echo boss" run Bash 'sudo ls'); check "fallback misfit denied" "${r%%|*}" "2"
+r=$(SEAT_JUDGE_FALLBACK="echo nobody" run Bash 'sudo ls'); check "fallback unknown name denied" "${r%%|*}" "2"
+
+check "log has judged lines" "$(grep -c ' ghc ' "$SEAT_JUDGE_LOG")" "10"
+has "log line shape" "$(head -1 "$SEAT_JUDGE_LOG")" " ghc deny boss sudo systemctl restart nginx"
+
+[ $fails -eq 0 ] && echo "ALL PASS" || { echo "$fails FAIL"; exit 1; }
