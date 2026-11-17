@@ -192,7 +192,7 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   fi
   # a local branch of that name may hold someone's unpushed work: never reset or delete it
   if git -C "$repo" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
-    fail "$id" "local branch $branch already exists in $repo; lane-run will not reset it" human
+    fail "$id" "local branch $branch already exists in $repo; lane-run will not reset it" lane-infra
     sprint end "$id" blocked "local branch exists"; trap - INT TERM HUP; return 0
   fi
   log "▶ $id $branch"
