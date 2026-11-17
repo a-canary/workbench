@@ -1,4 +1,161 @@
 #!/usr/bin/env bash
-# seat-judge — see bin/seat-judge-test for the contract (repos-oh6y).
-echo "seat-judge: not implemented" >&2
-exit 2
+# seat-judge — PreToolUse gate: privileged commands must fit the caller's seat role (repos-oh6y).
+# Every failure path denies; never fails open.
+here=$(cd "$(dirname "$0")/.." && pwd)
+# The program goes in via -c, not a heredoc on stdin: stdin carries the hook JSON.
+prog=$(cat <<'PY'
+import json, sys, os, re, subprocess, urllib.request
+from datetime import datetime, timezone
+
+HERE = sys.argv[1]
+SEAT = os.environ.get("SEAT", "")
+VAULT = os.environ.get("SEAT_VAULT", os.path.expanduser("~/vault/seats"))
+JUDGE_URL = os.environ.get("SEAT_JUDGE_URL", "http://localhost:8099/v1/systemone")
+FALLBACK = os.environ.get("SEAT_JUDGE_FALLBACK", "claude -p --model haiku")
+LOG = os.environ.get("SEAT_JUDGE_LOG", os.path.expanduser("~/vault/director/seat-judge.log"))
+
+def log_line(seat, verdict, owner, command):
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cmd_short = " ".join(command.split())[:200]
+        line = f"{ts} {seat} {verdict} {owner} {cmd_short}\n"
+        with open(LOG, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+def deny(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(2)
+
+# 1. Read hook JSON; non-Bash passes immediately
+try:
+    hook = json.load(sys.stdin)
+except Exception:
+    deny("seat-judge: unreadable hook input; denied")
+
+if hook.get("tool_name") != "Bash":
+    sys.exit(0)
+
+command = hook.get("tool_input", {}).get("command", "")
+if not command:
+    sys.exit(0)
+
+# 2. Privileged word at command position
+# ponytail: regex finds privileged words at command positions; bash -c "$(...)" or an alias evades it.
+# The hard stop is sudoers (only master has sudo); this gate routes, it does not contain.
+PRIV = r"sudo|su|ufw|crontab|docker|lxc|apt-get|apt|dpkg|snap|useradd|usermod|visudo"
+PRIV_RE = re.compile(r"(?:^|[;&|(\n]|&&|\|\|)\s*(?:" + PRIV + r")\b")
+SYSCTL_RE = re.compile(r"(?:^|[;&|(\n]|&&|\|\|)\s*systemctl\b")
+
+privileged = bool(PRIV_RE.search(command))
+if not privileged and SYSCTL_RE.search(command) and "--user" not in command:
+    privileged = True
+
+if not privileged:
+    sys.exit(0)
+
+# 3. Load seat registry
+registry = {}
+try:
+    for entry in sorted(os.listdir(VAULT)):
+        seat_dir = os.path.join(VAULT, entry)
+        if not os.path.isdir(seat_dir):
+            continue
+        yaml = os.path.join(seat_dir, "seat.yaml")
+        if not os.path.isfile(yaml):
+            continue
+        try:
+            with open(yaml) as f:
+                for line in f:
+                    if line.startswith("role:"):
+                        role = line[5:].strip()
+                        if role:
+                            registry[entry] = role
+                        break
+        except Exception:
+            pass
+except Exception:
+    pass
+
+def role_text(role):
+    path = os.path.join(HERE, "seats", role, "AGENTS.md")
+    try:
+        with open(path) as f:
+            text = f.read(600)
+        return " ".join(text.split())
+    except Exception:
+        return "(no role file)"
+
+# 4. Caller must have a seat
+if not SEAT or SEAT not in registry:
+    deny("seat-judge: no seat for this session; privileged commands need a seat (operator)")
+
+# 5. Build state and question
+lines = ["Seats and roles:"]
+for name in sorted(registry):
+    role = registry[name]
+    lines.append(f"- {name} ({role}): {role_text(role)}")
+lines.append(f"\nCaller seat: {SEAT}")
+lines.append(f"Command: {command}")
+state = "\n".join(lines)
+
+criteria = sorted(registry.keys()) + ["na"]
+question = {
+    "id": "owner",
+    "type": "choice",
+    "instructions": "Which seat's role covers running this command? Answer na if no seat's role covers it.",
+    "criteria": criteria
+}
+
+# 6. Ask JEV, then fallback
+owner = None
+try:
+    body = json.dumps({"state": state, "questions": [question]}).encode()
+    req = urllib.request.Request(
+        JUDGE_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json", "x-lane": "fast"}
+    )
+    resp = urllib.request.urlopen(req, timeout=60)
+    data = json.loads(resp.read())
+    ans = data.get("answers", [])
+    if ans and ans[0].get("type") == "choice":
+        choice = ans[0].get("choice", "")
+        if choice in criteria:
+            owner = choice
+except Exception:
+    pass
+
+if owner is None:
+    try:
+        prompt = (state + "\n\n" + question["instructions"]
+                  + " Reply with exactly one of: " + " ".join(criteria))
+        proc = subprocess.run(
+            ["bash", "-c", FALLBACK],
+            input=prompt.encode(), capture_output=True, timeout=120
+        )
+        words = proc.stdout.decode().strip().split()
+        if words:
+            cleaned = words[-1].strip(".,;:!?'\")(")
+            if cleaned in criteria:
+                owner = cleaned
+    except Exception:
+        pass
+
+if owner is None:
+    log_line(SEAT, "deny", "-", command)
+    deny("seat-judge: judge unavailable (JEV and fallback); denied, never fail open")
+
+# 7. Verdict
+if owner == SEAT:
+    log_line(SEAT, "allow", owner, command)
+    sys.exit(0)
+elif owner == "na":
+    log_line(SEAT, "deny", owner, command)
+    deny("seat-judge: no seat's role covers this; ask the operator")
+else:
+    log_line(SEAT, "deny", owner, command)
+    deny(f"seat-judge: this belongs to seat {owner}; route the request there (do not escalate)")
+PY
+)
+exec python3 -I -c "$prog" "$here"
