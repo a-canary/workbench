@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# agent-profile-test — hermetic check for bin/agent-profile: a five-event session must split into
-# 1.5 min model, 2 min tool, 40 min idle, with the idle stretch listed as woken by the waker.
+# agent-profile-test — hermetic check for bin/agent-profile. A seven-event session must split into
+# 2 min model, 12 min tool, 40 min idle, with the idle stretch listed as woken by the waker.
+# A 600 s Bash call that runs `gh pr view 1` and then defend-attack is a defend-attack call (a known long
+# tool), not a hung gh call (repos-bo4qi).
 set -u
 here=$(cd "$(dirname "$0")" && pwd); tmp=$(mktemp -d); trap 'rm -r "$tmp"' EXIT
 ev() { printf '{"type":"%s","timestamp":"2026-01-02T%sZ","message":{"content":%s}}\n' "$1" "$2" "$3"; }
@@ -8,15 +10,20 @@ ev() { printf '{"type":"%s","timestamp":"2026-01-02T%sZ","message":{"content":%s
   ev user      10:00:00 '"You are the **Test Lead**: go"'
   ev assistant 10:01:00 '[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cd /x && gh pr view 1"}}]'
   ev user      10:03:00 '[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]'
-  ev assistant 10:03:30 '[{"type":"text","text":"You have hit your session limit, resets 12:30pm"}]'
-  ev user      10:43:30 '"Waker: bead x-1 is ready"'
+  ev assistant 10:03:30 '[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"gh pr view 1 --json headRefOid; ~/bin/defend-attack 1 > /tmp/r.txt"}}]'
+  ev user      10:13:30 '[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]'
+  ev assistant 10:14:00 '[{"type":"text","text":"You have hit your session limit, resets 12:30pm"}]'
+  ev user      10:54:00 '"Waker: bead x-1 is ready"'
 } > "$tmp/abcdef12-test.jsonl"
 AGENT_PROFILE_NOW=2026-01-02T11:00:00 python3 "$here/agent-profile" "$tmp" "$tmp/abcdef12-test.jsonl" > "$tmp/out.txt" || { echo "FAIL: exit"; exit 1; }
 python3 - "$tmp/abcdef12.json" <<'PY' && echo "PASS agent-profile-test"
 import json, sys
 r = json.load(open(sys.argv[1]))
-assert r["wall_minutes"] == {"model": 1.5, "tool": 2.0, "idle": 40.0}, r["wall_minutes"]
-assert r["tools_by_total_time"][0]["tool"] == "Bash:gh" and r["tools_by_total_time"][0]["max_s"] == 120, r["tools_by_total_time"]
+assert r["wall_minutes"] == {"model": 2.0, "tool": 12.0, "idle": 40.0}, r["wall_minutes"]
+slow = r["slowest_tool_calls"]
+assert (slow[0]["tool"], slow[0]["s"], slow[0]["long_tool"]) == ("Bash:defend-attack", 600, True), slow[0]
+assert (slow[1]["tool"], slow[1]["s"], slow[1]["long_tool"]) == ("Bash:gh", 120, False), slow[1]
+assert r["hung_calls_over_500s"] == 0, r["hung_calls_over_500s"]
 i = r["longest_idles"][0]
 assert (i["min"], i["ended_by"], r["seat"]) == (40.0, "waker", "Test Lead"), (i, r["seat"])
 PY

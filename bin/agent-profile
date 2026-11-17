@@ -18,6 +18,8 @@ NOW = (dt.datetime.fromisoformat(os.environ["AGENT_PROFILE_NOW"][:19]).replace(t
        if os.environ.get("AGENT_PROFILE_NOW") else dt.datetime.now(dt.timezone.utc))
 CUT = NOW - dt.timedelta(hours=24)
 MIN_IDLE_S = 600  # idle stretches shorter than this are summed but not listed
+# Tools expected to run for minutes; a chained call is theirs, and they are not counted as hung.
+LONG_TOOLS = {"defend-attack", "deploy-run.ts", "public-push-review", "worker-task", "sandbox-review", "lane-run"}
 TS = re.compile(r'"timestamp":"(20[0-9T:.\-]+)Z"')
 # What kind of input ended an idle stretch, from the first characters of that input.
 SOURCES = [("waker", r"^Waker:"), ("cron check-in", r"30-minute check-in"), ("feed-watch", r"^\[feed-watch"),
@@ -37,9 +39,17 @@ def text_of(content):
 
 
 def bash_key(cmd):
-    cmd = re.sub(r"^(cd [^;&]+(&&|;)\s*)+", "", cmd.strip())
-    cmd = re.sub(r"^([A-Za-z_]+=\S+\s+)+", "", cmd)
-    return "Bash:" + (cmd.split() or ["?"])[0].split("/")[-1][:20]
+    """Name a Bash call by the step that owns its run time: a known long tool anywhere in the chain
+    (`gh pr view 1 && defend-attack 1` is a defend-attack call), else the first step that is not cd."""
+    first = None
+    for step in re.split(r"&&|\|\||[;|\n]", cmd):
+        words = [w.split("/")[-1] for w in re.sub(r"^\s*([A-Za-z_]+=\S+\s+)+", "", step).split()]
+        long = next((w for w in words if w in LONG_TOOLS), None)
+        if long:
+            return "Bash:" + long
+        if words and words[0] != "cd":
+            first = first or words[0][:20]
+    return "Bash:" + (first or "?")
 
 
 def source(txt):
@@ -133,8 +143,9 @@ def profile(path):
         "idle_by_what_ended_it": {k: {"n": v[0], "min": round(v[1] / 60, 1)} for k, v in sorted(idle_src.items(), key=lambda x: -x[1][1])},
         "tools_by_total_time": [{"tool": k, "n": v[0], "total_min": round(v[1] / 60, 1), "avg_s": round(v[1] / v[0], 1), "max_s": round(v[2])}
                                 for k, v in sorted(tools.items(), key=lambda x: -x[1][1])[:18]],
-        "slowest_tool_calls": [{"s": round(a), "at": b, "tool": c, "what": e} for a, b, c, e in sorted(slow, reverse=True)[:12]],
-        "hung_calls_over_500s": sum(1 for a, *_ in slow if a >= 500),
+        "slowest_tool_calls": [{"s": round(a), "at": b, "tool": c, "long_tool": c[5:] in LONG_TOOLS, "what": e}
+                               for a, b, c, e in sorted(slow, reverse=True)[:12]],
+        "hung_calls_over_500s": sum(1 for a, _, c, _ in slow if a >= 500 and c[5:] not in LONG_TOOLS),
         "longest_idles": [{"min": round(a / 60, 1), "from": b, "to": c, "ended_by": s, "agent_last_said": t, "next_input": n}
                           for a, b, c, s, t, n in sorted(stalls, reverse=True)[:80]],
         "hourly_minutes_utc": {h: {k: round(v / 60, 1) for k, v in c.items()} for h, c in sorted(hourly.items())},
