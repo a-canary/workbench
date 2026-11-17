@@ -40,10 +40,10 @@ print(json.dumps({"permissions": {"allow": allow, "deny": deny}}, indent=2))
   printf '%s' "$f"
 }
 
-quote_words() { # shell-quote each word; leave plain words (incl. commas) bare
+quote_words() { # shell-quote each word; commas stay bare (literal in shell)
   local w out=()
   for w in "$@"; do
-    if [[ $w =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then out+=("$w"); else out+=("$(printf '%q' "$w")"); fi
+    if [[ $w =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then out+=("$w"); else w=$(printf '%q' "$w"); out+=("${w//\\,/,}"); fi
   done
   echo "${out[*]}"
 }
@@ -78,7 +78,7 @@ cmd_run() {
   [ -r "$rdir/permissions.yaml" ] || die "role without permissions.yaml: $role"
   [ -d "$repo" ] || die "repo is not a directory: '$repo'"
 
-  local mkey=model bashlist warn=""
+  local mkey=model bashlist
   [ "$harness" = claude ] && mkey=claude_model
   local model
   model=$(yget "$yaml" "$mkey")
@@ -93,23 +93,18 @@ cmd_run() {
     cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings" --strict-mcp-config --permission-mode dontAsk)
   else
     local tools
-    tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)")
-    # ponytail: pi cannot scope bash by prefix, so withhold it; upgrade = a pi extension that enforces the bash prefix list.
-    if [ -n "$bashlist" ]; then
-      tools=$(grep -vx bash <<<"$tools" || true)
-      warn="seat: warning: pi cannot scope bash by prefix; bash withheld from --tools"
-    fi
-    cmd=(pi --model "$model" --append-system-prompt "$rdir/AGENTS.md" --tools "$(paste -sd, - <<<"$tools")")
+    tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)" | paste -sd, -)
+    local -a bashenv=()
+    [ -z "$bashlist" ] || bashenv=(env "SEAT_BASH_PREFIXES=$(split_csv "$bashlist" | paste -sd, -)")
+    cmd=("${bashenv[@]}" pi --no-extensions -e "$here/lib/pi-bash-guard.ts" --model "$model" --append-system-prompt "$rdir/AGENTS.md" --tools "$tools")
   fi
   [ ${#prompt[@]} -gt 0 ] && cmd+=("${prompt[*]}")
 
   if [ $dry -eq 1 ]; then
     printf 'cd %q\n' "$repo"
     quote_words "${cmd[@]}"
-    [ -z "$warn" ] || echo "$warn" >&2
     return 0
   fi
-  [ -z "$warn" ] || echo "$warn" >&2
   cd "$repo"
   exec "${cmd[@]}"
 }
