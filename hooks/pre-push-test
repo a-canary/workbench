@@ -82,6 +82,22 @@ evil=$(git rev-parse HEAD)
 printf 'refs/heads/b %s refs/heads/b %s\n' "$evil" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
 no "secret only in a merge commit: refused" $?
 
+# defend-attack 34ff9fa: a no-op push (git runs the hook with empty stdin) must pass, and the guard sees no blank ref line
+: > "$GUARD_LOG"; printf '' | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1; ok "empty stdin (nothing to push): ok" $?
+[ -z "$(sed 1d "$GUARD_LOG" | tr -d '[:space:]')" ] && echo "PASS  guard got no blank ref line" || { echo "FAIL  guard stdin not empty: $(sed 1d "$GUARD_LOG" | od -c | head -2)"; fail=1; }
+# defend-attack 34ff9fa: binary-looking content (-diff attribute or NUL byte) must still be scanned
+git checkout -q -b bin "$clean"
+echo '* -diff' > .gitattributes; printf 'k=%s\n' "ghp_$(printf 'C%.0s' {1..30})" > hidden.txt
+git add .gitattributes hidden.txt; git -c user.name=t -c user.email=t@t commit -q -m attrs
+attrs=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$attrs" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret behind a -diff gitattribute: refused" $?
+git checkout -q -b nul "$clean"
+printf 'x\0y\nk=%s\n' "ghp_$(printf 'D%.0s' {1..30})" > blob.dat; git add blob.dat; git -c user.name=t -c user.email=t@t commit -q -m nul
+nul=$(git rev-parse HEAD)
+printf 'refs/heads/b %s refs/heads/b %s\n' "$nul" "$clean" | GUARD_RC=0 "$hook" origin "$url" >/dev/null 2>&1
+no "secret in a file with a NUL byte: refused" $?
+
 # fresh clone after install: global core.hooksPath -> a dir holding this hook; a real git push runs it
 mkdir -p "$tmp/home/hooks"; cp "$hook" "$tmp/home/hooks/pre-push"
 export HOME="$tmp/home" GIT_CONFIG_NOSYSTEM=1
