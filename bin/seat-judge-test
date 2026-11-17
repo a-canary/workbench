@@ -142,4 +142,10 @@ mkdir -p "$tmp/v/na"; printf 'role: master\nrepo: %s\n' "$tmp" >"$tmp/v/na/seat.
 r=$(SEAT=na SEAT_JUDGE_FALLBACK="echo na" run Bash 'sudo systemctl restart nginx'); check "seat named na cannot self-own" "${r%%|*}" "2"
 echo na >"$tmp/answer"; r=$(SEAT=na run Bash 'sudo systemctl restart nginx'); check "seat named na denied on JEV na" "${r%%|*}" "2"
 
+# ppr R3 on 13077dd: escalation and systemd/polkit commands that never touch sudoers are judged too
+echo ghc >"$tmp/answer"
+for c in 'pkexec ls' 'run0 ls' 'doas ls' 'machinectl shell root@' 'systemd-run --uid=0 ls' 'busctl call org.freedesktop.systemd1' 'loginctl enable-linger x'; do
+  r=$(SEAT=boss run Bash "$c"); check "judged, not passed through: $c" "${r%%|*}" "2"
+done
+
 [ $fails -eq 0 ] && echo "ALL PASS" || { echo "$fails FAIL"; exit 1; }
