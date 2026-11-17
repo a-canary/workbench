@@ -90,7 +90,7 @@ cmd_run() {
     # ponytail: real runs exec, so the settings temp file is left behind; upgrade = wrapper that cleans up after the child exits.
     local settings
     settings=$(claude_settings "$(yget "$rdir/permissions.yaml" tools)" "$bashlist")
-    cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings" --strict-mcp-config)
+    cmd=(claude --model "$model" --append-system-prompt-file "$rdir/AGENTS.md" --settings "$settings" --strict-mcp-config --permission-mode dontAsk)
   else
     local tools
     tools=$(split_csv "$(yget "$rdir/permissions.yaml" pi_tools)")

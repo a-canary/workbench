@@ -79,6 +79,9 @@ hasnt "2 Read not denied" "$deny" "Read"
 # positional as a separate message, so the live ghc proof (2026-11-17) got only "List".
 out=$("$seat" run ghc --harness claude --dry-run take bead x 2>&1)
 has "2b words joined into one prompt" "$(sed -n 2p <<<"$out")" "take\ bead\ x"
+# 2c. the user's default mode (auto) let `touch probe.txt` run on the live ghc seat (2026-11-17, repos-jy5xx);
+# dontAsk refuses every tool call the settings do not pre-approve, with no prompt and no classifier.
+has "2c dontAsk mode" "$cmd" "--permission-mode dontAsk"
 # MCP servers from user or project config would bypass the bash prefix list.
 has "2 strict mcp" "$cmd" "--strict-mcp-config"
 
