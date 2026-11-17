@@ -66,7 +66,8 @@ if not command:
 # a hostile one. The hard stop is sudoers (only master has sudo); polkit-scoped systemctl needs the same lock.
 PRIV = r"sudo|su|ufw|crontab|docker-compose|docker|lxc-[\w-]+|lxc|lxd|apt-get|apt|dpkg|snap|useradd|usermod|visudo|systemctl"
 PRIV_RE = re.compile(r"(?<![\w.-])(?:" + PRIV + r")(?![\w-])")
-privileged = bool(PRIV_RE.search(command) or PRIV_RE.search(re.sub(r"[\\'\"]", "", command)))
+stripped = re.sub(r"[\\'\"]", "", command)
+privileged = bool(PRIV_RE.search(command) or PRIV_RE.search(stripped))
 
 if not privileged:
     sys.exit(0)
@@ -114,7 +115,7 @@ if not SEAT or SEAT not in registry:
 STEER = r"judge|seat|answer|choice|criteri\w*|caller|operator|approve\w*|authori[sz]\w*|instruction\w*|prompt|na"
 names = sorted(set(registry) | set(registry.values()), key=len, reverse=True)
 NAMES_RE = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(map(re.escape, names)) + "|" + STEER + r")(?![A-Za-z0-9])", re.I)
-if not command.isascii() or NAMES_RE.search(command):
+if not command.isascii() or NAMES_RE.search(command) or NAMES_RE.search(stripped):
     log_line(SEAT, "deny", "guard", command)
     deny("seat-judge: denied by the injection guard; ask the operator")
 
