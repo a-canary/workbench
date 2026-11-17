@@ -2,4 +2,5 @@
 # tools: Claude Code tool names.  pi_tools: pi tool names.  bash: allowed command prefixes (both harnesses).
 tools: Read, Grep, Glob, Bash
 pi_tools: read, grep, find, ls, bash
-bash: gh pr, gh api, git status, git log, git fetch, git branch, bd show, bd comments
+bash: gh pr view, gh pr list, gh pr checks, gh pr diff, gh pr merge, gh pr close, gh pr edit, gh pr comment, git status, git log, git branch, bd show, bd comments
+# ponytail: prefix scoping cannot forbid flags; `gh pr merge --admin` and `git log --output` are blocked by the role prompt and host hooks only.

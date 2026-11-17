@@ -64,7 +64,8 @@ settings=$(grep -oE -- "--settings [^ ]+" <<<"$cmd" | cut -d' ' -f2)
 [ -r "$settings" ] || { echo "FAIL  2 settings file readable: '$settings'"; fails=$((fails + 1)); }
 allow=$(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["permissions"]["allow"]))' "$settings" 2>/dev/null)
 has "2 allow Read" "$allow" "Read"
-has "2 allow gh pr" "$allow" "Bash(gh pr:*)"
+has "2 allow gh pr merge" "$allow" "Bash(gh pr merge:*)"
+hasnt "2 no gh api" "$allow" "gh api"
 has "2 allow git status" "$allow" "Bash(git status:*)"
 check "2 no bare Bash" "$(grep -cx 'Bash' <<<"$allow")" "0"
 
@@ -84,6 +85,12 @@ mkdir -p "$tmp/v/nomodel"; printf 'role: github-controller\nrepo: %s\nharness: p
 "$seat" run nomodel --dry-run >/dev/null 2>&1; check "3 empty model fails" "$([ $? -ne 0 ] && echo y)" "y"
 mkdir -p "$tmp/v/norepo"; printf 'role: github-controller\nrepo: %s/missing\nharness: pi\nmodel: m\n' "$tmp" >"$tmp/v/norepo/seat.yaml"
 "$seat" run norepo --dry-run >/dev/null 2>&1; check "3 missing repo fails" "$([ $? -ne 0 ] && echo y)" "y"
+
+# 3b. unknown options are refused, never passed to the harness (e.g. --dangerously-skip-permissions)
+"$seat" run ghc --dangerously-skip-permissions --dry-run >/dev/null 2>&1; check "3b unknown option fails" "$([ $? -ne 0 ] && echo y)" "y"
+out=$("$seat" run ghc --dry-run -- --not-a-flag 2>&1); rc=$?
+check "3b -- ends options" "$rc" "0"
+has "3b words after -- are prompt" "$(sed -n 2p <<<"$out")" "--not-a-flag"
 
 [ $fails = 0 ] && echo "seat-test: PASS" || echo "seat-test: FAIL"
 exit $fails
