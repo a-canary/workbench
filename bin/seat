@@ -2,6 +2,7 @@
 # seat — launch a seat (role template + instance) under Claude Code or pi.
 #
 #   seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]
+#   seat modes <seat>
 #
 # Instance: $SEAT_VAULT/<seat>/seat.yaml (default ~/vault/seats).
 # Role:     <workbench>/seats/<role>/{AGENTS.md,permissions.yaml}.
@@ -46,6 +47,44 @@ quote_words() { # shell-quote each word; leave plain words (incl. commas) bare
     if [[ $w =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then out+=("$w"); else out+=("$(printf '%q' "$w")"); fi
   done
   echo "${out[*]}"
+}
+
+cmd_modes() {
+  local seat=${1:-}
+  [ -n "$seat" ] || die "usage: seat modes <seat>"
+
+  local vault=${SEAT_VAULT:-$HOME/vault/seats} yaml
+  yaml="$vault/$seat/seat.yaml"
+  [ -r "$yaml" ] || die "unknown seat: $seat ($yaml)"
+
+  local role
+  role=$(yget "$yaml" role)
+  case $role in */*) die "role must not contain '/': $role" ;; esac
+
+  local rdir="$here/seats/$role"
+  [ -r "$rdir/permissions.yaml" ] || die "role without permissions.yaml: $role"
+
+  local -A rank=([passive]=0 [advise]=1 [active]=2)
+  # ponytail: judge gate (repos-oh6y) reads these modes; a seat override may only make a mode stricter.
+  local classes="read local-edit ledger commit push-private push-public merge service root-grant cross-seat guard money live-order force-git exposure constitution"
+  local c
+  for c in $classes; do
+    local m
+    m=$(yget "$rdir/permissions.yaml" "mode_$c")
+    # ponytail: case, not ${rank[$m]+x}: an empty key is a bad-subscript error in bash.
+    case $m in passive | advise | active) ;; *) m=active ;; esac
+    local o
+    o=$(yget "$yaml" "mode_$c")
+    case $o in
+      '') ;;
+      passive | advise | active)
+        if [ "${rank[$o]}" -gt "${rank[$m]}" ]; then m=$o
+        elif [ "${rank[$o]}" -lt "${rank[$m]}" ]; then echo "seat: ignoring looser override mode_$c: $o (role default $m)" >&2; fi ;;
+      *) echo "seat: ignoring invalid override mode_$c: $o" >&2 ;;
+    esac
+    case $c in guard|money|live-order|force-git|exposure|constitution) m=active ;; esac
+    echo "$c $m"
+  done
 }
 
 cmd_run() {
@@ -116,5 +155,6 @@ cmd_run() {
 
 case ${1:-} in
   run) shift; cmd_run "$@" ;;
-  *) die "usage: seat run <seat> [--harness claude|pi] [--dry-run] [prompt...]" ;;
+  modes) shift; cmd_modes "$@" ;;
+  *) die "usage: seat run <seat> [--harness claude|pi] [--dry-run] [prompt...] | seat modes <seat>" ;;
 esac
