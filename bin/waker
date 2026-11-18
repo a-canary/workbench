@@ -42,6 +42,8 @@
 #                      launch within WAKER_PROFILE_GAP_S (default 36000, the profile's 10 h window).
 #                      Fully detached (setsid, redirected, backgrounded); never waited.
 #                      Default: pace-profile next to this script.
+# Seat "model" (optional string, default "claude"): any other value skips every Claude gate (repos-1o8pn).
+# A live idle seat held by a Claude gate with a ready bead logs "halted bead=<id>", not "running".
 # tmux targets are exact ("=<seat>"): a bare name prefix-matches, so seat "ndv"
 # would reach a session named "ndv-lead".
 set -u
@@ -204,6 +206,7 @@ validate_seat() {
         elif (.label | type) != "string" or .label == "" then "bad label"
         elif (.priority | type) != "number" then "bad priority"
         elif (.pace_max | type) != "number" then "bad pace_max"
+        elif has("model") and (.model | type) != "string" then "bad model"
         elif (.env | type) != "array" then "bad env"
         elif ([.env[] | select(type != "string" or (test("^[A-Za-z_][A-Za-z0-9_]*$")) != true)] | length) > 0 then "bad env entry"
         elif (.start | type) != "string" or .start == "" then "bad start"
@@ -213,7 +216,9 @@ validate_seat() {
     ' "$file" 2>/dev/null || echo "invalid JSON"
 }
 
-# Collect valid seats as "name|priority|pace_max|repo|label|env_json|start"
+# Collect valid seats as "name|priority|pace_max|nc|repo|label|env_json|start"
+# nc=1: the seat's "model" is not claude (repos-1o8pn). It spends no Claude budget, so no Claude gate holds it
+# (pace, use, session-out, claude.down, Claude slots) and it is never profiled.
 declare -a seats=()
 for file in "$SEATS"/*.json; do
     [ -f "$file" ] || continue
@@ -240,7 +245,8 @@ for file in "$SEATS"/*.json; do
     label=$(jq -r '.label' "$file")
     env_json=$(jq -r '.env | join(",")' "$file")
     start=$(jq -r '.start' "$file")
-    seats+=("$stem|$priority|$pace_max|$repo|$label|$env_json|$start")
+    nc=$(jq -r 'if (.model // "claude") == "claude" then 0 else 1 end' "$file")
+    seats+=("$stem|$priority|$pace_max|$nc|$repo|$label|$env_json|$start")
 done
 
 # Sort seats by priority ascending, then by name
@@ -252,7 +258,8 @@ if [ "$override" -eq 0 ] && [ "$meter_ok" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     breach_seat=""
     while IFS= read -r s; do
         [ -z "$s" ] && continue
-        IFS='|' read -r name priority pace_max _ <<<"$s"
+        IFS='|' read -r name priority pace_max nc _ <<<"$s"
+        [ "$nc" -eq 1 ] && continue
         if awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then breach_seat="$name"; break; fi
     done <<<"$sorted_seats"
     # the marker holds the last launch time: pace oscillating around pace_max launches at most once per gap
@@ -273,11 +280,11 @@ used=0
 declare -a running=()
 while IFS= read -r s; do
     [ -z "$s" ] && continue
-    IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
+    IFS='|' read -r name priority pace_max nc repo label env_json start <<<"$s"
     if $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
         # Live seat: is it idle and does it have a ready bead?
         nudge_bead=""
-        if [ "$session_out" -eq 1 ]; then
+        if [ "$session_out" -eq 1 ] && [ "$nc" -eq 0 ]; then
             echo "seat=$name session-out"
             used=$((used + 1))
             running+=("$name")
@@ -290,8 +297,8 @@ while IFS= read -r s; do
         fi
         # Decide whether to nudge
         should_nudge=0
-        if [ -n "$nudge_bead" ] && [ ! -e "$SEATS/claude.down" ]; then
-            if [ "$override" -eq 1 ]; then
+        if [ -n "$nudge_bead" ] && { [ "$nc" -eq 1 ] || [ ! -e "$SEATS/claude.down" ]; }; then
+            if [ "$override" -eq 1 ] || [ "$nc" -eq 1 ]; then
                 should_nudge=1
             elif [ "$meter_ok" -eq 1 ] && ! awk -v a="$util" -v b="0.90" 'BEGIN{exit !(a>=b)}'; then
                 if ! awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}' || is_p0 "$repo" "$nudge_bead"; then
@@ -299,7 +306,9 @@ while IFS= read -r s; do
                 fi
             fi
         fi
-        if [ "$should_nudge" -eq 0 ]; then
+        if [ "$should_nudge" -eq 0 ] && [ -n "$nudge_bead" ]; then
+            echo "seat=$name halted bead=$nudge_bead"   # idle with work, held by a Claude gate
+        elif [ "$should_nudge" -eq 0 ]; then
             echo "seat=$name running"
         else
             # Check nudge gap
@@ -329,7 +338,7 @@ while IFS= read -r s; do
                 fi
             fi
         fi
-        used=$((used + 1))
+        [ "$nc" -eq 1 ] || used=$((used + 1))
         running+=("$name")
     fi
 done <<<"$sorted_seats"
@@ -346,12 +355,12 @@ is_running() {
 # Second pass: try to start seats that aren't running
 while IFS= read -r s; do
     [ -z "$s" ] && continue
-    IFS='|' read -r name priority pace_max repo label env_json start <<<"$s"
+    IFS='|' read -r name priority pace_max nc repo label env_json start <<<"$s"
     if is_running "$name"; then
         continue
     fi
 
-    if [ "$session_out" -eq 1 ]; then
+    if [ "$session_out" -eq 1 ] && [ "$nc" -eq 0 ]; then
         echo "seat=$name session-out"
         continue
     fi
@@ -364,13 +373,13 @@ while IFS= read -r s; do
     fi
 
     # claude.down
-    if [ -e "$SEATS/claude.down" ]; then
+    if [ "$nc" -eq 0 ] && [ -e "$SEATS/claude.down" ]; then
         echo "seat=$name claude-down bead=$bead"
         continue
     fi
 
     # Budget checks (unless overridden)
-    if [ "$override" -eq 0 ]; then
+    if [ "$override" -eq 0 ] && [ "$nc" -eq 0 ]; then
         if [ "$meter_ok" -eq 0 ]; then
             echo "seat=$name budget-stop bead=$bead meter unreadable"
             continue
@@ -386,7 +395,7 @@ while IFS= read -r s; do
     fi
 
     # Slot check
-    if [ "$used" -ge "$SLOTS" ]; then
+    if [ "$nc" -eq 0 ] && [ "$used" -ge "$SLOTS" ]; then
         echo "seat=$name no-slot bead=$bead"
         continue
     fi
