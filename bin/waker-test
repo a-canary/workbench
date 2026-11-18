@@ -479,6 +479,10 @@ world; for s in trading ndv; do nonclaude $s; done; echo "0.50 1.50" >"$W/meter"
 check "44 only Claude seats are profiled" "$(profiled)" "stack,"
 world; jq '.model=1' "$W/seats/stack.json" >"$W/x" && command mv "$W/x" "$W/seats/stack.json"; ptick
 has "44 non-string model is a bad seat" "$W/out" "seat=stack bad-seat bad model"
+world; for s in trading ndv; do nonclaude $s; done; touch "$W/alive/trading" "$W/alive/ndv"; ready stack s-1; ptick
+has "44 live non-Claude seats fill no Claude slot" "$W/out" "seat=stack started bead=s-1"
+world; nonclaude stack; ready stack s-1; live_idle stack; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
+has "44 live idle non-Claude seat nudged past session-out and claude.down" "$W/out" "seat=stack nudged bead=s-1"
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
