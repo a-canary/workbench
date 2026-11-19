@@ -81,7 +81,7 @@ fi
 # 3 findings
 if grep -qiE '^[[:space:]]*findings:[[:space:]]*none\b' <<<"$all"; then
   :
-elif ! grep -rlE "^created: *'?$today'?$" "$KE_DIR" --include='*.md' 2>/dev/null | xargs -r grep -lE '^src: learn' 2>/dev/null | grep -q .; then
+elif ! grep -rlE "^created: *[\"']?$today[\"']? *\$" "$KE_DIR" --include='*.md' 2>/dev/null | xargs -r grep -lE "^src: *[\"']?learn[\"']? *\$" 2>/dev/null | grep -q .; then
   fails+=("findings: no ke note with 'created: $today' and 'src: learn' — save the durable finding, or write 'findings: none' in bead $id")
 fi
 
