@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# session-end-check-test — contract of session-end-check (repos-iduk7.10.5), no LLM, no network.
+# Stub `bd` and `gh` sit first on PATH; JOURNAL_DIR and KE_DIR point into a temp dir.
+# Bead used throughout: repos-x1 (env var names become DESC_repos_x1 / COMMENT_repos_x1).
+set -uo pipefail
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+cmd=$here/session-end-check
+[ -x "$cmd" ] || { echo "FAIL: bin/session-end-check missing or not executable"; exit 1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fail=0
+ok()  { printf 'ok   %s\n' "$1"; }
+bad() { printf 'FAIL %s\n' "$1"; fail=1; }
+
+export JOURNAL_DIR=$tmp/journal KE_DIR=$tmp/ke
+mkdir -p "$JOURNAL_DIR" "$KE_DIR" "$tmp/bin"
+D=2026-11-19
+ID=repos-x1
+
+cat > "$tmp/bin/bd" <<'EOF'
+#!/usr/bin/env bash
+case $1 in
+  show)
+    v=DESC_${2//-/_}
+    [ -n "${!v-}" ] || { echo '[]'; exit 0; }
+    jq -n --arg id "$2" --arg d "${!v}" '[{id:$id,description:$d,status:"open"}]' ;;
+  comments) v=COMMENT_${2//-/_}; echo "${!v-}" ;;
+  list) echo '[]' ;;
+  *) exit 0 ;;
+esac
+EOF
+cat > "$tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+[[ $* == *o/good* ]] && { echo '{"state":"OPEN"}'; exit 0; }
+echo 'no pull requests found' >&2; exit 1
+EOF
+chmod +x "$tmp/bin/bd" "$tmp/bin/gh"
+export PATH=$tmp/bin:$PATH
+
+# helpers
+bead() { export DESC_repos_x1=$1; }
+comment() { export COMMENT_repos_x1=${1-}; }
+journal() { printf '# journal\n\n%s\n' "$1" > "$JOURNAL_DIR/$D.md"; }
+learn()  { printf -- '---\ncreated: %s\nsrc: learn\n---\nfact\n' "$1" > "$KE_DIR/learned.md"; }
+run() { "$cmd" "$@" >"$tmp/out" 2>"$tmp/err"; }
+
+expect_pass() { if [ $? -eq 0 ] && grep -q PASS "$tmp/out"; then ok "$1"; else bad "$1"; sed 's/^/    /' "$tmp/err"; fi; }
+expect_fail() { local rc=$?; if [ $rc -ne 0 ] && grep -q -- "$2" "$tmp/err"; then ok "$1"; else bad "$1 (rc=$rc)"; sed 's/^/    /' "$tmp/err"; fi; }
+
+# --- a complete handoff passes
+bead 'handoff: /tmp
+findings: none'
+comment 'follow-up: repos-x2'
+export DESC_repos_x2='a follow up'
+journal '- did the thing (repos-x1)'
+learn "$D"
+run "$ID" --today $D; expect_pass "complete handoff passes"
+
+# --- handoff marker
+bead 'nothing here
+findings: none'
+run "$ID" --today $D; expect_fail "missing handoff fails" "no 'handoff:' line"
+
+bead 'handoff: /nope/missing.md
+findings: none'
+run "$ID" --today $D; expect_fail "dead handoff path fails" "does not exist"
+
+bead 'handoff: relative/path.md
+findings: none'
+run "$ID" --today $D; expect_fail "relative handoff fails" "neither an absolute path"
+
+bead 'handoff: https://github.com/o/bad/pull/9
+findings: none'
+run "$ID" --today $D; expect_fail "unresolvable PR fails" "does not resolve"
+
+bead 'handoff: https://github.com/o/good/pull/9
+findings: none'
+run "$ID" --today $D; expect_pass "resolvable PR passes"
+
+# --- journal
+bead 'handoff: /tmp
+findings: none'
+rm -f "$JOURNAL_DIR/$D.md"
+run "$ID" --today $D; expect_fail "missing journal fails" "does not exist"
+journal '- something unrelated'
+run "$ID" --today $D; expect_fail "journal not naming the bead fails" "does not mention"
+
+# --- findings
+journal '- did the thing (repos-x1)'
+rm -f "$KE_DIR/learned.md"
+bead 'handoff: /tmp'
+run "$ID" --today $D; expect_fail "no finding fails" "no ke note"
+learn "$D"
+run "$ID" --today $D; expect_pass "today's learn note passes"
+learn 2026-01-01
+run "$ID" --today $D; expect_fail "stale learn note does not pass" "no ke note"
+printf -- '---\ncreated: %s\nsrc: crawl\n---\nfact\n' "$D" > "$KE_DIR/learned.md"
+run "$ID" --today $D; expect_fail "non-learn note does not pass" "no ke note"
+rm -f "$KE_DIR/learned.md"
+bead 'handoff: /tmp
+findings: none'
+run "$ID" --today $D; expect_pass "'findings: none' is an explicit way out"
+
+# --- follow-ups
+comment 'follow-up: repos-nosuch'
+run "$ID" --today $D; expect_fail "dead follow-up fails" "does not resolve to a bead"
+comment ''
+run "$ID" --today $D; expect_pass "no follow-up is fine"
+
+# --- prune is advisory only
+mkdir -p "$tmp/repo" && git -C "$tmp/repo" init -q && touch "$tmp/repo/scratch.txt"
+run "$ID" --today $D --repo "$tmp/repo"
+if [ $? -eq 0 ] && grep -q 'WARN  prune' "$tmp/out"; then ok "untracked files warn, do not fail"; else bad "untracked files warn, do not fail"; cat "$tmp/out" "$tmp/err"; fi
+rm -rf "$tmp/repo/.git" "$tmp/repo/scratch.txt"
+
+# --- unknown bead and bad usage
+run repos-nosuch --today $D; expect_fail "unknown bead fails" "not found or has no description"
+run >/dev/null 2>&1
+if [ $? -eq 2 ]; then ok "no args exits 2"; else bad "no args exits 2"; fi
+
+echo
+[ $fail -eq 0 ] && echo "PASS session-end-check-test" || echo "FAIL session-end-check-test"
+exit $fail

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# session-end-check — the repos-iduk7.10.5 session-end checklist, run at the gate.
+#
+#   session-end-check <bead-id> [--repo PATH] [--today YYYY-MM-DD]
+#
+# The lead submits a handoff and ends its session at each gate; the next phase starts
+# from the handoff artifact only. This script is what the gate's JEV screen runs, so
+# the checklist is enforced rather than reminded.
+#
+# Markers it reads, all in the bead's description or any comment on it:
+#   handoff: <path-or-PR-URL>     required; the artifact the next phase starts from
+#   follow-up: <bead-id>          optional, repeatable; each must resolve
+#   findings: none                required if no KE note was added today
+#
+# Mechanical checks (FAIL = exit 1):
+#   1 handoff  marker present and its target resolves (file exists / gh sees the PR)
+#   2 journal  $JOURNAL_DIR/<date>.md exists and mentions the bead id
+#   3 findings a ke note with `src: learn` and `created: <date>` exists, or findings: none
+#   4 followup every follow-up: id resolves to a bead
+# Advisory only (WARN, never fails):
+#   5 prune    untracked files in --repo (some are not this seat's)
+#   6 beads    in_progress beads still assigned to this seat
+set -uo pipefail
+
+JOURNAL_DIR=${JOURNAL_DIR:-$HOME/vault/director/journal}
+KE_DIR=${KE_DIR:-$HOME/vault/ke}
+die() { echo "session-end-check: $*" >&2; exit 2; }
+usage='usage: session-end-check <bead-id> [--repo PATH] [--seat NAME] [--today YYYY-MM-DD]'
+
+id= repo= seat= today=$(date -u +%F)
+while [ $# -gt 0 ]; do
+  case $1 in
+    --repo) [ $# -ge 2 ] || die "$usage"; repo=$2; shift 2 ;;
+    --seat) [ $# -ge 2 ] || die "$usage"; seat=$2; shift 2 ;;
+    --today) [ $# -ge 2 ] || die "$usage"; today=$2; shift 2 ;;
+    -h|--help) echo "$usage"; exit 0 ;;
+    -*) die "$usage" ;;
+    *) [ -z "$id" ] || die "$usage"; id=$1; shift ;;
+  esac
+done
+[ -n "$id" ] || die "$usage"
+
+fails=() warns=()
+
+# Everything the seat wrote about the bead: description first, then every comment.
+body=$(bd show "$id" --json 2>/dev/null | jq -r '.[0].description // ""') || body=
+comments=$(bd comments "$id" 2>/dev/null) || comments=
+all="${body}
+${comments}"
+[ -n "${body//[[:space:]]/}" ] || fails+=("bead $id not found or has no description — bd show failed")
+
+marker() { grep -ioE "^[[:space:]]*$1:[[:space:]]*\S.*$" <<<"$all" | sed -E "s/^[[:space:]]*$1:[[:space:]]*//" ; }
+
+# 1 handoff
+handoffs=$(marker handoff)
+if [ -z "$handoffs" ]; then
+  fails+=("handoff: no 'handoff:' line in bead $id — the next phase needs an artifact to start from")
+else
+  while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    h=$(echo "$h" | awk '{print $1}')
+    case $h in
+      http*://github.com/*/pull/*)
+        gh pr view "${h##*/pull/}" -R "$(sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#' <<<"$h")" --json state >/dev/null 2>&1 \
+          || fails+=("handoff: PR $h does not resolve via gh") ;;
+      http*://*) : ;;
+      /*) [ -e "$h" ] || fails+=("handoff: path $h does not exist") ;;
+      *) fails+=("handoff: '$h' is neither an absolute path nor an http(s) URL") ;;
+    esac
+  done <<<"$handoffs"
+fi
+
+# 2 journal
+jf="$JOURNAL_DIR/$today.md"
+if [ ! -f "$jf" ]; then
+  fails+=("journal: $jf does not exist — record what you tried, what worked, what failed")
+elif ! grep -qF "$id" "$jf"; then
+  fails+=("journal: $jf does not mention $id")
+fi
+
+# 3 findings
+if grep -qiE '^[[:space:]]*findings:[[:space:]]*none\b' <<<"$all"; then
+  :
+elif ! grep -rlE "^created: *'?$today'?$" "$KE_DIR" --include='*.md' 2>/dev/null | xargs -r grep -lE '^src: learn' 2>/dev/null | grep -q .; then
+  fails+=("findings: no ke note with 'created: $today' and 'src: learn' — save the durable finding, or write 'findings: none' in bead $id")
+fi
+
+# 4 follow-ups
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  f=$(echo "$f" | awk '{print $1}')
+  bd show "$f" --json 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1 || fails+=("followup: '$f' does not resolve to a bead")
+done <<<"$(marker follow-up)"
+
+# 5 prune (advisory)
+if [ -n "$repo" ]; then
+  [ -d "$repo/.git" ] || [ -f "$repo/.git" ] || warns+=("prune: $repo is not a git checkout")
+  if [ -d "$repo/.git" ] || [ -f "$repo/.git" ]; then
+    n=$(git -C "$repo" status --porcelain 2>/dev/null | grep -c '^??' || true)
+    [ "${n:-0}" -eq 0 ] || warns+=("prune: $n untracked path(s) in $repo — delete what the handoff does not cite")
+  fi
+fi
+
+# 6 beads (advisory, only when --seat is given: a global list is noise)
+if [ -n "$seat" ]; then
+  mine=$(bd list --status in_progress --assignee "$seat" --json 2>/dev/null | jq -r --arg id "$id" '.[] | select(.id != $id) | .id' 2>/dev/null)
+  [ -z "$mine" ] || warns+=("beads: still in_progress for $seat: $(echo "$mine" | tr '\n' ' ')")
+fi
+
+for w in ${warns[@]+"${warns[@]}"}; do echo "WARN  $w"; done
+if [ ${#fails[@]} -eq 0 ]; then
+  echo "session-end-check: PASS — $id handoff is complete"
+  exit 0
+fi
+for f in "${fails[@]}"; do echo "FAIL  $f" >&2; done
+echo "session-end-check: FAIL — ${#fails[@]} item(s) to fix before the gate" >&2
+exit 1
