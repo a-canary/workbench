@@ -48,7 +48,116 @@
 # would reach a session named "ndv-lead".
 set -u
 
-SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
+# Herdr seam functions for nc=1 (pi) seats (repos-9ma8e)
+herdr_alive() {
+    herdr agent get "$1" >/dev/null 2>&1
+}
+
+herdr_idle() {
+    local status
+    status=$(herdr agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status // "unknown"')
+    case "$status" in
+        idle|done) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+herdr_nudge() {
+    local seat="$1" bead="$2"
+    herdr agent prompt "$seat" "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." </dev/null 2>&1
+}
+
+# R3 stuck detection (repos-9ma8e follow-on): a "working" seat whose pi session jsonl has not
+# grown is wedged (frozen model call, hung tool, babysat bg task). jsonl age is immune to
+# footer ticks and lane 502s: those change screen text but never the session log.
+# WAKER_STUCK_S (default 1800) covers the observed 30-min laneproxy backlog worst case.
+# "blocked" (a dialog waiting) over WAKER_BLOCKED_S (default 300) also counts as stuck.
+herdr_idle_out() {
+    case $(jq -r '.result.agent.agent_status // "unknown"' <<<"$1" 2>/dev/null) in
+        idle|done) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+herdr_stuck() {
+    local seat=$1 out=$2 status sess age f now
+    status=$(jq -r '.result.agent.agent_status // "unknown"' <<<"$out" 2>/dev/null)
+    f="$SEATS/.stuck/$seat.blockedsince"
+    [ "$status" = "blocked" ] || { [ -e "$f" ] && rm -f "$f"; }
+    if [ "$status" = "working" ]; then
+        sess=$(jq -r '.result.agent.agent_session.value // empty' <<<"$out" 2>/dev/null)
+        [ -n "$sess" ] && [ -f "$sess" ] || return 1
+        age=$(( $(date +%s) - $(stat -c %Y "$sess") ))
+        [ "$age" -ge "${WAKER_STUCK_S:-1800}" ] && return 0
+        return 1
+    fi
+    if [ "$status" = "blocked" ]; then
+        now=$(date +%s)
+        if [ ! -f "$f" ]; then
+            mkdir -p "$SEATS/.stuck" && printf '%s\n' "$now" >"$f"
+            return 1
+        fi
+        age=$(( now - $(cat "$f" 2>/dev/null || echo 0) ))
+        [ "$age" -ge "${WAKER_BLOCKED_S:-300}" ] && return 0
+        return 1
+    fi
+    return 1
+}
+
+# Progressive recovery (operator-approved design): nudge -> 5 min -> kill (restart next tick)
+# -> 5 min -> escalate once. .stuck/<seat> holds "<phase> <epoch>"; .stuck/<seat>.count holds
+# consecutive kill-restarts, and after 3 the nudge is skipped (force-restart). A healthy
+# observation clears both. WAKER_STUCK_GAP_S (default 300) is the wait between phases.
+herdr_stuck_action() {
+    local seat=$1 out=$2 now phase ts tabid count f cf
+    now=$(date +%s); mkdir -p "$SEATS/.stuck"
+    f="$SEATS/.stuck/$seat"; cf="$SEATS/.stuck/$seat.count"
+    phase=0 ts=0
+    if [ -f "$f" ]; then phase=$(cut -d' ' -f1 "$f" 2>/dev/null); ts=$(cut -d' ' -f2 "$f" 2>/dev/null); fi
+    [[ $phase =~ ^[0-9]+$ ]] || phase=0
+    [[ $ts =~ ^[0-9]+$ ]] || ts=0
+    count=$(cat "$cf" 2>/dev/null); [[ $count =~ ^[0-9]+$ ]] || count=0
+    if [ "$count" -ge 3 ]; then phase=1; ts=0; fi   # force-restart: skip the nudge
+    case $phase in
+    0)
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-nudge"; return 0; fi
+        if herdr agent prompt "$seat" "Waker: this seat looks stuck - no session activity in a while. If you are mid-call, ignore this. Otherwise check for a wedged tool call or a long bg task, resolve or kill it, and bank state to beads." </dev/null >/dev/null 2>&1; then
+            printf '1 %s\n' "$now" >"$f"
+            echo "seat=$seat stuck-nudged"
+        else
+            echo "seat=$seat stuck-nudge-failed"
+        fi
+        ;;
+    1)
+        if [ $(( now - ts )) -lt "${WAKER_STUCK_GAP_S:-300}" ]; then echo "seat=$seat stuck (nudged, waiting)"; return 0; fi
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-kill"; return 0; fi
+        tabid=$(jq -r '.result.agent.tab_id // empty' <<<"$out" 2>/dev/null)
+        if [ -n "$tabid" ] && herdr tab close "$tabid" >/dev/null 2>&1; then
+            printf '2 %s\n' "$now" >"$f"
+            echo "$(( count + 1 ))" >"$cf"
+            echo "seat=$seat stuck-killed tab=$tabid (restart next tick)"
+        else
+            echo "seat=$seat stuck-kill-failed"
+        fi
+        ;;
+    2)
+        if [ $(( now - ts )) -lt "${WAKER_STUCK_GAP_S:-300}" ]; then echo "seat=$seat stuck (restarted, waiting)"; return 0; fi
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-escalate"; return 0; fi
+        printf '3 %s\n' "$now" >"$f"
+        echo "seat=$seat stuck-escalated nudge-and-restart-failed operator-attention"
+        ;;
+    *)
+        echo "seat=$seat stuck (escalated $(( now - ts ))s ago)"
+        ;;
+    esac
+}
+
+herdr_stuck_clear() {
+    rm -f "$SEATS/.stuck/$1" "$SEATS/.stuck/$1.count" "$SEATS/.stuck/$1.blockedsince" 2>/dev/null
+    return 0
+}
+
+SEATS="${WAKER_SEATS:-$HOME/vault/seats}"
 BUDGET="${WAKER_BUDGET:-$HOME/vault/director/.budget}"
 SLOTS="${WAKER_CLAUDE_SLOTS:-2}"
 case "$SLOTS" in ''|*[!0-9]*) SLOTS=2 ;; esac   # not a count: fall back to the default, never to "no limit"
@@ -219,33 +328,62 @@ validate_seat() {
 # Collect valid seats as "name|priority|pace_max|nc|repo|label|env_json|start"
 # nc=1: the seat's "model" is not claude (repos-1o8pn). It spends no Claude budget, so no Claude gate holds it
 # (pace, use, session-out, claude.down, Claude slots) and it is never profiled.
+# Seats live in vault/seats/<seat>/seat.yaml (flat key: value). Repos-n98vs.2.
 declare -a seats=()
-for file in "$SEATS"/*.json; do
-    [ -f "$file" ] || continue
-    stem="${file##*/}"; stem="${stem%.json}"
-    v=$(validate_seat "$file")
-    if [ "$v" != "ok" ]; then
-        echo "seat=$stem bad-seat $v"
-        continue
-    fi
-    # Check repo exists
-    repo=$(jq -r '.repo' "$file")
-    if [ ! -d "$repo" ]; then
+for seat_dir in "$SEATS"/*/; do
+    [ -d "$seat_dir" ] || continue
+    stem=$(basename "$seat_dir")
+    file="$seat_dir/seat.yaml"
+    [ -f "$file" ] || { echo "seat=$stem bad-seat no seat.yaml"; continue; }
+    # Parse flat YAML
+    repo=$(grep '^repo:' "$file" | sed 's/^repo: *//' | tr -d '"')
+    if [ -z "$repo" ] || [ ! -d "$repo" ]; then
         echo "seat=$stem bad-seat repo missing"
         continue
     fi
-    kind=$(jq -r '.kind' "$file")
+    kind=$(grep '^kind:' "$file" | sed 's/^kind: *//' | tr -d '"')
     if [ "$kind" = "worker" ]; then
         echo "seat=$stem drainer"
         continue
     fi
-    # Build seat record: name, priority, pace_max, repo, label, env array (as string), start
-    priority=$(jq -r '.priority' "$file")
-    pace_max=$(jq -r '.pace_max' "$file")
-    label=$(jq -r '.label' "$file")
-    env_json=$(jq -r '.env | join(",")' "$file")
-    start=$(jq -r '.start' "$file")
-    nc=$(jq -r 'if (.model // "claude") == "claude" then 0 else 1 end' "$file")
+    priority=$(grep '^priority:' "$file" | sed 's/^priority: *//' | tr -d '"')
+    pace_max=$(grep '^pace_max:' "$file" | sed 's/^pace_max: *//' | tr -d '"')
+    label=$(grep '^label:' "$file" | sed 's/^label: *//' | tr -d '"')
+    env_json=$(grep '^env:' "$file" | sed 's/^env: *//' | tr -d '"')
+    start=$(grep '^start:' "$file" | sed 's/^start: *//' | tr -d '"')
+    model=$(grep '^model:' "$file" | sed 's/^model: *//' | tr -d '"')
+    # Validate required fields
+    if [ -z "$priority" ] || [ -z "$pace_max" ] || [ -z "$label" ] || [ -z "$start" ]; then
+        echo "seat=$stem bad-seat missing field"
+        continue
+    fi
+    # Validate priority and pace_max are numbers
+    if ! [[ "$priority" =~ ^[0-9]+$ ]]; then
+        echo "seat=$stem bad-seat bad priority"
+        continue
+    fi
+    if ! awk -v p="$pace_max" 'BEGIN{exit !(p+0==p)}'; then
+        echo "seat=$stem bad-seat bad pace_max"
+        continue
+    fi
+    # Validate label, repo, and start have no pipes or newlines
+    if [[ "$label" == *"|"* ]] || [[ "$repo" == *"|"* ]] || [[ "$start" == *"|"* ]] || [[ "$start" == *$'\n'* ]]; then
+        echo "seat=$stem bad-seat bad character in repo, label or start"
+        continue
+    fi
+    # Validate env has no shell metacharacters
+    if [[ "$env_json" == *";"* ]] || [[ "$env_json" == *"&"* ]] || [[ "$env_json" == *"|"* ]] || [[ "$env_json" == *"$"* ]] || [[ "$env_json" == *"\""* ]] || [[ "$env_json" == *"'"* ]]; then
+        echo "seat=$stem bad-seat bad env"
+        continue
+    fi
+    # Default to claude if not specified
+    [ -z "$model" ] && model="claude"
+    # Validate: model must be a string (not a bare number)
+    if [[ "$model" =~ ^[0-9]+$ ]]; then
+        echo "seat=$stem bad-seat bad model"
+        continue
+    fi
+    if [ "$model" = "claude" ]; then nc=0; else nc=1; fi
     seats+=("$stem|$priority|$pace_max|$nc|$repo|$label|$env_json|$start")
 done
 
@@ -281,7 +419,37 @@ declare -a running=()
 while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max nc repo label env_json start <<<"$s"
-    if $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
+    # nc=1 (pi) seats use herdr seam; nc=0 (Claude) seats use tmux seam
+    if [ "$nc" -eq 1 ]; then
+        if herdr_alive "$name"; then
+            # Stuck detection: working but session jsonl hasn't grown
+            local agent_out
+            agent_out=$(herdr agent get "$name" 2>/dev/null)
+            if herdr_stuck "$name" "$agent_out"; then
+                herdr_stuck_action "$name" "$repo" "$label" "$start" "" "$env_json"
+            fi
+            nudge_bead=""
+            if herdr_idle "$name"; then
+                nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
+                [[ $nudge_bead =~ ^[A-Za-z0-9._-]+$ ]] || nudge_bead=""
+            fi
+            if [ -n "$nudge_bead" ] && [ "$DRY_RUN" -eq 1 ]; then
+                echo "seat=$name would-nudge bead=$nudge_bead"
+            elif [ -n "$nudge_bead" ]; then
+                rc=0
+                herdr_nudge "$name" "$nudge_bead" || rc=$?
+                if [ $rc -eq 0 ]; then
+                    echo "seat=$name nudged bead=$nudge_bead"
+                else
+                    echo "seat=$name nudge-failed bead=$nudge_bead rc=$rc"
+                fi
+            else
+                echo "seat=$name running"
+            fi
+            running+=("$name")
+        fi
+        # Dead nc=1 seat: no first-pass verdict; second pass handles auto-start
+    elif $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
         # Live seat: is it idle and does it have a ready bead?
         nudge_bead=""
         if [ "$session_out" -eq 1 ] && [ "$nc" -eq 0 ]; then

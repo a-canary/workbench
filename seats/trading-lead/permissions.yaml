@@ -1,0 +1,6 @@
+# Seat permissions. Flat `key: a, b, c` lines only; bin/seat reads them without a YAML library.
+# tools: Claude Code tool names.  pi_tools: pi tool names.  bash: allowed command prefixes (both harnesses).
+tools: Read, Grep, Glob, Bash, Edit, Write
+pi_tools: read, grep, find, ls, bash, write, edit
+bash: bd, git, gh, npm, bun, npx, bash, sh, python3, make, curl, jq, grep, sed, awk, cat, ls, mkdir, rm, cp, mv, chmod, tail, head, wc, date, env, which, ps, kill, top, free, df, du, tar, gzip, unzip, apt, pip, pip3, tsx
+# ponytail: prefix scoping cannot forbid flags; the judge gate (repos-oh6y) is the ceiling.
