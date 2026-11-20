@@ -1,0 +1,7 @@
+# Seat permissions. Flat `key: a, b, c` lines only; bin/seat reads them without a YAML library.
+# tools: Claude Code tool names.  pi_tools: pi tool names.  bash: allowed command prefixes (both harnesses).
+tools: Read, Grep, Glob
+pi_tools: read, grep, find, ls
+bash: ffprobe, ffmpeg, mediainfo, identify, file, ls, cat, head, tail, wc
+# emoqa is a read-only judge seat: it inspects captures and references but never modifies code, prototypes, or state.
+# Media inspection tools (ffprobe, ffmpeg, mediainfo, identify) are for analyzing video/audio/timing, not for editing.
