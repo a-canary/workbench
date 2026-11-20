@@ -14,6 +14,7 @@ tmp=$(mktemp -d)
 mkdir -p "$tmp/v/ghc" "$tmp/v/boss" "$tmp/wb/seats/github-controller" "$tmp/wb/seats/master" "$tmp/wb/bin"
 cp "$judge" "$tmp/wb/bin/seat-judge" 2>/dev/null
 echo "Views and merges GitHub PRs. No host changes." >"$tmp/wb/seats/github-controller/AGENTS.md"
+printf 'tools: Read, Grep, Glob, Bash\npi_tools: read, grep, find, ls, bash\nbash: gh pr view, gh pr list, gh pr merge, git status, git log\n' >"$tmp/wb/seats/github-controller/permissions.yaml"
 echo "Last-resort root seat: system services, packages, firewall, users." >"$tmp/wb/seats/master/AGENTS.md"
 printf 'role: github-controller\nrepo: %s\n' "$tmp" >"$tmp/v/ghc/seat.yaml"
 printf 'role: master\nrepo: %s\n' "$tmp" >"$tmp/v/boss/seat.yaml"
@@ -73,6 +74,7 @@ has "request lists seats as criteria" "$req" '"ghc"'
 has "request has na" "$req" '"na"'
 has "request carries role text" "$req" "Last-resort root seat"
 has "request carries command" "$req" "sudo systemctl restart nginx"
+has "request carries permissions.yaml bash patterns" "$req" "allowed bash: gh pr view, gh pr list, gh pr merge, git status, git log"
 r=$(run Bash 'cd /tmp && crontab -l'); check "crontab after && judged" "${r%%|*}" "2"
 r=$(run Bash 'echo x | sudo tee /etc/x'); check "sudo after pipe judged" "${r%%|*}" "2"
 r=$(run Bash 'systemctl restart nginx'); check "system systemctl judged" "${r%%|*}" "2"
