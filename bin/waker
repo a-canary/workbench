@@ -157,7 +157,7 @@ herdr_stuck_clear() {
     return 0
 }
 
-SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
+SEATS="${WAKER_SEATS:-$HOME/vault/seats}"
 BUDGET="${WAKER_BUDGET:-$HOME/vault/director/.budget}"
 SLOTS="${WAKER_CLAUDE_SLOTS:-2}"
 case "$SLOTS" in ''|*[!0-9]*) SLOTS=2 ;; esac   # not a count: fall back to the default, never to "no limit"
@@ -328,33 +328,62 @@ validate_seat() {
 # Collect valid seats as "name|priority|pace_max|nc|repo|label|env_json|start"
 # nc=1: the seat's "model" is not claude (repos-1o8pn). It spends no Claude budget, so no Claude gate holds it
 # (pace, use, session-out, claude.down, Claude slots) and it is never profiled.
+# Seats live in vault/seats/<seat>/seat.yaml (flat key: value). Repos-n98vs.2.
 declare -a seats=()
-for file in "$SEATS"/*.json; do
-    [ -f "$file" ] || continue
-    stem="${file##*/}"; stem="${stem%.json}"
-    v=$(validate_seat "$file")
-    if [ "$v" != "ok" ]; then
-        echo "seat=$stem bad-seat $v"
-        continue
-    fi
-    # Check repo exists
-    repo=$(jq -r '.repo' "$file")
-    if [ ! -d "$repo" ]; then
+for seat_dir in "$SEATS"/*/; do
+    [ -d "$seat_dir" ] || continue
+    stem=$(basename "$seat_dir")
+    file="$seat_dir/seat.yaml"
+    [ -f "$file" ] || { echo "seat=$stem bad-seat no seat.yaml"; continue; }
+    # Parse flat YAML
+    repo=$(grep '^repo:' "$file" | sed 's/^repo: *//' | tr -d '"')
+    if [ -z "$repo" ] || [ ! -d "$repo" ]; then
         echo "seat=$stem bad-seat repo missing"
         continue
     fi
-    kind=$(jq -r '.kind' "$file")
+    kind=$(grep '^kind:' "$file" | sed 's/^kind: *//' | tr -d '"')
     if [ "$kind" = "worker" ]; then
         echo "seat=$stem drainer"
         continue
     fi
-    # Build seat record: name, priority, pace_max, repo, label, env array (as string), start
-    priority=$(jq -r '.priority' "$file")
-    pace_max=$(jq -r '.pace_max' "$file")
-    label=$(jq -r '.label' "$file")
-    env_json=$(jq -r '.env | join(",")' "$file")
-    start=$(jq -r '.start' "$file")
-    nc=$(jq -r 'if (.model // "claude") == "claude" then 0 else 1 end' "$file")
+    priority=$(grep '^priority:' "$file" | sed 's/^priority: *//' | tr -d '"')
+    pace_max=$(grep '^pace_max:' "$file" | sed 's/^pace_max: *//' | tr -d '"')
+    label=$(grep '^label:' "$file" | sed 's/^label: *//' | tr -d '"')
+    env_json=$(grep '^env:' "$file" | sed 's/^env: *//' | tr -d '"')
+    start=$(grep '^start:' "$file" | sed 's/^start: *//' | tr -d '"')
+    model=$(grep '^model:' "$file" | sed 's/^model: *//' | tr -d '"')
+    # Validate required fields
+    if [ -z "$priority" ] || [ -z "$pace_max" ] || [ -z "$label" ] || [ -z "$start" ]; then
+        echo "seat=$stem bad-seat missing field"
+        continue
+    fi
+    # Validate priority and pace_max are numbers
+    if ! [[ "$priority" =~ ^[0-9]+$ ]]; then
+        echo "seat=$stem bad-seat bad priority"
+        continue
+    fi
+    if ! awk -v p="$pace_max" 'BEGIN{exit !(p+0==p)}'; then
+        echo "seat=$stem bad-seat bad pace_max"
+        continue
+    fi
+    # Validate label, repo, and start have no pipes or newlines
+    if [[ "$label" == *"|"* ]] || [[ "$repo" == *"|"* ]] || [[ "$start" == *"|"* ]] || [[ "$start" == *$'\n'* ]]; then
+        echo "seat=$stem bad-seat bad character in repo, label or start"
+        continue
+    fi
+    # Validate env has no shell metacharacters
+    if [[ "$env_json" == *";"* ]] || [[ "$env_json" == *"&"* ]] || [[ "$env_json" == *"|"* ]] || [[ "$env_json" == *"$"* ]] || [[ "$env_json" == *"\""* ]] || [[ "$env_json" == *"'"* ]]; then
+        echo "seat=$stem bad-seat bad env"
+        continue
+    fi
+    # Default to claude if not specified
+    [ -z "$model" ] && model="claude"
+    # Validate: model must be a string (not a bare number)
+    if [[ "$model" =~ ^[0-9]+$ ]]; then
+        echo "seat=$stem bad-seat bad model"
+        continue
+    fi
+    if [ "$model" = "claude" ]; then nc=0; else nc=1; fi
     seats+=("$stem|$priority|$pace_max|$nc|$repo|$label|$env_json|$start")
 done
 

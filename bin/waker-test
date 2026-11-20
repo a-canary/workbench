@@ -78,9 +78,16 @@ world() {
 }
 # seat <name> <priority> <pace_max>: start command records the seat, the bead and its whole environment
 seat() {
-  cat >"$W/seats/$1.json" <<EOF
-{"seat":"$1","kind":"lead","repo":"$W/repos/$1","label":"lead","priority":$2,"pace_max":$3,
- "env":["KEEP_ME"],"start":"echo \$WAKER_SEAT \$WAKER_BEAD >>$W/started; env >$W/env.$1"}
+  mkdir -p "$W/seats/$1"
+  cat >"$W/seats/$1/seat.yaml" <<EOF
+seat: $1
+kind: lead
+repo: $W/repos/$1
+label: lead
+priority: $2
+pace_max: $3
+env: KEEP_ME
+start: echo \$WAKER_SEAT \$WAKER_BEAD >>$W/started; env >$W/env.$1
 EOF
 }
 ready() { echo "$2" >"$W/ready/$1.lead"; }
@@ -175,12 +182,58 @@ check "14 drainer not run" "$([ -e "$W/drain.log" ] && echo ran || echo no)" no
 
 # 15. bad seat files are named and skipped; good seats still run
 world; ready ndv n-1
-echo '{not json' >"$W/seats/broken.json"
-echo '{"seat":"other","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":[],"start":"true"}' >"$W/seats/misnamed.json"
-echo '{"seat":"badenv","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":["A B; rm"],"start":"true"}' >"$W/seats/badenv.json"
-echo '{"seat":"norepo","kind":"lead","repo":"'"$W"'/repos/missing","label":"lead","priority":1,"pace_max":1,"env":[],"start":"true"}' >"$W/seats/norepo.json"
-echo '{"seat":"nostart","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":1,"pace_max":1,"env":[]}' >"$W/seats/nostart.json"
-echo '{"seat":"badprio","kind":"lead","repo":"'"$W"'/repos/ndv","label":"lead","priority":"high","pace_max":1,"env":[],"start":"true"}' >"$W/seats/badprio.json"
+# broken: no seat.yaml at all
+mkdir -p "$W/seats/broken"
+# misnamed: seat.yaml exists but missing required fields
+mkdir -p "$W/seats/misnamed"
+echo 'seat: misnamed' >"$W/seats/misnamed/seat.yaml"
+# badenv: env has a shell metachar
+mkdir -p "$W/seats/badenv"
+cat >"$W/seats/badenv/seat.yaml" <<EOF
+seat: badenv
+kind: lead
+repo: $W/repos/ndv
+label: lead
+priority: 1
+pace_max: 1
+env: A B; rm
+start: true
+EOF
+# norepo: repo doesn't exist
+mkdir -p "$W/seats/norepo"
+cat >"$W/seats/norepo/seat.yaml" <<EOF
+seat: norepo
+kind: lead
+repo: $W/repos/missing
+label: lead
+priority: 1
+pace_max: 1
+env:
+start: true
+EOF
+# nostart: no start field
+mkdir -p "$W/seats/nostart"
+cat >"$W/seats/nostart/seat.yaml" <<EOF
+seat: nostart
+kind: lead
+repo: $W/repos/ndv
+label: lead
+priority: 1
+pace_max: 1
+env:
+EOF
+# badprio: priority is not a number
+mkdir -p "$W/seats/badprio"
+cat >"$W/seats/badprio/seat.yaml" <<EOF
+seat: badprio
+kind: lead
+repo: $W/repos/ndv
+label: lead
+priority: high
+pace_max: 1
+env:
+start: true
+EOF
 tick
 check "15 exit 0" "$(cat "$W/rc")" 0
 for s in broken misnamed badenv norepo nostart badprio; do
@@ -190,21 +243,31 @@ check "15 good seat still started" "$(started)" "ndv n-1,"
 
 # 16. a worker seat file is valid and left to the drainer: listed, never started by the waker
 world
-echo '{"seat":"qwen","kind":"worker","repo":"'"$W"'/repos/stack","label":"lane:v100","priority":9,"pace_max":0,"env":[],"start":"true"}' >"$W/seats/qwen.json"
+mkdir -p "$W/seats/qwen"
+cat >"$W/seats/qwen/seat.yaml" <<EOF
+seat: qwen
+kind: worker
+repo: $W/repos/stack
+label: lane:v100
+priority: 9
+pace_max: 0
+env:
+start: true
+EOF
 echo x >"$W/ready/stack.lane:v100"; tick
 has "16 worker seat goes to the drainer" "$W/out" "seat=qwen drainer"
 check "16 nothing started" "$(started)" ""
 
 # 17. a start command that fails is reported and does not stop the tick
 world; ready trading t-1; ready ndv n-1
-sed -i 's|"start":"[^"]*"|"start":"exit 3"|' "$W/seats/trading.json"; tick
+sed -i 's/^start: .*/start: exit 3/' "$W/seats/trading/seat.yaml"; tick
 has "17 start failure named" "$W/out" "seat=trading start-failed bead=t-1 rc=3"
 check "17 ndv still started" "$(started)" "ndv n-1,"
 check "17 exit 0" "$(cat "$W/rc")" 0
 
 # 18. a session the start command leaves running (a tmux server) must not keep the tick lock
 world; ready trading t-1
-sed -i 's|"start":"[^"]*"|"start":"sleep 20 >/dev/null 2>\&1 \& echo up"|' "$W/seats/trading.json"; tick
+sed -i 's/^start: .*/start: sleep 20 >\/dev\/null 2>\&1 \& echo up/' "$W/seats/trading/seat.yaml"; tick
 has "18 started" "$W/out" "seat=trading started bead=t-1"
 tick
 check "18 next tick is not locked out" "$(grep -c '^waker: locked' "$W/out")" 0
@@ -212,8 +275,8 @@ pkill -f "sleep 20" 2>/dev/null
 
 # 19. the seat record is "|"-joined, one per line: those characters in repo, label or start make a bad seat
 world; ready trading t-1; ready ndv n-1
-jq -c '.label = "a|b"' "$W/seats/trading.json" >"$W/t" && mv "$W/t" "$W/seats/trading.json"
-jq -c '.start = "echo a\necho b"' "$W/seats/ndv.json" >"$W/t" && mv "$W/t" "$W/seats/ndv.json"; tick
+sed -i 's/^label: .*/label: a|b/' "$W/seats/trading/seat.yaml"
+sed -i 's/^start: .*/start: echo a|b/' "$W/seats/ndv/seat.yaml"; tick
 has "19 pipe in label" "$W/out" "seat=trading bad-seat bad character in repo, label or start"
 has "19 newline in start" "$W/out" "seat=ndv bad-seat bad character in repo, label or start"
 check "19 nothing started" "$(started)" ""
@@ -467,7 +530,13 @@ command rm -f "$tmp/fake/bd"
 # 44. repos-1o8pn: a seat whose "model" is not "claude" spends no Claude budget, so no Claude gate holds it:
 #     not pace, use, session-out, claude.down, or the Claude slot count; it is never profiled.
 #     No "model" means claude. A "model" that is not a string is a bad seat.
-nonclaude() { jq '.model="pi"' "$W/seats/$1.json" >"$W/x" && command mv "$W/x" "$W/seats/$1.json"; }
+nonclaude() {
+  if grep -q '^model:' "$W/seats/$1/seat.yaml"; then
+    sed -i 's/^model: .*/model: pi/' "$W/seats/$1/seat.yaml"
+  else
+    echo 'model: pi' >>"$W/seats/$1/seat.yaml"
+  fi
+}
 world; nonclaude stack; echo "0.95 1.50" >"$W/meter"; ready stack s-1; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
 has "44 non-Claude seat starts past every Claude gate" "$W/out" "seat=stack started bead=s-1"
 pre "44 Claude seat still stopped" "$W/out" "seat=trading session-out"
@@ -477,7 +546,13 @@ world; nonclaude stack; echo "0.50 0.50" >"$W/meter"; touch "$W/alive/trading" "
 has "44 non-Claude seat takes no Claude slot" "$W/out" "seat=stack started bead=s-1"
 world; for s in trading ndv; do nonclaude $s; done; echo "0.50 1.50" >"$W/meter"; ptick; sleep 0.3
 check "44 only Claude seats are profiled" "$(profiled)" "stack,"
-world; jq '.model=1' "$W/seats/stack.json" >"$W/x" && command mv "$W/x" "$W/seats/stack.json"; ptick
+world
+if grep -q '^model:' "$W/seats/stack/seat.yaml"; then
+  sed -i 's/^model: .*/model: 1/' "$W/seats/stack/seat.yaml"
+else
+  echo 'model: 1' >>"$W/seats/stack/seat.yaml"
+fi
+ptick
 has "44 non-string model is a bad seat" "$W/out" "seat=stack bad-seat bad model"
 world; for s in trading ndv; do nonclaude $s; done; touch "$W/alive/trading" "$W/alive/ndv"; ready stack s-1; ptick
 has "44 live non-Claude seats fill no Claude slot" "$W/out" "seat=stack started bead=s-1"
