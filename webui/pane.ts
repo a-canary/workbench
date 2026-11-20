@@ -523,11 +523,12 @@ export function inboxHtml(cards: Card[]): string {
       body = `<p>${esc(decide.q)}</p>`;
       if (decide.context) body += `<p>${esc(decide.context)}</p>`;
       if (decide.tail) body += `<pre class="tail">${esc(decide.tail)}</pre>`;
-      const optButtons = decide.options.map((o) => {
-        const rec = o.rec ? ` <span class="rec">recommended</span>` : "";
-        return `<button name="action" value="accept:${o.id}">${esc(o.title)}${rec}<br>${esc(o.body)}</button>`;
+      const optCards = decide.options.map((o) => {
+        const rec = o.rec ? `<span class="rec">recommended</span>` : "";
+        const cls = o.rec ? ' class="opt-rec"' : "";
+        return `<label${cls}><button type="submit" name="action" value="accept:${o.id}"><b>${esc(o.title)}</b>${rec}<br>${esc(o.body)}</button></label>`;
       });
-      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}">${optButtons.join("")}<textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
+      body += `<form method="post" action="/inbox/decide" class="taste-form"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><div class="taste-options">${optCards.join("")}</div><textarea name="text" placeholder="Add a note (optional)"></textarea><div class="taste-actions"><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></div></form>`;
     } else {
       if (decide && "error" in decide) {
         body = `<p class="warn">card format problem: ${esc(decide.error)}</p>`;
@@ -585,6 +586,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .feed-item time,.feed-place,.feed-id,.feed-reason{opacity:.7;font-size:.85em}
 .feed-item b{display:block;font-weight:600}
 .feed-fail{padding:.35rem 0;color:#b3261e;overflow-wrap:anywhere}
+.taste-options{display:flex;gap:.75rem;flex-wrap:wrap;margin:.75rem 0}
+.taste-options label{flex:1 1 140px;min-width:140px}
+.taste-options label button{display:block;width:100%;text-align:left;padding:.75rem;border:2px solid var(--nav-bg);border-radius:6px;background:var(--bg);color:var(--fg);cursor:pointer;font-size:.9em;line-height:1.4}
+.taste-options label button:hover{border-color:#4a90d9}
+.taste-options label.opt-rec button{border-color:#4a90d9}
+.taste-options label.opt-rec .rec{display:inline-block;font-size:.75em;font-weight:700;color:#4a90d9;text-transform:uppercase;margin-bottom:.25rem}
+.taste-actions{display:flex;gap:.5rem;margin-top:.5rem}
+.taste-form textarea{width:100%;min-height:3rem;margin:.5rem 0}
 @media(max-width:700px){
   #places{position:fixed;bottom:0;left:0;right:0;top:auto;width:100%;flex-direction:row;justify-content:space-around;padding:.5rem}
   #focus{margin:0;padding:1rem 1rem 4rem}
