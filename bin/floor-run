@@ -35,9 +35,10 @@ fi
 
 # floor-run only commits into a repo it made itself: no git redirection from the caller, no existing repo.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
+unset GIT_TEMPLATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TRACE GIT_TRACE2 GIT_TRACE_PERFORMANCE
+unset GIT_EDITOR GIT_MERGE_AUTOEDIT
 # Its own git calls read no git config from the machine or the caller, and run no hook or monitor.
-unset GIT_TEMPLATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
-g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor= -c core.hooksPath=/dev/null "$@"; }
+g() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME=/dev/null git -c core.fsmonitor= -c core.hooksPath=/dev/null -c core.excludesFile= -c core.attributesFile= "$@"; }
 [ -e .git ] || [ -L .git ] && die "work dir is already a git repo"
 # Host-side git never walks into a repo it did not make; temp files stay outside the work dir.
 nested() { find . -mindepth 2 -name .git -print -quit 2>/dev/null; }

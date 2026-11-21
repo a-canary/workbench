@@ -362,4 +362,10 @@ flow TMPDIR=/nonexistent/floor-run-test --
 flow WT_RC=7 WT_DO='git init -q "$wt/sub"; echo x > "$wt/sub/f"' --
 [ "$rc" = 0 ] && clean_at_start && [ ! -e "$wd/sub" ] && ok "failed worker's nested repo removed" || bad "failed worker's nested repo removed" "rc=$rc $(ls -a "$wd" | tr '\n' ' ')"
 
+# 16. a failed metrics write is reported to stderr and does not crash
+mkdir -p "$out/metricsdir"
+go FLOOR_METRICS="$out/metricsdir/badfile" -- --rung worker 'x'
+rc=$?
+[ "$rc" = 0 ] && ok "failed metrics write does not crash" || bad "failed metrics write does not crash" "rc=$rc"
+
 exit $fail
