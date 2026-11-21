@@ -323,7 +323,7 @@ export function feedHtml(items: Landed[], place?: string): string {
   const shown = place === undefined ? items : items.filter((i) => placeName(i.source) === place);
 
   if (shown.length === 0) {
-    return `<div class="feed-links">${links.join(" ")}</div><p>Nothing landed in the last few days</p>`;
+    return `<div class="feed-links">${links.join(" ")}</div><p>Nothing landed in the selected window</p>`;
   }
 
   // Group by day
@@ -338,7 +338,7 @@ export function feedHtml(items: Landed[], place?: string): string {
   const groups = days.map((day) => {
     const lines = byDay.get(day)!.map((i) => {
       const time = i.closed.slice(11, 16);
-      return `<div class="feed-item"><time>${time}</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
+      return `<div class="feed-item"><time>${time}Z</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
     });
     return `<h2>${day}</h2>${lines.join("")}`;
   });
@@ -699,7 +699,8 @@ async function route(
       loadLanded(deps.beadDirs, deps.run),
     ]);
     const url = new URL(req.url);
-    const place = url.searchParams.get("place") ?? undefined;
+    let place = url.searchParams.get("place");
+    if (place === "" || place === null) place = undefined; // wb-j23: empty/missing place means all
     const errorsHtml = landed.errors
       .map((e) => `<p class="warn">${esc(e)}</p>`)
       .join("");
