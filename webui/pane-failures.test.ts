@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { expect, test, afterAll } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { failuresHtml, handle, loadConfig, readFailures, type Run } from "./pane";
@@ -9,6 +9,7 @@ import { failuresHtml, handle, loadConfig, readFailures, type Run } from "./pane
 
 const dir = mkdtempSync(join(tmpdir(), "pane-fail-"));
 const paneRun: Run = async () => ({ code: 0, out: "[]" });
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 test("failuresHtml: nothing to show is an empty string", () => {
   expect(failuresHtml([])).toBe("");
@@ -47,12 +48,16 @@ test("readFailures: a directory or an oversized file never throws", () => {
 
 test("loadConfig: failuresFile is optional and must be a string", () => {
   const d1 = mkdtempSync(join(tmpdir(), "pane-cfg-"));
-  writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"], failuresFile: "/x/f.txt" }));
-  expect(loadConfig(d1).failuresFile).toBe("/x/f.txt");
-  writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"] }));
-  expect(loadConfig(d1).failuresFile).toBeUndefined();
-  writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"], failuresFile: 7 }));
-  expect(() => loadConfig(d1)).toThrow("failuresFile must be a string");
+  try {
+    writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"], failuresFile: "/x/f.txt" }));
+    expect(loadConfig(d1).failuresFile).toBe("/x/f.txt");
+    writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"] }));
+    expect(loadConfig(d1).failuresFile).toBeUndefined();
+    writeFileSync(join(d1, "pane.json"), JSON.stringify({ beadDirs: ["/a"], failuresFile: 7 }));
+    expect(() => loadConfig(d1)).toThrow("failuresFile must be a string");
+  } finally {
+    rmSync(d1, { recursive: true, force: true });
+  }
 });
 
 test("GET /feed shows the failures above the landed list; none configured shows none", async () => {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedHosts, handle, loadConfig, parsePort, type Run } from "./pane";
@@ -55,15 +55,19 @@ test("allowedHosts: the configured list wins; otherwise the bound address plus t
 
 test("loadConfig: hosts is optional, and must be an array of strings when present", () => {
   const dir = mkdtempSync(join(tmpdir(), "pane-"));
-  const path = join(dir, "pane.json");
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: ["pane.example:8081"] }));
-  expect(loadConfig(dir).hosts).toEqual(["pane.example:8081"]);
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"] }));
-  expect(loadConfig(dir).hosts).toBeUndefined();
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: "pane.example:8081" }));
-  expect(() => loadConfig(dir)).toThrow(path);
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: [1] }));
-  expect(() => loadConfig(dir)).toThrow(path);
+  try {
+    const path = join(dir, "pane.json");
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: ["pane.example:8081"] }));
+    expect(loadConfig(dir).hosts).toEqual(["pane.example:8081"]);
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"] }));
+    expect(loadConfig(dir).hosts).toBeUndefined();
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: "pane.example:8081" }));
+    expect(() => loadConfig(dir)).toThrow(path);
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"], hosts: [1] }));
+    expect(() => loadConfig(dir)).toThrow(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("parsePort: default 8081; anything that is not a whole port number is an error", () => {

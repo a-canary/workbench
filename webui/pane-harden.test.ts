@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handle, loadCards, loadConfig, type Run } from "./pane";
@@ -64,15 +64,19 @@ test("loadCards: workspaces are asked at the same time, and results keep the con
 
 test("loadConfig: invalid JSON and a non-object config both fail naming the file", () => {
   const dir = mkdtempSync(join(tmpdir(), "pane-"));
-  const path = join(dir, "pane.json");
-  writeFileSync(path, "{ not json");
-  expect(() => loadConfig(dir)).toThrow(path);
-  writeFileSync(path, "null");
-  expect(() => loadConfig(dir)).toThrow(path);
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1", 5] }));
-  expect(() => loadConfig(dir)).toThrow(path);
-  writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"] }));
-  expect(loadConfig(dir).beadDirs).toEqual(["/w1"]);
+  try {
+    const path = join(dir, "pane.json");
+    writeFileSync(path, "{ not json");
+    expect(() => loadConfig(dir)).toThrow(path);
+    writeFileSync(path, "null");
+    expect(() => loadConfig(dir)).toThrow(path);
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1", 5] }));
+    expect(() => loadConfig(dir)).toThrow(path);
+    writeFileSync(path, JSON.stringify({ beadDirs: ["/w1"] }));
+    expect(loadConfig(dir).beadDirs).toEqual(["/w1"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("handle: the inbox count shows on the other places too", async () => {
