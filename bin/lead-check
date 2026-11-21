@@ -54,6 +54,8 @@ for ((i=1; i<=tries; i++)); do
   fi
   wrc=0; sbx --task "$taskf" --role lead --timeout "$tmo" > "$replyf" 2>&1 || wrc=$?
   cat "$replyf" >&2
+  # a nested repo's .git/config would run on the host's next git call (fsmonitor, hooks)
+  [ -z "$(find "$wt" -mindepth 2 -name .git -print -quit)" ] || { cleanup; die "Lead created a nested .git"; }
   # way out
   last=$(grep -a -v '^[[:space:]]*$' "$replyf" | tail -n1)
   case $last in
