@@ -259,8 +259,16 @@ if [ "$lane" != public ] && [ "$profile" != research ]; then
   fi
   for spec in "${specs[@]}"; do
     src=${spec%:*} dst=${spec##*:}
-    [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ] || continue
-    args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
+    [ -n "$src" ] && [ -d "$src" ] || continue
+    # a symlinked node_modules/.venv in the worktree points outside the jail: resolve and lend the target (wb-ytk)
+    if [ -L "$wt/$dst" ]; then
+      t=$(readlink -f "$wt/$dst")
+      [ -d "$t" ] || continue
+      [ "$t" = "$(readlink -f "$src")" ] || { echo "worker-sandbox: $dst symlink ($t) differs from WORKER_DEPS/VENV ($src)" >&2; }
+      args+=(--ro-bind "$t" "/work/$dst")
+    elif [ -z "$(ls -A "$wt/$dst" 2>/dev/null)" ]; then
+      args+=(--ro-bind "$(readlink -f "$src")" "/work/$dst")
+    fi
     [ "$dst" = .venv ] || { mkdir -p "$src/.vite-temp" 2>/dev/null; [ -d "$src/.vite-temp" ] && args+=(--tmpfs "/work/$dst/.vite-temp"); }
   done
 fi
