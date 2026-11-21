@@ -221,6 +221,23 @@ if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
     }
     WAKER_NUDGE_CMD="default_nudge"
 fi
+if [ -z "${WAKER_V100_EMPTY_CMD:-}" ]; then
+    default_v100_empty() {
+        # Check if the v100 lane is empty (no ready beads with lane:v100 label)
+        cd ~/repos && bd ready --label "lane:v100" --json --limit 1 2>/dev/null | jq -r '.[0].id // empty'
+    }
+    WAKER_V100_EMPTY_CMD="default_v100_empty"
+fi
+if [ -z "${WAKER_OVERRUN_NUDGE_CMD:-}" ]; then
+    default_overrun_nudge() {
+        local seat="$1"
+        # Over-pace Claude Lead with empty v100 lane: prepare work instead of waiting
+        tmux send-keys -t "=$seat:" -l "Waker: you are over pace and the v100 lane is empty. Write RED tests or lane:v100 beads for your top ready beads, then stop. Do not start new Claude work." || return $?
+        sleep 0.3
+        tmux send-keys -t "=$seat:" Enter
+    }
+    WAKER_OVERRUN_NUDGE_CMD="default_overrun_nudge"
+fi
 if [ -z "${WAKER_PRIO_CMD:-}" ]; then
     default_prio() {
         cd "$1" && timeout 10 bd show "$2" --json | jq -r '.[0].priority // empty'
@@ -446,7 +463,39 @@ while IFS= read -r s; do
             fi
         fi
         if [ "$should_nudge" -eq 0 ] && [ -n "$nudge_bead" ]; then
-            echo "seat=$name halted bead=$nudge_bead"   # idle with work, held by a Claude gate
+            # Over-pace Claude Lead with empty v100 lane: nudge to prepare work (repos-iq2qa)
+            overrun_nudged=0
+            if [ "$nc" -eq 0 ] && [ "$meter_ok" -eq 1 ] && awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
+                # Seat is over pace — check if v100 lane is empty
+                v100_bead=$($WAKER_V100_EMPTY_CMD </dev/null 2>/dev/null 9>&-) || v100_bead=""
+                [[ $v100_bead =~ ^[A-Za-z0-9._-]+$ ]] || v100_bead=""
+                if [ -z "$v100_bead" ]; then
+                    # Lane is empty — send overrun nudge, rate-limited
+                    nudge_file="$SEATS/.nudge/$name"
+                    gap_expired=1
+                    if [ -f "$nudge_file" ]; then
+                        last_nudge=$(cat "$nudge_file" 2>/dev/null)
+                        if [[ $last_nudge =~ ^[0-9]+$ ]]; then
+                            [ $((now - last_nudge)) -ge "${WAKER_NUDGE_GAP_S:-1800}" ] || gap_expired=0
+                        fi
+                    fi
+                    if [ "$gap_expired" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+                        if $WAKER_OVERRUN_NUDGE_CMD "$name"; then
+                            date +%s >"$nudge_file"
+                            echo "seat=$name overrun-nudged (v100 empty)"
+                            overrun_nudged=1
+                        else
+                            echo "seat=$name overrun-nudge-failed"
+                        fi
+                    elif [ "$DRY_RUN" -eq 1 ]; then
+                        echo "seat=$name would-overrun-nudge (v100 empty)"
+                        overrun_nudged=1
+                    fi
+                fi
+            fi
+            if [ "$overrun_nudged" -eq 0 ]; then
+                echo "seat=$name halted bead=$nudge_bead"   # idle with work, held by a Claude gate
+            fi
         elif [ "$should_nudge" -eq 0 ]; then
             echo "seat=$name running"
         else
