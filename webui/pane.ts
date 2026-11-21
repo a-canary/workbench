@@ -15,7 +15,6 @@ export type Card = {
   priority: number;
   updated: string;
   source: string;
-  legacy?: boolean;
   description?: string;
   skipped?: true;
 };
@@ -324,7 +323,7 @@ export function feedHtml(items: Landed[], place?: string): string {
   const shown = place === undefined ? items : items.filter((i) => placeName(i.source) === place);
 
   if (shown.length === 0) {
-    return `<div class="feed-links">${links.join(" ")}</div><p>Nothing landed in the last few days</p>`;
+    return `<div class="feed-links">${links.join(" ")}</div><p>Nothing landed in the selected window</p>`;
   }
 
   // Group by day
@@ -339,7 +338,7 @@ export function feedHtml(items: Landed[], place?: string): string {
   const groups = days.map((day) => {
     const lines = byDay.get(day)!.map((i) => {
       const time = i.closed.slice(11, 16);
-      return `<div class="feed-item"><time>${time}</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
+      return `<div class="feed-item"><time>${time}Z</time> <span class="feed-place">${esc(placeName(i.source))}</span> <span class="feed-id">${esc(i.id)}</span> <b>${esc(i.title)}</b>${i.reason ? `<p class="feed-reason">${esc(i.reason)}</p>` : ""}</div>`;
     });
     return `<h2>${day}</h2>${lines.join("")}`;
   });
@@ -459,6 +458,9 @@ export async function applyDecision(
       return "card is no longer waiting";
     // A failed label step can leave both labels on a card; it must not take a second verdict.
     if (card.labels.includes("decided")) return "card is already decided";
+    // A closed card must not take a verdict (wb-di1).
+    if (typeof card.status === "string" && card.status === "closed")
+      return "card is already closed";
     const decide = parseDecide(
       typeof card.description === "string" ? card.description : ""
     );
@@ -514,9 +516,6 @@ export async function applyDecision(
 export function inboxHtml(cards: Card[]): string {
   if (cards.length === 0) return "<p>Nothing waiting on you</p>";
   const parts = cards.map((c) => {
-    const badge = c.legacy
-      ? `<span class="legacy">legacy · ${esc(c.source)} · ${esc(c.updated)}</span>`
-      : "";
     const decide = parseDecide(c.description ?? "");
     let body = "";
     if (decide && !("error" in decide)) {
@@ -527,18 +526,18 @@ export function inboxHtml(cards: Card[]): string {
         const rec = o.rec ? ` <span class="rec">recommended</span>` : "";
         return `<button name="action" value="accept:${o.id}">${esc(o.title)}${rec}<br>${esc(o.body)}</button>`;
       });
-      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}">${optButtons.join("")}<textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
+      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}">${optButtons.join("")}<textarea name="text" maxlength="4000" placeholder="Note (max 4000 chars)"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
     } else {
       if (decide && "error" in decide) {
         body = `<p class="warn">card format problem: ${esc(decide.error)}</p>`;
       }
       if (c.description) body += `<p>${esc(c.description)}</p>`;
-      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><button name="action" value="accept">Accept</button><textarea name="text"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
+      body += `<form method="post" action="/inbox/decide"><input type="hidden" name="dir" value="${esc(c.source)}"><input type="hidden" name="id" value="${esc(c.id)}"><button name="action" value="accept">Accept</button><textarea name="text" maxlength="4000" placeholder="Note (max 4000 chars)"></textarea><button name="action" value="reject">Reject</button><button name="action" value="defer">Reply or skip</button></form>`;
     }
     const skipTag = c.skipped ? '<span class="tag">skipped</span>' : "";
     return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}${skipTag}</p><time>${esc(
       c.updated
-    )}</time>${badge}${body}</article>`;
+    )}</time>${body}</article>`;
   });
   return parts.join("");
 }
@@ -700,7 +699,8 @@ async function route(
       loadLanded(deps.beadDirs, deps.run),
     ]);
     const url = new URL(req.url);
-    const place = url.searchParams.get("place") ?? undefined;
+    let place = url.searchParams.get("place");
+    if (place === "" || place === null) place = undefined; // wb-j23: empty/missing place means all
     const errorsHtml = landed.errors
       .map((e) => `<p class="warn">${esc(e)}</p>`)
       .join("");
