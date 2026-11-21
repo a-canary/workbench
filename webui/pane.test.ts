@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PLACES, handle, inboxHtml, loadCards, loadConfig, shell, type Card, type Run } from "./pane";
+import { bdRun, PLACES, handle, inboxHtml, loadCards, loadConfig, shell, type Card, type Run } from "./pane";
 
 // Control pane, slice B1: one screen (places | focus | assistant), five fixed places, Inbox read from beads.
 // The framework is public: no repo, seat or mission names in code. They come from <config dir>/pane.json.
@@ -55,10 +55,15 @@ test("inboxHtml: escapes titles, has an empty state", () => {
 
 test("loadConfig: reads pane.json from the given dir; fails closed, naming the path, when absent", () => {
   const dir = mkdtempSync(join(tmpdir(), "pane-cfg-"));
-  writeFileSync(join(dir, "pane.json"), JSON.stringify({ beadDirs: ["/a", "/b"] }));
-  expect(loadConfig(dir).beadDirs).toEqual(["/a", "/b"]);
   const empty = mkdtempSync(join(tmpdir(), "pane-cfg-"));
-  expect(() => loadConfig(empty)).toThrow(join(empty, "pane.json"));
+  try {
+    writeFileSync(join(dir, "pane.json"), JSON.stringify({ beadDirs: ["/a", "/b"] }));
+    expect(loadConfig(dir).beadDirs).toEqual(["/a", "/b"]);
+    expect(() => loadConfig(empty)).toThrow(join(empty, "pane.json"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(empty, { recursive: true, force: true });
+  }
 });
 
 test("handle: / goes to /inbox, each place answers, unknown is 404", async () => {
@@ -72,4 +77,10 @@ test("handle: / goes to /inbox, each place answers, unknown is 404", async () =>
   expect(await inbox.text()).toContain("t x-1");
   for (const p of ["feed", "seats", "work", "vision"]) expect((await handle(new Request(`http://h/${p}`), deps)).status).toBe(200);
   expect((await handle(new Request("http://h/nope"), deps)).status).toBe(404);
+});
+
+test("bdRun: runs a real bd command and returns its output", async () => {
+  const r = await bdRun(["--version"]);
+  expect(r.code).toBe(0);
+  expect(r.out).toContain("version");
 });
