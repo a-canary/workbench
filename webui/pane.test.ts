@@ -43,16 +43,13 @@ test("loadCards: asks bd per dir, dedups, drops closed, sorts by priority then o
   expect(r.errors[0]).toContain("/c");
 });
 
-test("inboxHtml: escapes titles, flags legacy items with source and date, has an empty state", () => {
+test("inboxHtml: escapes titles, has an empty state", () => {
   const cards: Card[] = [
     { id: "x-1", title: "<script>alert(1)</script>", priority: 1, updated: "2026-11-02", source: "/a" },
-    { id: "prd-7", title: "old approval", priority: 2, updated: "2026-08-03", source: "ledger approvals", legacy: true },
   ];
   const html = inboxHtml(cards);
   expect(html).not.toContain("<script>alert(1)</script>");
   expect(html).toContain("&lt;script&gt;");
-  expect(html).toMatch(/legacy[\s\S]{0,60}ledger approvals[\s\S]{0,60}2026-08-03/);
-  expect(html.match(/class="legacy"/g)!.length).toBe(1); // only the legacy card is flagged
   expect(inboxHtml([])).toContain("Nothing waiting on you");
 });
 

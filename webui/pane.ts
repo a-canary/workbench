@@ -15,7 +15,6 @@ export type Card = {
   priority: number;
   updated: string;
   source: string;
-  legacy?: boolean;
   description?: string;
   skipped?: true;
 };
@@ -517,9 +516,6 @@ export async function applyDecision(
 export function inboxHtml(cards: Card[]): string {
   if (cards.length === 0) return "<p>Nothing waiting on you</p>";
   const parts = cards.map((c) => {
-    const badge = c.legacy
-      ? `<span class="legacy">legacy · ${esc(c.source)} · ${esc(c.updated)}</span>`
-      : "";
     const decide = parseDecide(c.description ?? "");
     let body = "";
     if (decide && !("error" in decide)) {
@@ -541,7 +537,7 @@ export function inboxHtml(cards: Card[]): string {
     const skipTag = c.skipped ? '<span class="tag">skipped</span>' : "";
     return `<article><h2>${esc(c.id)}</h2><p>${esc(c.title)}${skipTag}</p><time>${esc(
       c.updated
-    )}</time>${badge}${body}</article>`;
+    )}</time>${body}</article>`;
   });
   return parts.join("");
 }
