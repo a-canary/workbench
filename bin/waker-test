@@ -23,7 +23,7 @@
 #   WAKER_SEATS       seat folder                      (default ~/vault/director/seats)
 #   WAKER_BUDGET      folder holding ignore-until      (default ~/vault/director/.budget)
 #   WAKER_METER_CMD   prints "<util> <pace>" as fractions, or "? ?" when unreadable
-#   WAKER_READY_CMD   "<cmd> <repo> <label>" prints the top ready bead id, or nothing
+#   WAKER_READY_CMD   "<cmd> <repo> <label> <seat>" prints the top ready bead id, or nothing
 #   WAKER_ALIVE_CMD   "<cmd> <seat>" exits 0 when the seat has a live session
 #   WAKER_CLAUDE_SLOTS  live Lead sessions allowed at once (default 2)
 #   WAKER_DRAIN_CMD   run once at the end of every tick that is not off (the worker drainer); "" = none
@@ -58,6 +58,7 @@ cat "$W/meter" 2>/dev/null || echo "? ?"
 EOF
 cat >"$tmp/bin/ready" <<'EOF'
 #!/bin/bash
+echo "$1|$2|${3:-}" >>"$W/ready.calls"   # repo, label, seat: the waker must name the seat (repos-juy5g)
 cat "$W/ready/$(basename "$1").$2" 2>/dev/null
 EOF
 cat >"$tmp/bin/alive" <<'EOF'
@@ -104,6 +105,7 @@ check "1 drainer ran once" "$(wc -l <"$W/drain.log" 2>/dev/null)" 1
 world; ready ndv ndv-12; tick
 has "2 ndv started" "$W/out" "seat=ndv started bead=ndv-12"
 check "2 start saw seat and bead" "$(started)" "ndv ndv-12,"
+check "2 ready seam was told which seat asked" "$(grep -c '|lead|ndv$' "$W/ready.calls")" 1
 
 # 3. secrets allowlist: the start command sees the named variable and not the others
 check "3 allowlisted variable kept" "$(grep -c '^KEEP_ME=kept$' "$W/env.ndv")" 1
@@ -483,6 +485,27 @@ world; for s in trading ndv; do nonclaude $s; done; touch "$W/alive/trading" "$W
 has "44 live non-Claude seats fill no Claude slot" "$W/out" "seat=stack started bead=s-1"
 world; nonclaude stack; ready stack s-1; live_idle stack; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
 has "44 live idle non-Claude seat nudged past session-out and claude.down" "$W/out" "seat=stack nudged bead=s-1"
+
+# 45. the default ready seam is assignee-aware (repos-juy5g). bd ready is label-only, so the top bead
+# could belong to another seat and this seat was nudged about work it did not own (repos-p1dn: three
+# nudges, one agents-lead bead). --limit 1 made it worse: that one wrong bead also hid every bead
+# behind it. A bead with no assignee is still anyone's; another seat's bead is nobody's here.
+world; mkdir -p "$W/bd" "$tmp/fakebin"
+cat >"$tmp/fakebin/bd" <<'BD'
+#!/bin/bash
+echo "$*" >>"$W/bd.calls"
+cat "$W/bd/$(basename "$PWD").json" 2>/dev/null || echo "[]"
+BD
+chmod +x "$tmp/fakebin/bd"
+printf '%s\n' '[{"id":"agents-9","assignee":"agents-lead"},{"id":"ndv-2","assignee":"ndv"}]' >"$W/bd/ndv.json"
+printf '%s\n' '[{"id":"agents-8","assignee":"agents-lead"}]' >"$W/bd/stack.json"
+printf '%s\n' '[{"id":"free-1","assignee":""},{"id":"agents-7","assignee":"agents-lead"}]' >"$W/bd/trading.json"
+tick WAKER_READY_CMD= WAKER_CLAUDE_SLOTS=3 PATH="$tmp/fakebin:$tmp/fake:$PATH"
+has "45 a seat takes its own bead behind another seat's" "$W/out" "seat=ndv started bead=ndv-2"
+has "45 an unassigned bead still goes to whoever gets there" "$W/out" "seat=trading started bead=free-1"
+has "45 a seat with only another seat's work stays idle" "$W/out" "seat=stack idle"
+check "45 no other seat's bead was taken" "$(grep -c 'agents-' "$W/out")" 0
+check "45 ready no longer asks for a single bead" "$(grep -c -- '--limit 1$' "$W/bd.calls" 2>/dev/null)" 0
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
