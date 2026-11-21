@@ -9,9 +9,13 @@
 # (package.json, conftest.py, ...), so it can't "pass" by editing the test or how
 # it runs. Tests run inside the jail too: worker-written code never runs
 # on the host. Exit 0 = GREEN commit made (and pushed + PR opened with --push).
-# Exit 4 = infrastructure fault before the worker started (private lane endpoint down or probe could not run).
+# Exit 4 = infrastructure fault (private lane endpoint down, probe failed, or test can't run
+# in the sandbox: network error like EAI_AGAIN, or test runner binary missing).
 # WORKER_LANE_PROBE: command run as `$WORKER_LANE_PROBE <port>` before the private-lane
 # worker starts; exit 0 means the endpoint answers (default: curl the /v1/models endpoint).
+# --test may be the project's full suite (e.g. 'npx vitest run && npx tsc --noEmit'); it must
+# run offline in the sandbox. WORKER_DEPS/WORKER_VENV default to the main checkout's
+# node_modules/.venv so the sandbox has the deps (wb-ytk).
 set -euo pipefail
 
 log() { echo "worker-task: $*" >&2; [ -z "${WORKER_TASK_LOG:-}" ] || echo "$*" >>"$WORKER_TASK_LOG"; }
@@ -93,6 +97,11 @@ trap 'rm -rf "$red_out" "$green_out" "$reply" ${basedir:+"$basedir" "$basedir.id
 
 . "$here/red-crash.sh"
 
+# infra error patterns: network unreachable or test runner/module missing (wb-ytk)
+# EAI_AGAIN: DNS lookup failed (sandbox has no network)
+# ENOENT: test runner binary not found in sandbox PATH
+infra_error() { grep -qE 'EAI_AGAIN|ENOTFOUND|getaddrinfo|ENOENT.*bin/(vitest|tsc|pytest|mocha|jest|bun)' "$1" 2>/dev/null; }
+
 log "RED: $test"
 red_rc=0
 # private lane like GREEN: no model runs, and only it lends WORKER_VENV/WORKER_DEPS (a public RED "failed" on a
@@ -106,6 +115,10 @@ elif [ $red_rc -eq 126 ] || [ $red_rc -eq 127 ]; then
   exit 4
 elif startup_crash "$red_out" red; then
   log "RED crashed at startup (infra, not a valid RED; pattern: $crash)"
+  exit 4
+elif infra_error "$red_out"; then
+  # a network or missing-runner error is infra, not a valid RED: the test can't run in the sandbox at all (wb-ytk)
+  log "RED test failed with an infra error (network or missing runner); fix deps lending, not the model"
   exit 4
 fi
 
@@ -214,6 +227,9 @@ if [ $green_rc -ne 0 ]; then
     exit 4
   elif startup_crash "$green_out"; then
     log "GREEN crashed at startup (infra; pattern: $crash)"
+    exit 4
+  elif infra_error "$green_out"; then
+    log "GREEN test failed with an infra error (network or missing runner); fix deps lending, not the model"
     exit 4
   fi
   # a GREEN timeout is a hang in the worker's code, the model's to own whatever the baseline said
