@@ -69,9 +69,11 @@ go WORKER_PRIVATE_PORT=8093 -- --rung worker 'x'
 go WORKER_PRIVATE_PORT=8099 -- --rung worker 'x'
 [ "$rc" = 0 ] && [ -e "$out/args" ] && ok "accepts the local port" || bad "accepts the local port" "rc=$rc $(tail -2 "$out/stderr")"
 
-# 4. bad usage: unknown rung, no instruction
+# 4. bad usage: unknown rung, no instruction, bare --rung
 go -- --rung nope 'x'
 [ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses an unknown rung" || bad "refuses an unknown rung" "rc=$rc"
+go -- --rung
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a bare --rung" || bad "refuses a bare --rung" "rc=$rc"
 go -- --rung worker
 [ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a missing instruction" || bad "refuses a missing instruction" "rc=$rc"
 
