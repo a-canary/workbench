@@ -43,6 +43,8 @@ SYSTEMD_RUN=${SYSTEMD_RUN:-sudo -n systemd-run}
 V100JOB_SUDO=${V100JOB_SUDO:-sudo -n -u v100job}
 V100JOB_WORK=${V100JOB_WORK:-/var/lib/v100job/work}
 V100JOB_USER=${V100JOB_USER:-v100job}   # owner of escaped job processes that may still hold the GPU
+NVSMI=${NVSMI:-nvidia-smi}              # nvidia-smi command (off-box tests override with a fake)
+ADMIT_SETTLE=${ADMIT_SETTLE:-15}        # seconds to wait after admitting a job before the next decision
 mkdir -p "$Q/ready" "$Q/running" "$Q/done" "$Q/failed"
 ACTIVE="${SYSTEMCTL_RO:-systemctl} -q is-active"   # read-only: no sudo, so no auth-log line every 15 s
 log() { echo "$(date -Is) $*" >> "$Q/events.log"; }
@@ -66,7 +68,7 @@ idle)
   log "idle: starting runner"
   # --collect: a failed/killed runner must not leave the unit name taken (next idle would fail).
   env_args=(); for v in V100_JOBS=$Q GRACE LLAMA UNIT GPU MAX_JOBS ADMIT_PCT SHED_PCT TEMP_MAX VRAM_DEFAULT_MB \
-    V100JOB_SUDO V100JOB_WORK V100JOB_USER SYSTEMCTL JOBCTL; do case $v in *=*) env_args+=(--setenv="$v") ;; *) env_args+=(--setenv="$v=${!v}") ;; esac; done
+    NVSMI ADMIT_SETTLE V100JOB_SUDO V100JOB_WORK V100JOB_USER SYSTEMCTL JOBCTL; do case $v in *=*) env_args+=(--setenv="$v") ;; *) env_args+=(--setenv="$v=${!v}") ;; esac; done
   $SYSTEMD_RUN -q --collect --unit="$UNIT" --uid="$(id -u)" --gid="$(id -g)" --setenv=HOME="$HOME" "${env_args[@]}" \
     -p TimeoutStopSec=$((GRACE + 60)) -p KillMode=mixed "$(readlink -f "$0")" loop
   ;;
@@ -89,7 +91,7 @@ loop)
     [ -s "$f" ] && { tr -dc 0-9 < "$f"; return; }
     p=$(awk -v c="$(cls "$1")" '$1==c{v=$2} END{print v}' "$Q/vram-peaks" 2>/dev/null)
     echo "${p:-$VRAM_DEFAULT_MB}"; }
-  gpu() { timeout 10 nvidia-smi -i "$GPU" --query-gpu=memory.used,memory.total,temperature.gpu,clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown --format=csv,noheader,nounits | tr -d ' '; }
+  gpu() { timeout 10 $NVSMI -i "$GPU" --query-gpu=memory.used,memory.total,temperature.gpu,clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown --format=csv,noheader,nounits | tr -d ' '; }
   running() { local d; for d in "$Q"/running/*/; do [ -d "$d" ] && basename "$d"; done; }
   start() { local j=$1 u wd; u=$(ju "$j")
     mv "$Q/ready/$j" "$Q/running/$j"; log "start $j (need $(cat "$Q/running/$j/.need") MiB)"
@@ -115,7 +117,7 @@ loop)
     while IFS=, read -r pid mb; do
       u=$(grep -o "vj-$UNIT-[^/]*\.service" /proc/"${pid// /}"/cgroup 2>/dev/null | head -1); [ -n "$u" ] || continue
       j=${u#vj-$UNIT-}; j=${j%.service}; mb=${mb// /}; [ "$mb" -gt "${peak[$j]:-0}" ] && peak[$j]=$mb
-    done < <(timeout 10 nvidia-smi -i "$GPU" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null)
+    done < <(timeout 10 $NVSMI -i "$GPU" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null)
     run=($(running)); n=${#run[@]}
     if [[ $used =~ ^[0-9]+$ && $total =~ ^[0-9]+$ ]]; then
       if [ $((used * 100)) -gt $((total * SHED_PCT)) ] && [ "$n" -gt 1 ]; then
@@ -124,14 +126,14 @@ loop)
       if [ ! -e "$Q/PAUSE" ] && [ ! -e "$Q/DRAIN" ] && [ "$n" -lt "$MAX_JOBS" ] && j=$(next); then
         nd=$(need "$j"); hot=0; [ "${temp:-0}" -ge "$TEMP_MAX" ] || [[ $hwt == Active || $swt == Active ]] && hot=1
         if [ "$hot" = 0 ] && { [ "$n" = 0 ] || [ $(( (used + nd) * 100 )) -le $((total * ADMIT_PCT)) ]; }; then
-          echo "$nd" > "$Q/ready/$j/.need"; start "$j"; nap 15; continue   # let it allocate before the next decision
+          echo "$nd" > "$Q/ready/$j/.need"; start "$j"; nap $ADMIT_SETTLE; continue   # let it allocate before the next decision
         fi
       fi
     else log "nvidia-smi unreadable: '$used,$total'"; fi
     [ "$n" = 0 ] && { [ -e "$Q/PAUSE" ] || [ -e "$Q/DRAIN" ] || ! next >/dev/null; } && break
     nap 5
   done
-  jobgpu() { local p; for p in $(timeout 5 nvidia-smi -i "$GPU" --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do grep -q "vj-$UNIT-" /proc/"$p"/cgroup 2>/dev/null && return 0; done; return 1; }
+  jobgpu() { local p; for p in $(timeout 5 $NVSMI -i "$GPU" --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do grep -q "vj-$UNIT-" /proc/"$p"/cgroup 2>/dev/null && return 0; done; return 1; }
   held=1; end=$((SECONDS+30)); while [ $SECONDS -lt $end ]; do jobgpu || { held=0; break; }; sleep 1; done
   [ "$held" = 1 ] && { log "gpu still held by job units after 30s, stopping them"; stopall; }
   $SYSTEMCTL start "$LLAMA"; log "runner exit, $LLAMA started"
