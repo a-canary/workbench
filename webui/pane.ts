@@ -459,6 +459,9 @@ export async function applyDecision(
       return "card is no longer waiting";
     // A failed label step can leave both labels on a card; it must not take a second verdict.
     if (card.labels.includes("decided")) return "card is already decided";
+    // A closed card must not take a verdict (wb-di1).
+    if (typeof card.status === "string" && card.status === "closed")
+      return "card is already closed";
     const decide = parseDecide(
       typeof card.description === "string" ? card.description : ""
     );
