@@ -316,3 +316,14 @@ test("ownership map prefix matches subpaths (rd-director/jobs/local-v100/ blocks
   });
   expect(v.ok).toBe(false);
 });
+
+test("directory-prefix owner can write to subpaths", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/jobs/local-v100/\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/jobs/local-v100/foo.yaml", {
+    home,
+    seat: "inference-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
