@@ -203,7 +203,7 @@ jq -n '{extensions: $ARGS.positional}' --args "${jexts[@]}" > "$tmp/agent/settin
 cp "$here/relay.py" "$tmp/relay.py"
 
 args=(--unshare-all --unshare-user --die-with-parent --new-session --clearenv --disable-userns --cap-drop ALL
-  --ro-bind /usr /usr --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run
+  --ro-bind /usr /usr --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run --tmpfs /var/tmp
   --tmpfs /home --dir /home/worker --chdir /work)
 for l in bin lib lib64 sbin; do
   if [ -L "/$l" ]; then args+=(--symlink "$(readlink "/$l")" "/$l")
