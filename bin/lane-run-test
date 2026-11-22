@@ -134,11 +134,11 @@ G branch -q -D lane/x-1
 check "racing branch survives"         "$(timeout() { G branch -q lane/x-1 origin/main; command timeout "$@"; }; go >/dev/null; G branch --list lane/x-1 | wc -l)" 1
 G branch -q -D lane/x-1
 bead $'Branch: lane/nope\nTest: true\n---\nx'
-check "branch missing on origin: human" "$(sleep() { :; }; go >/dev/null; grep -c 'label add X-1 human' "$calls")" 1
+# wb-2qn: branch not on this repo's origin → skip without claiming (sibling repo's pass gets it)
+check "branch missing on origin: skipped" "$(sleep() { :; }; go >/dev/null; grep -c 'claim' "$calls")" 0
 G remote set-url origin "$tmp/gone.git"
 check "unreachable origin stops the pass" "$(go)" "rc=1 down=1"
-check "unreachable origin: no label"   "$(grep -c 'label add' "$calls")" 0
-check "unreachable origin: reopened"   "$(grep -c 'update X-1 -s open' "$calls")" 1
+check "unreachable origin: no claim"     "$(grep -c 'claim' "$calls")" 0
 G remote set-url origin "$tmp/o.git"
 bead "$good"
 check "fetch timeout is infra"         "$(timeout() { return 124; }; go)" "rc=1 down=1"
@@ -184,7 +184,10 @@ check "cause: infra startup crash"   "$(: >"$calls"; STUB_RC=4 STUB_WLOG='RED cr
 : >"$SPRINT_LOG"
 check "cause: unknown falls back"    "$(STUB_RC=2 go >/dev/null; grep -c ' worker failed seconds' "$SPRINT_LOG")" 1
 : >"$SPRINT_LOG"
-check "cause: checkout failure"      "$(bead $'Branch: lane/nope\nTest: true\n---\nx'; sleep() { :; }; go >/dev/null; grep -c 'checkout failed' "$SPRINT_LOG")" 1
+# wb-2qn: branch not on origin is now skipped before claiming (never reaches checkout)
+bead $'Branch: lane/nope\nTest: true\n---\nx'
+check "branch not on origin: skipped" "$(sleep() { :; }; go >/dev/null; grep -c 'claim' "$calls")" 0
+bead "$good"
 # wb-it5: GREEN's failures split against worker-task's pre-model runs: RED (Test at the RED commit, target meant to
 # fail there) and the parent baseline (Test minus RED tests at RED's parent, when worker-task ran it)
 printf '\e[31m FAIL \e[39m src/a.test.ts > old 12ms\n(fail) bun one [1.0ms]\nsrc/x.ts(3,5): error TS2322: bad\nsrc/y.ts:1:2 - error TS1005: x\n FAIL  src/a.test.ts > old\n' >"$tmp/out"
