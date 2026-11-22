@@ -48,6 +48,115 @@
 # would reach a session named "ndv-lead".
 set -u
 
+# Herdr seam functions for nc=1 (pi) seats (repos-9ma8e)
+herdr_alive() {
+    herdr agent get "$1" >/dev/null 2>&1
+}
+
+herdr_idle() {
+    local status
+    status=$(herdr agent get "$1" 2>/dev/null | jq -r '.result.agent.agent_status // "unknown"')
+    case "$status" in
+        idle|done) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+herdr_nudge() {
+    local seat="$1" bead="$2"
+    herdr agent prompt "$seat" "Waker: bead $bead is ready and this seat looks idle. Run: bd show $bead, then take it or say why not." </dev/null 2>&1
+}
+
+# R3 stuck detection (repos-9ma8e follow-on): a "working" seat whose pi session jsonl has not
+# grown is wedged (frozen model call, hung tool, babysat bg task). jsonl age is immune to
+# footer ticks and lane 502s: those change screen text but never the session log.
+# WAKER_STUCK_S (default 1800) covers the observed 30-min laneproxy backlog worst case.
+# "blocked" (a dialog waiting) over WAKER_BLOCKED_S (default 300) also counts as stuck.
+herdr_idle_out() {
+    case $(jq -r '.result.agent.agent_status // "unknown"' <<<"$1" 2>/dev/null) in
+        idle|done) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+herdr_stuck() {
+    local seat=$1 out=$2 status sess age f now
+    status=$(jq -r '.result.agent.agent_status // "unknown"' <<<"$out" 2>/dev/null)
+    f="$SEATS/.stuck/$seat.blockedsince"
+    [ "$status" = "blocked" ] || { [ -e "$f" ] && rm -f "$f"; }
+    if [ "$status" = "working" ]; then
+        sess=$(jq -r '.result.agent.agent_session.value // empty' <<<"$out" 2>/dev/null)
+        [ -n "$sess" ] && [ -f "$sess" ] || return 1
+        age=$(( $(date +%s) - $(stat -c %Y "$sess") ))
+        [ "$age" -ge "${WAKER_STUCK_S:-1800}" ] && return 0
+        return 1
+    fi
+    if [ "$status" = "blocked" ]; then
+        now=$(date +%s)
+        if [ ! -f "$f" ]; then
+            mkdir -p "$SEATS/.stuck" && printf '%s\n' "$now" >"$f"
+            return 1
+        fi
+        age=$(( now - $(cat "$f" 2>/dev/null || echo 0) ))
+        [ "$age" -ge "${WAKER_BLOCKED_S:-300}" ] && return 0
+        return 1
+    fi
+    return 1
+}
+
+# Progressive recovery (operator-approved design): nudge -> 5 min -> kill (restart next tick)
+# -> 5 min -> escalate once. .stuck/<seat> holds "<phase> <epoch>"; .stuck/<seat>.count holds
+# consecutive kill-restarts, and after 3 the nudge is skipped (force-restart). A healthy
+# observation clears both. WAKER_STUCK_GAP_S (default 300) is the wait between phases.
+herdr_stuck_action() {
+    local seat=$1 out=$2 now phase ts tabid count f cf
+    now=$(date +%s); mkdir -p "$SEATS/.stuck"
+    f="$SEATS/.stuck/$seat"; cf="$SEATS/.stuck/$seat.count"
+    phase=0 ts=0
+    if [ -f "$f" ]; then phase=$(cut -d' ' -f1 "$f" 2>/dev/null); ts=$(cut -d' ' -f2 "$f" 2>/dev/null); fi
+    [[ $phase =~ ^[0-9]+$ ]] || phase=0
+    [[ $ts =~ ^[0-9]+$ ]] || ts=0
+    count=$(cat "$cf" 2>/dev/null); [[ $count =~ ^[0-9]+$ ]] || count=0
+    if [ "$count" -ge 3 ]; then phase=1; ts=0; fi   # force-restart: skip the nudge
+    case $phase in
+    0)
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-nudge"; return 0; fi
+        if herdr agent prompt "$seat" "Waker: this seat looks stuck - no session activity in a while. If you are mid-call, ignore this. Otherwise check for a wedged tool call or a long bg task, resolve or kill it, and bank state to beads." </dev/null >/dev/null 2>&1; then
+            printf '1 %s\n' "$now" >"$f"
+            echo "seat=$seat stuck-nudged"
+        else
+            echo "seat=$seat stuck-nudge-failed"
+        fi
+        ;;
+    1)
+        if [ $(( now - ts )) -lt "${WAKER_STUCK_GAP_S:-300}" ]; then echo "seat=$seat stuck (nudged, waiting)"; return 0; fi
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-kill"; return 0; fi
+        tabid=$(jq -r '.result.agent.tab_id // empty' <<<"$out" 2>/dev/null)
+        if [ -n "$tabid" ] && herdr tab close "$tabid" >/dev/null 2>&1; then
+            printf '2 %s\n' "$now" >"$f"
+            echo "$(( count + 1 ))" >"$cf"
+            echo "seat=$seat stuck-killed tab=$tabid (restart next tick)"
+        else
+            echo "seat=$seat stuck-kill-failed"
+        fi
+        ;;
+    2)
+        if [ $(( now - ts )) -lt "${WAKER_STUCK_GAP_S:-300}" ]; then echo "seat=$seat stuck (restarted, waiting)"; return 0; fi
+        if [ "$DRY_RUN" -eq 1 ]; then echo "seat=$seat would-stuck-escalate"; return 0; fi
+        printf '3 %s\n' "$now" >"$f"
+        echo "seat=$seat stuck-escalated nudge-and-restart-failed operator-attention"
+        ;;
+    *)
+        echo "seat=$seat stuck (escalated $(( now - ts ))s ago)"
+        ;;
+    esac
+}
+
+herdr_stuck_clear() {
+    rm -f "$SEATS/.stuck/$1" "$SEATS/.stuck/$1.count" "$SEATS/.stuck/$1.blockedsince" 2>/dev/null
+    return 0
+}
+
 SEATS="${WAKER_SEATS:-$HOME/vault/director/seats}"
 BUDGET="${WAKER_BUDGET:-$HOME/vault/director/.budget}"
 SLOTS="${WAKER_CLAUDE_SLOTS:-2}"
@@ -111,6 +220,23 @@ if [ -z "${WAKER_NUDGE_CMD:-}" ]; then
         tmux send-keys -t "=$seat:" Enter
     }
     WAKER_NUDGE_CMD="default_nudge"
+fi
+if [ -z "${WAKER_V100_EMPTY_CMD:-}" ]; then
+    default_v100_empty() {
+        # Check if the v100 lane is empty (no ready beads with lane:v100 label)
+        cd ~/repos && bd ready --label "lane:v100" --json --limit 1 2>/dev/null | jq -r '.[0].id // empty'
+    }
+    WAKER_V100_EMPTY_CMD="default_v100_empty"
+fi
+if [ -z "${WAKER_OVERRUN_NUDGE_CMD:-}" ]; then
+    default_overrun_nudge() {
+        local seat="$1"
+        # Over-pace Claude Lead with empty v100 lane: prepare work instead of waiting
+        tmux send-keys -t "=$seat:" -l "Waker: you are over pace and the v100 lane is empty. Write RED tests or lane:v100 beads for your top ready beads, then stop. Do not start new Claude work." || return $?
+        sleep 0.3
+        tmux send-keys -t "=$seat:" Enter
+    }
+    WAKER_OVERRUN_NUDGE_CMD="default_overrun_nudge"
 fi
 if [ -z "${WAKER_PRIO_CMD:-}" ]; then
     default_prio() {
@@ -281,7 +407,37 @@ declare -a running=()
 while IFS= read -r s; do
     [ -z "$s" ] && continue
     IFS='|' read -r name priority pace_max nc repo label env_json start <<<"$s"
-    if $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
+    # nc=1 (pi) seats use herdr seam; nc=0 (Claude) seats use tmux seam
+    if [ "$nc" -eq 1 ]; then
+        if herdr_alive "$name"; then
+            # Stuck detection: working but session jsonl hasn't grown
+            local agent_out
+            agent_out=$(herdr agent get "$name" 2>/dev/null)
+            if herdr_stuck "$name" "$agent_out"; then
+                herdr_stuck_action "$name" "$repo" "$label" "$start" "" "$env_json"
+            fi
+            nudge_bead=""
+            if herdr_idle "$name"; then
+                nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
+                [[ $nudge_bead =~ ^[A-Za-z0-9._-]+$ ]] || nudge_bead=""
+            fi
+            if [ -n "$nudge_bead" ] && [ "$DRY_RUN" -eq 1 ]; then
+                echo "seat=$name would-nudge bead=$nudge_bead"
+            elif [ -n "$nudge_bead" ]; then
+                rc=0
+                herdr_nudge "$name" "$nudge_bead" || rc=$?
+                if [ $rc -eq 0 ]; then
+                    echo "seat=$name nudged bead=$nudge_bead"
+                else
+                    echo "seat=$name nudge-failed bead=$nudge_bead rc=$rc"
+                fi
+            else
+                echo "seat=$name running"
+            fi
+            running+=("$name")
+        fi
+        # Dead nc=1 seat: no first-pass verdict; second pass handles auto-start
+    elif $WAKER_ALIVE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
         # Live seat: is it idle and does it have a ready bead?
         nudge_bead=""
         if [ "$session_out" -eq 1 ] && [ "$nc" -eq 0 ]; then
@@ -307,7 +463,39 @@ while IFS= read -r s; do
             fi
         fi
         if [ "$should_nudge" -eq 0 ] && [ -n "$nudge_bead" ]; then
-            echo "seat=$name halted bead=$nudge_bead"   # idle with work, held by a Claude gate
+            # Over-pace Claude Lead with empty v100 lane: nudge to prepare work (repos-iq2qa)
+            overrun_nudged=0
+            if [ "$nc" -eq 0 ] && [ "$meter_ok" -eq 1 ] && awk -v a="$pace" -v b="$pace_max" 'BEGIN{exit !(a>b)}'; then
+                # Seat is over pace — check if v100 lane is empty
+                v100_bead=$($WAKER_V100_EMPTY_CMD </dev/null 2>/dev/null 9>&-) || v100_bead=""
+                [[ $v100_bead =~ ^[A-Za-z0-9._-]+$ ]] || v100_bead=""
+                if [ -z "$v100_bead" ]; then
+                    # Lane is empty — send overrun nudge, rate-limited
+                    nudge_file="$SEATS/.nudge/$name"
+                    gap_expired=1
+                    if [ -f "$nudge_file" ]; then
+                        last_nudge=$(cat "$nudge_file" 2>/dev/null)
+                        if [[ $last_nudge =~ ^[0-9]+$ ]]; then
+                            [ $((now - last_nudge)) -ge "${WAKER_NUDGE_GAP_S:-1800}" ] || gap_expired=0
+                        fi
+                    fi
+                    if [ "$gap_expired" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+                        if $WAKER_OVERRUN_NUDGE_CMD "$name"; then
+                            date +%s >"$nudge_file"
+                            echo "seat=$name overrun-nudged (v100 empty)"
+                            overrun_nudged=1
+                        else
+                            echo "seat=$name overrun-nudge-failed"
+                        fi
+                    elif [ "$DRY_RUN" -eq 1 ]; then
+                        echo "seat=$name would-overrun-nudge (v100 empty)"
+                        overrun_nudged=1
+                    fi
+                fi
+            fi
+            if [ "$overrun_nudged" -eq 0 ]; then
+                echo "seat=$name halted bead=$nudge_bead"   # idle with work, held by a Claude gate
+            fi
         elif [ "$should_nudge" -eq 0 ]; then
             echo "seat=$name running"
         else

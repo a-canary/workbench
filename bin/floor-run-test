@@ -69,9 +69,11 @@ go WORKER_PRIVATE_PORT=8093 -- --rung worker 'x'
 go WORKER_PRIVATE_PORT=8099 -- --rung worker 'x'
 [ "$rc" = 0 ] && [ -e "$out/args" ] && ok "accepts the local port" || bad "accepts the local port" "rc=$rc $(tail -2 "$out/stderr")"
 
-# 4. bad usage: unknown rung, no instruction
+# 4. bad usage: unknown rung, no instruction, bare --rung
 go -- --rung nope 'x'
 [ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses an unknown rung" || bad "refuses an unknown rung" "rc=$rc"
+go -- --rung
+[ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a bare --rung" || bad "refuses a bare --rung" "rc=$rc"
 go -- --rung worker
 [ "$rc" = 2 ] && [ ! -e "$out/args" ] && ok "refuses a missing instruction" || bad "refuses a missing instruction" "rc=$rc"
 
@@ -359,5 +361,11 @@ flow TMPDIR=/nonexistent/floor-run-test --
 # 15. a failed worker's nested repo is removed with the rest of its work
 flow WT_RC=7 WT_DO='git init -q "$wt/sub"; echo x > "$wt/sub/f"' --
 [ "$rc" = 0 ] && clean_at_start && [ ! -e "$wd/sub" ] && ok "failed worker's nested repo removed" || bad "failed worker's nested repo removed" "rc=$rc $(ls -a "$wd" | tr '\n' ' ')"
+
+# 16. a failed metrics write is reported to stderr and does not crash
+mkdir -p "$out/metricsdir"
+go FLOOR_METRICS="$out/metricsdir/badfile" -- --rung worker 'x'
+rc=$?
+[ "$rc" = 0 ] && ok "failed metrics write does not crash" || bad "failed metrics write does not crash" "rc=$rc"
 
 exit $fail
