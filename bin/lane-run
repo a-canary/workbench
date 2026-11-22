@@ -260,6 +260,28 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   [ -z "$down" ]
 }
 
+# sweep_qwen_failed <repo> — remove qwen-failed from beads that have been failing >72h (repos-qm8jb)
+sweep_qwen_failed() {
+  local j ids i id updated_at age now
+  local TTL=${QWEN_FAILED_TTL:-259200}  # 72h in seconds
+  now=$(date +%s)
+  j=$(bd -C "$repo" list -l qwen-failed --status open --json 2>/dev/null) || return 0
+  [ "$j" = "[]" ] && return 0
+  mapfile -t ids < <(jq -c '.[]' <<<"$j")
+  for i in "${ids[@]}"; do
+    id=$(jq -r '.id' <<<"$i")
+    updated_at=$(jq -r '.updated_at // ""' <<<"$i")
+    if [ -z "$updated_at" ]; then continue; fi
+    local ts
+    ts=$(date -d "$updated_at" +%s 2>/dev/null) || continue
+    age=$((now - ts))
+    if [ "$age" -gt "$TTL" ]; then
+      log "$id: qwen-failed expired ($((age / 3600))h); re-enabling for retry"
+      bd -C "$repo" label remove "$id" qwen-failed >/dev/null 2>&1
+    fi
+  done
+}
+
 # lint_desc <repo> <description> — one reason line if the bead can't be run, nothing if it can
 lint_desc() {
   local desc=$2 b branch test body_text
@@ -318,10 +340,20 @@ if [ -n "$lint" ]; then
 fi
 gc_logs
 while :; do
+  # sweep expired qwen-failed labels before draining (repos-qm8jb)
+  for repo in "${repos[@]}"; do sweep_qwen_failed "$repo"; done
   did= down=
   for repo in "${repos[@]}"; do run_one && did=1; [ -z "$down" ] || break; done
   [ -n "$once" ] && [ -n "$down" ] && exit 3
   [ -n "$did" ] && [ -z "$down" ] && continue
   [ -n "$once" ] && exit 0
-  log "${down:+outage}${down:-queue empty}; idle ${idle}s"; sleep "$idle"
+  # count beads invisible to the drain (qwen-failed, human, lane-infra) — acceptance criterion 3 (repos-qm8jb)
+  local hidden=0
+  for repo in "${repos[@]}"; do
+    local j n
+    j=$(bd -C "$repo" list -l "$label" --status open --json 2>/dev/null) || continue
+    n=$(jq '[.[] | select(.labels[] | . == "qwen-failed" or . == "human" or . == "lane-infra")] | length' <<<"$j" 2>/dev/null) || continue
+    hidden=$((hidden + n))
+  done
+  log "${down:+outage}${down:-queue empty}; idle ${idle}s; hidden=${hidden}"; sleep "$idle"
 done
