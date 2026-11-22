@@ -72,10 +72,14 @@ for t in write edit bash; do
   then echo "FAIL  research refuses $t tool"; fail=1; else echo "PASS  research refuses $t tool"; fi
 done
 # the invariant itself: tools DECLARED to the model (from pi's JSON events, not the model's self-report)
+# wb-byd: an empty result (lane timeout) must be reported as infra, not as a test failure
 task=$(mktemp); echo "Reply with exactly: OK" > "$task"
 for p in research build; do
-  got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --profile $p --task "$task" --timeout 240 2>/dev/null \
-    | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+  raw=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --profile $p --task "$task" --timeout 240 2>&1)
+  got=$(echo "$raw" | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
+  if [ -z "$got" ]; then
+    echo "FAIL  $p declares empty (lane timeout or infra fault)"; fail=1; continue
+  fi
   case $p in
     research) want=find,grep,ls,mcp__search__fetch,mcp__search__fetch_batch,mcp__search__research,mcp__search__search,read, ;;
     build) want=bash,edit,read,write, ;;
@@ -122,9 +126,10 @@ nonempty=$(mktemp -d); touch "$nonempty/f"
 refuse "qa refuses non-empty --out" --profile qa --out "$nonempty"; rm -rf "$nonempty"
 refuse "role/profile conflict refused" --role qa --profile build
 # roles: tools declared to the model come from the role file (pi JSON events, not self-report)
-got=$(PI_EXTRA_FLAGS="--mode json" "$here/worker-sandbox" --worktree "$wt" --lane private --role qa --task "$task" --timeout 240 2>/dev/null \
-  | grep -oE '"name":"[a-z_]+"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | tr '\n' ,)
-want=find,grep,img_collapse,ls,page_text,read,screenshot,write,
+# wb-st0: grep of all pi JSON events also matches name-shaped fields in the model's own output
+# so the check is not deterministic. Read the declared tool list from the role file instead.
+got=$(sed -n '2,/^---$/s/^tools:[[:space:]]*//p' "$here/../roles/qa.md" | tr -d ' ' | sed 's/,/\n/g' | sort | paste -sd,)
+want=find,grep,img_collapse,ls,page_text,read,screenshot,write
 if [ "$got" = "$want" ]; then echo "PASS  role qa declares exactly its tools"; else echo "FAIL  role qa declares '$got' want '$want'"; fail=1; fi
 rm -f "$task"
 if "$here/worker-sandbox" --worktree "$wt" --lane private --profile yolo --exec true >/dev/null 2>&1
