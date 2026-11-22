@@ -21,7 +21,10 @@
 #   WAKER_BUDGET       folder holding ignore-until
 #   WAKER_CLAUDE_SLOTS max concurrent lead sessions (default 2)
 #   WAKER_METER_CMD    prints "<util> <pace>" or "? ?" when unreadable
-#   WAKER_READY_CMD    "<cmd> <repo> <label>" prints top ready bead id or nothing
+#   WAKER_READY_CMD    "<cmd> <repo> <label> <seat>" prints top ready bead id or nothing.
+#                      <seat> lets the command skip beads another seat owns (repos-juy5g); the
+#                      default skips any bead whose assignee is a different name and keeps
+#                      looking behind it — an unassigned bead is still anyone's.
 #   WAKER_ALIVE_CMD    "<cmd> <seat>" exits 0 when seat has a live session
 #   WAKER_IDLE_CMD     "<cmd> <seat>" exits 0 when live session is idle
 #                      (default: tmux pane text unchanged for WAKER_IDLE_S sec)
@@ -178,7 +181,14 @@ if [ -z "${WAKER_SESSION_CMD:-}" ]; then
 fi
 if [ -z "${WAKER_READY_CMD:-}" ]; then
     default_ready() {
-        cd "$1" && bd ready --label "$2" --json --limit 1 | jq -r '.[0].id // empty'
+        # $3 is the seat, and it matters: bd ready is label-only, so the top bead can belong to another
+        # seat and this seat is nudged about work it cannot do (repos-p1dn: three nudges, one agents-lead
+        # bead). Skip those and keep looking — --limit 1 also meant one wrong bead hid every bead behind
+        # it. An unassigned bead is still anyone's; a bead assigned to the operator is not a seat's job.
+        cd "$1" && bd ready --label "$2" --json --limit 50 | jq -r --arg seat "${3:-}" '
+            def for_me: ((.assignee // "") | ascii_downcase) as $a
+                        | $a == "" or ($seat != "" and $a == ($seat | ascii_downcase));
+            [.[] | select(for_me)] | .[0].id // empty'
     }
     WAKER_READY_CMD="default_ready"
 fi
@@ -418,7 +428,7 @@ while IFS= read -r s; do
             fi
             nudge_bead=""
             if herdr_idle "$name"; then
-                nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
+                nudge_bead=$($WAKER_READY_CMD "$repo" "$label" "$name" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
                 [[ $nudge_bead =~ ^[A-Za-z0-9._-]+$ ]] || nudge_bead=""
             fi
             if [ -n "$nudge_bead" ] && [ "$DRY_RUN" -eq 1 ]; then
@@ -447,7 +457,7 @@ while IFS= read -r s; do
             continue
         fi
         if $WAKER_IDLE_CMD "$name" </dev/null 2>/dev/null 9>&-; then
-            nudge_bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
+            nudge_bead=$($WAKER_READY_CMD "$repo" "$label" "$name" </dev/null 2>/dev/null 9>&-) || nudge_bead=""
             # the id is typed into a live session: anything but a plain id is dropped
             [[ $nudge_bead =~ ^[A-Za-z0-9._-]+$ ]] || nudge_bead=""
         fi
@@ -554,7 +564,7 @@ while IFS= read -r s; do
     fi
 
     # Get ready bead
-    bead=$($WAKER_READY_CMD "$repo" "$label" </dev/null 2>/dev/null 9>&-) || bead=""
+    bead=$($WAKER_READY_CMD "$repo" "$label" "$name" </dev/null 2>/dev/null 9>&-) || bead=""
     if [ -z "$bead" ]; then
         echo "seat=$name idle"
         continue
