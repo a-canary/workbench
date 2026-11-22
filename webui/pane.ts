@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 // Control pane shell (slice B1). Public framework: no repo, seat or
 // mission names in code; personal paths come from <config dir>/pane.json.
 
@@ -26,7 +26,7 @@ export const bdRun: Run = async (args) => {
   return { code, out };
 };
 
-export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[]; failuresFile?: string } {
+export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[]; failuresFile?: string; seatsDir?: string } {
   const path = `${dir}/pane.json`;
   let raw: string;
   try {
@@ -48,7 +48,7 @@ export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[];
   ) {
     throw new Error(`bad pane.json: ${path}: beadDirs must be an array of strings`);
   }
-  const obj = cfg as { beadDirs: string[]; hosts?: unknown; failuresFile?: unknown };
+  const obj = cfg as { beadDirs: string[]; hosts?: unknown; failuresFile?: unknown; seatsDir?: unknown };
   if (obj.hosts !== undefined) {
     if (!Array.isArray(obj.hosts) || obj.hosts.some((h) => typeof h !== "string")) {
       throw new Error(`bad pane.json: ${path}: hosts must be an array of strings`);
@@ -57,9 +57,13 @@ export function loadConfig(dir: string): { beadDirs: string[]; hosts?: string[];
   if (obj.failuresFile !== undefined && typeof obj.failuresFile !== "string") {
     throw new Error(`bad pane.json: ${path}: failuresFile must be a string`);
   }
-  const result: { beadDirs: string[]; hosts?: string[]; failuresFile?: string } = { beadDirs: obj.beadDirs };
+  if (obj.seatsDir !== undefined && typeof obj.seatsDir !== "string") {
+    throw new Error(`bad pane.json: ${path}: seatsDir must be a string`);
+  }
+  const result: { beadDirs: string[]; hosts?: string[]; failuresFile?: string; seatsDir?: string } = { beadDirs: obj.beadDirs };
   if (obj.hosts !== undefined) result.hosts = obj.hosts;
   if (obj.failuresFile !== undefined) result.failuresFile = obj.failuresFile;
+  if (obj.seatsDir !== undefined) result.seatsDir = obj.seatsDir;
   return result;
 }
 
@@ -542,6 +546,112 @@ export function inboxHtml(cards: Card[]): string {
   return parts.join("");
 }
 
+// Seats place. A seat is one <seatsDir>/<name>.json file in a version-controlled folder; the pane edits
+// three text fields in it (domain, mission, responsibilities) and commits the file, so history and undo
+// are plain version control.
+// ponytail: the pane has no caller identity (no login), so it cannot tell that a save came from the seat
+// being edited, and "a seat cannot edit itself" is not enforced here. Do not fake it with a header; it
+// needs the seat sandbox to carry an identity the pane can check.
+export const SEAT_FIELDS = ["domain", "mission", "responsibilities"] as const;
+const SEAT_FACTS = ["kind", "label", "repo", "priority", "model", "lane", "start"];
+const SEAT_MAX = 4000;
+
+const tmuxAlive = async (name: string) => {
+  try {
+    const p = Bun.spawn(["tmux", "has-session", "-t", `=${name}`], { stdout: "ignore", stderr: "ignore", timeout: 5000 });
+    return (await p.exited) === 0;
+  } catch {
+    return false;
+  }
+};
+
+function seatNames(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+      .flatMap((f) => (/^[A-Za-z0-9_-]+\.json$/.test(f) ? [f.slice(0, -5)] : []))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function readSeat(dir: string, name: string): Record<string, unknown> | null {
+  if (!seatNames(dir).includes(name)) return null;
+  try {
+    const v = JSON.parse(readFileSync(`${dir}/${name}.json`, "utf8"));
+    return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+const seatText = (seat: Record<string, unknown>, k: string) => (typeof seat[k] === "string" ? (seat[k] as string) : "");
+
+export async function seatsHtml(dir: string | undefined, alive = tmuxAlive): Promise<string> {
+  if (!dir) return "<p>no seats: set seatsDir in pane.json</p>";
+  const rows = await Promise.all(
+    seatNames(dir).map(async (name) => {
+      const seat = readSeat(dir, name);
+      const state = seat ? ((await alive(name)) ? "running" : "stopped") : "unreadable";
+      const cell = (k: string) => `<td>${esc(seat ? seatText(seat, k) : "")}</td>`;
+      return `<tr><td><a href="/seats/${name}">${esc(name)}</a></td>${cell("domain")}${cell("mission")}<td>${state}</td></tr>`;
+    })
+  );
+  return `<h1>Seats</h1><table><tr><th>seat</th><th>domain</th><th>mission</th><th>state</th></tr>${rows.join("")}</table>`;
+}
+
+export function seatHtml(name: string, seat: Record<string, unknown>): string {
+  const facts = SEAT_FACTS.filter((k) => ["string", "number"].includes(typeof seat[k]))
+    .map((k) => `<dt>${k}</dt><dd><code>${esc(String(seat[k]))}</code></dd>`)
+    .join("");
+  const boxes = SEAT_FIELDS.map(
+    (f) =>
+      `<p><label>${f}<br><textarea name="${f}" rows="${f === "responsibilities" ? 8 : 3}" maxlength="${SEAT_MAX}" style="width:100%">${esc(seatText(seat, f))}</textarea></label></p>`
+  ).join("");
+  return `<h1>${esc(name)}</h1><p><a href="/seats">all seats</a></p><dl>${facts}</dl>
+<form method="post" action="/seats/${name}/save">${boxes}<button type="submit">Save</button></form>
+<p>A save is a commit to the seat's file; undo it with a revert of that commit.</p>`;
+}
+
+// Returns an error, or null when saved (or nothing changed). Fields missing from the form stay as they are.
+export async function saveSeat(dir: string, name: string, form: FormData): Promise<{ status: number; msg: string } | null> {
+  const seat = readSeat(dir, name);
+  if (!seat) return { status: 404, msg: "no such seat" };
+  const changed: string[] = [];
+  for (const f of SEAT_FIELDS) {
+    const raw = form.get(f);
+    if (raw === null) continue;
+    // Browsers submit textarea newlines as CRLF; store LF so an unchanged multi-line field is not a change.
+    const v = typeof raw === "string" ? raw.replace(/\r\n?/g, "\n") : raw;
+    if (typeof v !== "string" || v.length > SEAT_MAX) return { status: 400, msg: `${f} must be text of at most ${SEAT_MAX} characters` };
+    if (v !== seatText(seat, f)) {
+      seat[f] = v;
+      changed.push(f);
+    }
+  }
+  if (changed.length === 0) return null;
+  // ponytail: one lock for all seats, since saves share one git index; per-repo locks if seats ever span repos.
+  if (inFlight.has("seats")) return { status: 409, msg: "a seat is being saved right now; try again" };
+  inFlight.add("seats");
+  const file = `${name}.json`;
+  const path = `${dir}/${file}`;
+  const vc = async (...a: string[]) => {
+    const p = Bun.spawn(["git", "-C", dir, ...a], { stdout: "ignore", stderr: "ignore", timeout: 15000 });
+    return (await p.exited) === 0;
+  };
+  let before: string | undefined;
+  try {
+    before = readFileSync(path, "utf8");
+    writeFileSync(path, JSON.stringify(seat, null, 2) + "\n");
+    if ((await vc("add", "--", file)) && (await vc("commit", "-q", "-m", `seats: ${name}: edit ${changed.join(", ")}`, "--", file))) return null;
+    writeFileSync(path, before!);
+    await vc("reset", "-q", "--", file);
+    return { status: 500, msg: "could not commit the seat file; nothing was changed" };
+  } finally {
+    inFlight.delete("seats");
+  }
+}
+
 export function shell(
   place: string,
   focusHtml: string,
@@ -599,9 +709,18 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 </html>`;
 }
 
+type Deps = {
+  beadDirs: string[];
+  run?: Run;
+  hosts?: string[];
+  failuresFile?: string;
+  seatsDir?: string;
+  seatAlive?: (name: string) => Promise<boolean>;
+};
+
 export async function handle(
   req: Request,
-  deps: { beadDirs: string[]; run?: Run; hosts?: string[]; failuresFile?: string }
+  deps: Deps
 ): Promise<Response> {
   const res = await route(req, deps);
   // The pane has no login, so another site must not be able to show it in a frame and trick a click
@@ -613,7 +732,7 @@ export async function handle(
 
 async function route(
   req: Request,
-  deps: { beadDirs: string[]; run?: Run; hosts?: string[]; failuresFile?: string }
+  deps: Deps
 ): Promise<Response> {
   // The pane has no login. Another site can point its own name at the pane's address and then looks
   // same-origin to the browser; answering only to the pane's own names shuts that out.
@@ -709,6 +828,44 @@ async function route(
       inbox: cards.cards.length,
     });
     return new Response(html, {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+
+  const seat = path.match(/^\/seats\/([A-Za-z0-9_-]+)(\/save)?$/);
+  if (seat && !seat[2]) {
+    const data = deps.seatsDir ? readSeat(deps.seatsDir, seat[1]!) : null;
+    if (!data) return new Response("not found", { status: 404 });
+    const { cards } = await loadCards(deps.beadDirs, deps.run);
+    return new Response(shell("seats", seatHtml(seat[1]!, data), { inbox: cards.length }), {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+
+  if (seat && deps.seatsDir) {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    if (!sameOrigin((k) => req.headers.get(k) ?? undefined, req.headers.get("host") ?? undefined)) {
+      return new Response("forbidden", { status: 403 });
+    }
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      return new Response("bad form", { status: 400 });
+    }
+    const err = await saveSeat(deps.seatsDir, seat[1]!, form);
+    if (err) return new Response(err.msg, { status: err.status });
+    return new Response(null, { status: 303, headers: { location: `/seats/${seat[1]}` } });
+  }
+
+  if (path === "/seats") {
+    const [{ cards }, body] = await Promise.all([
+      loadCards(deps.beadDirs, deps.run),
+      seatsHtml(deps.seatsDir, deps.seatAlive),
+    ]);
+    return new Response(shell("seats", body, { inbox: cards.length }), {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },
     });
