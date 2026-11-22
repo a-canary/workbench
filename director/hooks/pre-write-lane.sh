@@ -103,7 +103,10 @@ while IFS= read -r p; do
   # `/dev/null)` — strip trailing closers for this comparison only.
   dev="$(printf '%s' "$p" | sed -E 's/[)}`]+$//')"
   case "$dev" in /dev/null|/dev/stdout|/dev/stderr) continue ;; esac
-  if ! out="$("$BUN" "$REPO/src/policy/check.ts" --db "$LEDGER_DB" "$p" 2>&1)"; then
+  # Seat-aware ownership check (repos-ztdrt): pass WAKER_SEAT if set.
+  seat_args=()
+  [ -n "${WAKER_SEAT:-}" ] && seat_args=(--seat "$WAKER_SEAT")
+  if ! out="$("$BUN" "$REPO/src/policy/check.ts" --db "$LEDGER_DB" "${seat_args[@]}" "$p" 2>&1)"; then
     printf '%s\n' "$out" >&2
     status=2
   fi
