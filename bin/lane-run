@@ -339,7 +339,17 @@ if [ -n "$lint" ]; then
   exit $rc
 fi
 gc_logs
+session_start=$(date +%s)
 while :; do
+  # session lifetime cap (repos-pglhz): exit after 4h to force a fresh process
+  local now session_age
+  now=$(date +%s)
+  session_age=$((now - session_start))
+  local SESSION_LIFETIME=${LANE_SESSION_LIFETIME:-14400}
+  if [ "$session_age" -gt "$SESSION_LIFETIME" ]; then
+    log "session lifetime cap reached (${session_age}s > ${SESSION_LIFETIME}s); exiting for fresh process"
+    exit 0
+  fi
   # sweep expired qwen-failed labels before draining (repos-qm8jb)
   for repo in "${repos[@]}"; do sweep_qwen_failed "$repo"; done
   did= down=
