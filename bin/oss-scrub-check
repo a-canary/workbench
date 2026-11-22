@@ -6,7 +6,10 @@
 set -uo pipefail
 # No git: the lane jail runs on a checkout-index copy without .git (git grep there failed open).
 cd "$(dirname "$0")/.." || exit 2
-pat='\baaron\b|enzonic|ndivisible|onenation|ournation|home-lab-[0-9]|ai-lab-[0-9]|/home/[a-z][a-z0-9_-]*/'
+# OSS_SCRUB_PATTERN: operator-provided denylist (never bake identity into shared code).
+# Default pattern is generic hostnames and absolute home paths; operator-specific
+# names come from the env var so they are not committed to the public repo.
+pat="${OSS_SCRUB_PATTERN:-home-lab-[0-9]|ai-lab-[0-9]|/home/[a-z][a-z0-9_-]*/}"
 hits=$(grep -rIniE "$pat" --exclude-dir=.git --exclude=.git --exclude-dir=node_modules --exclude=oss-scrub-check . | grep -v -E '/home/(worker|testuser)/')
 [ -z "$hits" ] && { echo "oss-scrub-check: clean"; exit 0; }
 printf '%s\n' "$hits"
