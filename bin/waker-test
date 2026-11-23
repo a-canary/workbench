@@ -51,6 +51,42 @@ case $1 in
 esac
 TMUX
 chmod +x "$tmp/fake/tmux"
+
+# Fake herdr for nc=1 (pi) seat tests (repos-5s6k9).
+# State files: $W/herdr/<seat>.status (idle|done|working|blocked), $W/herdr/prompt.<seat>
+cat >"$tmp/fake/herdr" <<'HERDR'
+#!/usr/bin/env bash
+echo "$*" >>"$W/herdr.calls"
+case $1 in
+  agent)
+    case $2 in
+      get)
+        seat=$3
+        if [ ! -f "$W/herdr/$seat.status" ]; then
+          exit 1
+        fi
+        status=$(cat "$W/herdr/$seat.status" 2>/dev/null)
+        tabid=$(cat "$W/herdr/$seat.tabid" 2>/dev/null || echo "")
+        printf '{"result":{"agent":{"agent_status":"%s","tab_id":"%s"}}}' "$status" "$tabid"
+        ;;
+      prompt)
+        seat=$3; shift 3
+        mkdir -p "$W/herdr"
+        echo "$seat $*" >>"$W/herdr/prompts"
+        ;;
+    esac
+    ;;
+  tab)
+    case $2 in
+      close)
+        echo "$*" >>"$W/herdr/tabclose"
+        ;;
+    esac
+    ;;
+esac
+HERDR
+chmod +x "$tmp/fake/herdr"
+
 export PATH="$tmp/fake:$PATH"   # also covers the calls below that do not go through tick
 cat >"$tmp/bin/meter" <<'EOF'
 #!/bin/bash
@@ -464,6 +500,21 @@ world; echo "0.50 0.95" >"$W/meter"; ready stack s-0; tick WAKER_PROFILE_CMD="$t
 has "43 default lookup sees P0" "$W/out" "seat=stack started bead=s-0"
 command rm -f "$tmp/fake/bd"
 
+# herdr seam test helpers (repos-5s6k9)
+herdr_seat() {
+  nonclaude "$1"
+  mkdir -p "$W/herdr"
+  echo "idle" >"$W/herdr/$1.status"
+}
+herdr_status() { echo "$2" >"$W/herdr/$1.status"; }
+herdr_nudged() { grep -c "^$1 " "$W/herdr/prompts" 2>/dev/null || echo 0; }
+herdr_nudge_tick() {
+  env W="$W" PATH="$tmp/fake:$PATH" WAKER_IDLE_CMD="$tmp/bin/idle" WAKER_NUDGE_CMD="$tmp/bin/nudge" \
+    KEEP_ME=kept SECRET_TOKEN=leak WAKER_SEATS="$W/seats" WAKER_BUDGET="$W/budget" \
+    WAKER_METER_CMD="$tmp/bin/meter" WAKER_READY_CMD="$tmp/bin/ready" WAKER_ALIVE_CMD="$tmp/bin/alive" \
+    WAKER_DRAIN_CMD="" "$waker" >"$W/out" 2>"$W/err"
+}
+
 # 44. repos-1o8pn: a seat whose "model" is not "claude" spends no Claude budget, so no Claude gate holds it:
 #     not pace, use, session-out, claude.down, or the Claude slot count; it is never profiled.
 #     No "model" means claude. A "model" that is not a string is a bad seat.
@@ -471,7 +522,7 @@ nonclaude() { jq '.model="pi"' "$W/seats/$1.json" >"$W/x" && command mv "$W/x" "
 world; nonclaude stack; echo "0.95 1.50" >"$W/meter"; ready stack s-1; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
 has "44 non-Claude seat starts past every Claude gate" "$W/out" "seat=stack started bead=s-1"
 pre "44 Claude seat still stopped" "$W/out" "seat=trading session-out"
-world; nonclaude stack; echo "0.50 1.50" >"$W/meter"; ready stack s-1; live_idle stack; ptick
+world; nonclaude stack; echo "0.50 1.50" >"$W/meter"; ready stack s-1; live_idle stack; herdr_seat stack; ptick
 has "44 live idle non-Claude seat nudged over pace" "$W/out" "seat=stack nudged bead=s-1"
 world; nonclaude stack; echo "0.50 0.50" >"$W/meter"; touch "$W/alive/trading" "$W/alive/ndv"; ready stack s-1; ptick
 has "44 non-Claude seat takes no Claude slot" "$W/out" "seat=stack started bead=s-1"
@@ -481,8 +532,33 @@ world; jq '.model=1' "$W/seats/stack.json" >"$W/x" && command mv "$W/x" "$W/seat
 has "44 non-string model is a bad seat" "$W/out" "seat=stack bad-seat bad model"
 world; for s in trading ndv; do nonclaude $s; done; touch "$W/alive/trading" "$W/alive/ndv"; ready stack s-1; ptick
 has "44 live non-Claude seats fill no Claude slot" "$W/out" "seat=stack started bead=s-1"
-world; nonclaude stack; ready stack s-1; live_idle stack; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
+world; nonclaude stack; ready stack s-1; live_idle stack; herdr_seat stack; touch "$W/seats/claude.down"; ptick WAKER_SESSION_CMD="echo 0.99"
 has "44 live idle non-Claude seat nudged past session-out and claude.down" "$W/out" "seat=stack nudged bead=s-1"
+
+# --- herdr seam tests (repos-5s6k9): nc=1 seats use herdr agent get/prompt, not tmux ---
+
+# 45. herdr idle pi seat with a ready bead gets nudged via herdr agent prompt
+world; herdr_seat stack; ready stack s-herdr1
+herdr_nudge_tick
+has "45 herdr idle pi seat nudged" "$W/out" "seat=stack nudged bead=s-herdr1"
+check "45 herdr agent prompt called" "$(herdr_nudged stack)" 1
+
+# 46. herdr working pi seat is not nudged
+world; herdr_seat stack 3 0.9; herdr_status stack working; ready stack s-herdr2
+herdr_nudge_tick
+has "46 herdr working pi seat running" "$W/out" "seat=stack running"
+check "46 no nudge to working seat" "$(herdr_nudged stack)" 0
+
+# 47. herdr done pi seat (turn ended) is treated as idle and nudged
+world; herdr_seat stack 3 0.9; herdr_status stack done; ready stack s-herdr3
+herdr_nudge_tick
+has "47 herdr done pi seat nudged" "$W/out" "seat=stack nudged bead=s-herdr3"
+check "47 herdr agent prompt called for done seat" "$(herdr_nudged stack)" 1
+
+# 48. dead herdr pi seat (agent get fails) falls through to second pass for restart
+world; herdr_seat stack 3 0.9; rm -f "$W/herdr/stack.status"; ready stack s-herdr4
+herdr_nudge_tick
+has "48 dead herdr seat restarted" "$W/out" "seat=stack started bead=s-herdr4"
 
 [ $fails = 0 ] && echo "waker-test: PASS" || echo "waker-test: FAIL"
 exit $fails
