@@ -6,7 +6,7 @@
 // There is deliberately no second allowlist anywhere else in the repo.
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -20,6 +20,10 @@ export interface LaneOpts {
   /** directory relative targets resolve against; default process.cwd(). Only
    *  honoured when it is itself in-lane. */
   base?: string;
+  /** the seat doing the write (WAKER_SEAT); when set, ownership.tsv is enforced */
+  seat?: string;
+  /** path to ownership.tsv; default ~/vault/director/ownership.tsv (repos-ztdrt) */
+  ownershipMap?: string;
 }
 
 export type LaneVerdict = { ok: true } | { ok: false; reason: string };
@@ -177,12 +181,73 @@ export function checkWritePath(target: string, opts: LaneOpts = {}): LaneVerdict
     };
   }
 
-  if (inLane(abs, home, opts)) return { ok: true };
+  if (!inLane(abs, home, opts)) {
+    return {
+      ok: false,
+      reason: `write-lane violation: ${abs} is outside the write-lane allowlist [${ALLOWLIST_DISPLAY.join(", ")}]. ` + allowlistHint(),
+    };
+  }
 
-  return {
-    ok: false,
-    reason: `write-lane violation: ${abs} is outside the write-lane allowlist [${ALLOWLIST_DISPLAY.join(", ")}]. ` + allowlistHint(),
-  };
+  // Seat-aware ownership check (repos-ztdrt). Only applies to paths under ~/repos.
+  if (opts.seat) {
+    const ownerV = checkOwnership(abs, home, opts.seat, opts.ownershipMap);
+    if (!ownerV.ok) return ownerV;
+  }
+
+  return { ok: true };
+}
+
+// --- seat-aware ownership (repos-ztdrt) ---
+// ownership.tsv: repo path prefix (relative to ~/repos) <TAB> owning seat.
+// A seat may not write to a path owned by another seat. No seat (operator) passes.
+
+function checkOwnership(abs: string, home: string, seat: string, mapPath?: string): LaneVerdict {
+  const map = mapPath ?? join(home, "vault", "director", "ownership.tsv");
+  if (!existsSync(map)) return { ok: true };
+
+  // Resolve the path relative to ~/repos to match against the map's prefixes.
+  const reposDir = join(home, "repos");
+  if (!abs.startsWith(reposDir + "/") && abs !== reposDir) return { ok: true }; // not under ~/repos
+  const rel = abs.slice(reposDir.length + 1); // strip ~/repos/
+
+  const lines = readFileSync(map, "utf8").split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const tab = trimmed.indexOf("\t");
+    if (tab < 0) continue;
+    const prefix = trimmed.slice(0, tab);
+    const owner = trimmed.slice(tab + 1).trim();
+
+    // Boundary-safe prefix match: "rd-director/bin/jobs" matches itself and subpaths,
+    // but not "rd-director/bin/jobs-backup". Directory prefixes end in "/".
+    const isDirPrefix = prefix.endsWith("/");
+    if (isDirPrefix) {
+      if (rel === prefix || rel.startsWith(prefix)) {
+        if (owner !== seat) {
+          return {
+            ok: false,
+            reason: `ownership violation: ${rel} is owned by ${owner}, you are ${seat}. ` +
+              `File a bead for ${owner} (bd create ... --assignee ${owner}) with the change you want and why; do not edit it yourself. ` +
+              `Org chart: ~/vault/director/org-chart.md`,
+          };
+        }
+      }
+    } else {
+      // Exact file match or subpath (prefix + /)
+      if (rel === prefix || rel.startsWith(prefix + "/")) {
+        if (owner !== seat) {
+          return {
+            ok: false,
+            reason: `ownership violation: ${rel} is owned by ${owner}, you are ${seat}. ` +
+              `File a bead for ${owner} (bd create ... --assignee ${owner}) with the change you want and why; do not edit it yourself. ` +
+              `Org chart: ~/vault/director/org-chart.md`,
+          };
+        }
+      }
+    }
+  }
+  return { ok: true };
 }
 
 function allowlistHint(): string {
@@ -203,19 +268,23 @@ if (import.meta.main) {
   const argv = process.argv.slice(2);
   let db: string | undefined;
   let base: string | undefined;
+  let seat: string | undefined;
+  let ownershipMap: string | undefined;
   const targets: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--db") db = argv[++i];
     else if (argv[i] === "--base") base = argv[++i];
+    else if (argv[i] === "--seat") seat = argv[++i];
+    else if (argv[i] === "--ownership-map") ownershipMap = argv[++i];
     else targets.push(argv[i]);
   }
   if (targets.length === 0) {
-    console.error("usage: bun src/policy/check.ts [--db <ledger>] [--base <dir>] <target>...");
+    console.error("usage: bun src/policy/check.ts [--db <ledger>] [--base <dir>] [--seat <seat>] [--ownership-map <tsv>] <target>...");
     process.exit(2);
   }
   let failed = false;
   for (const t of targets) {
-    const v = checkWritePath(t, { db, base });
+    const v = checkWritePath(t, { db, base, seat, ownershipMap });
     if (!v.ok) {
       console.error(`LANE_BLOCKED ${t}: ${v.reason}`);
       failed = true;

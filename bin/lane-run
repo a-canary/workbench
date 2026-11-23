@@ -192,6 +192,39 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   fi
   # a local branch of that name may hold someone's unpushed work: never reset or delete it
   if git -C "$repo" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+    local head_sha origin_sha
+    head_sha=$(git -C "$repo" rev-parse "refs/heads/$branch")
+    # is the local branch ahead of origin? if so, maybe the worker finished but couldn't push
+    if git -C "$repo" rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
+      origin_sha=$(git -C "$repo" rev-parse "origin/$branch")
+      # is local ahead of origin?
+      if ! git -C "$repo" merge-base --is-ancestor "$head_sha" "$origin_sha" 2>/dev/null; then
+        # local has commits not on origin: test if the head passes, then push
+        log "$id: local branch $branch exists and is ahead of origin; testing HEAD $head_sha"
+        if bash -c "cd '$repo' && $test" >"$lf" 2>&1; then
+          log "$id: HEAD passes test; pushing $branch (fast-forward)"
+          if git -C "$repo" push origin "$branch" 2>&1 | tee -a "$lf"; then
+            bd -C "$repo" close "$id" --reason "GREEN $head_sha pushed to origin/$branch" 2>/dev/null
+            bd -C "$repo" note "$id" "local branch existed and was ahead of origin; HEAD passed test and was pushed (repos-zznx)" 2>/dev/null
+            log "$id: closed GREEN (repos-zznx)"
+            sprint end "$id" green "pushed existing local branch"; trap - INT TERM HUP; return 0
+          else
+            fail "$id" "local branch $branch ahead of origin, HEAD passes test, but push failed" human
+            sprint end "$id" blocked "push failed"; trap - INT TERM HUP; return 0
+          fi
+        else
+          # HEAD doesn't pass: label human once, skip on later passes
+          if ! bd -C "$repo" list --json 2>/dev/null | jq -e ".[] | select(.id == \"$id\" and (.labels | index(\"human\")))" >/dev/null 2>&1; then
+            fail "$id" "local branch $branch ahead of origin but HEAD fails test; needs human" human
+            log "$id: labeled human (first time)"
+          fi
+          # skip: don't re-label on later passes
+          log "$id: skipping (human label present, repos-zznx)"
+          sprint end "$id" blocked "local branch ahead but test fails"; trap - INT TERM HUP; return 0
+        fi
+      fi
+    fi
+    # branch exists but is not ahead of origin (or origin branch doesn't exist): old behavior
     fail "$id" "local branch $branch already exists in $repo; lane-run will not reset it" lane-infra
     sprint end "$id" blocked "local branch exists"; trap - INT TERM HUP; return 0
   fi
@@ -260,6 +293,28 @@ run_one() { # 0 = worked a bead; 1 = nothing done in this repo (sets $down on an
   [ -z "$down" ]
 }
 
+# sweep_qwen_failed <repo> — remove qwen-failed from beads that have been failing >72h (repos-qm8jb)
+sweep_qwen_failed() {
+  local j ids i id updated_at age now
+  local TTL=${QWEN_FAILED_TTL:-259200}  # 72h in seconds
+  now=$(date +%s)
+  j=$(bd -C "$repo" list -l qwen-failed --status open --json 2>/dev/null) || return 0
+  [ "$j" = "[]" ] && return 0
+  mapfile -t ids < <(jq -c '.[]' <<<"$j")
+  for i in "${ids[@]}"; do
+    id=$(jq -r '.id' <<<"$i")
+    updated_at=$(jq -r '.updated_at // ""' <<<"$i")
+    if [ -z "$updated_at" ]; then continue; fi
+    local ts
+    ts=$(date -d "$updated_at" +%s 2>/dev/null) || continue
+    age=$((now - ts))
+    if [ "$age" -gt "$TTL" ]; then
+      log "$id: qwen-failed expired ($((age / 3600))h); re-enabling for retry"
+      bd -C "$repo" label remove "$id" qwen-failed >/dev/null 2>&1
+    fi
+  done
+}
+
 # lint_desc <repo> <description> — one reason line if the bead can't be run, nothing if it can
 lint_desc() {
   local desc=$2 b branch test body_text
@@ -317,11 +372,31 @@ if [ -n "$lint" ]; then
   exit $rc
 fi
 gc_logs
+session_start=$(date +%s)
 while :; do
+  # session lifetime cap (repos-pglhz): exit after 4h to force a fresh process
+  local now session_age
+  now=$(date +%s)
+  session_age=$((now - session_start))
+  local SESSION_LIFETIME=${LANE_SESSION_LIFETIME:-14400}
+  if [ "$session_age" -gt "$SESSION_LIFETIME" ]; then
+    log "session lifetime cap reached (${session_age}s > ${SESSION_LIFETIME}s); exiting for fresh process"
+    exit 0
+  fi
+  # sweep expired qwen-failed labels before draining (repos-qm8jb)
+  for repo in "${repos[@]}"; do sweep_qwen_failed "$repo"; done
   did= down=
   for repo in "${repos[@]}"; do run_one && did=1; [ -z "$down" ] || break; done
   [ -n "$once" ] && [ -n "$down" ] && exit 3
   [ -n "$did" ] && [ -z "$down" ] && continue
   [ -n "$once" ] && exit 0
-  log "${down:+outage}${down:-queue empty}; idle ${idle}s"; sleep "$idle"
+  # count beads invisible to the drain (qwen-failed, human, lane-infra) — acceptance criterion 3 (repos-qm8jb)
+  local hidden=0
+  for repo in "${repos[@]}"; do
+    local j n
+    j=$(bd -C "$repo" list -l "$label" --status open --json 2>/dev/null) || continue
+    n=$(jq '[.[] | select(.labels[] | . == "qwen-failed" or . == "human" or . == "lane-infra")] | length' <<<"$j" 2>/dev/null) || continue
+    hidden=$((hidden + n))
+  done
+  log "${down:+outage}${down:-queue empty}; idle ${idle}s; hidden=${hidden}"; sleep "$idle"
 done

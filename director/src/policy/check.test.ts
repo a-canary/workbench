@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { checkWritePath, ALLOWLIST_DISPLAY } from "./check";
+import { writeFileSync } from "node:fs";
 
 // home is a pure string the check resolves against — it must NOT exist under
 // /tmp, or every "out-of-lane" path would fall in the real /tmp lane.
@@ -210,4 +211,119 @@ test("no duplicate allowlist literals outside check.ts", async () => {
   );
   // .claude/settings.json must not restate the allowlist; neither may any hook script.
   expect(r.stdout.trim()).toBe("");
+});
+
+// --- seat-aware ownership (repos-ztdrt) ---
+// ownership.tsv maps repo path prefixes (relative to ~/repos) to the one seat
+// allowed to change them. Enforced at write time, not just commit time.
+
+function makeOwnershipMap(path: string, entries: string[]): void {
+  writeFileSync(path, entries.join("\n") + "\n");
+}
+
+test("seat can write to its own owned path", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/bin/jobs", {
+    home,
+    seat: "inference-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
+
+test("seat cannot write to another seat's owned path", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/bin/jobs", {
+    home,
+    seat: "ml-rnd-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(false);
+  if (!v.ok) {
+    expect(v.reason).toContain("inference-lead");
+    expect(v.reason).toContain("ml-rnd-lead");
+  }
+});
+
+test("seat can write to unowned in-lane path", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/arc-skills/some-file.md", {
+    home,
+    seat: "agents-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
+
+test("no seat (operator) can write anywhere in-lane", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/bin/jobs", {
+    home,
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
+
+test("ownership block names the owning seat and suggests filing a bead", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/bin/jobs", {
+    home,
+    seat: "agents-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(false);
+  if (!v.ok) {
+    expect(v.reason).toContain("inference-lead");
+    expect(v.reason).toMatch(/bead/i);
+  }
+});
+
+test("ownership check does not apply outside ~/repos", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["director/scripts/foo.sh\tagents-lead"]);
+  // ~/vault/director/scripts/foo.sh is in-lane but not under ~/repos, so ownership doesn't apply
+  const v = checkWritePath("~/vault/director/scripts/foo.sh", {
+    home,
+    seat: "trading-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
+
+test("ownership map prefix is boundary-safe (rd-director/bin/jobs does not block rd-director/bin/jobs-backup)", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/bin/jobs\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/bin/jobs-backup", {
+    home,
+    seat: "ml-rnd-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
+});
+
+test("ownership map prefix matches subpaths (rd-director/jobs/local-v100/ blocks rd-director/jobs/local-v100/foo)", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/jobs/local-v100/\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/jobs/local-v100/foo.yaml", {
+    home,
+    seat: "ml-rnd-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(false);
+});
+
+test("directory-prefix owner can write to subpaths", () => {
+  const map = join(sandbox, "ownership.tsv");
+  makeOwnershipMap(map, ["rd-director/jobs/local-v100/\tinference-lead"]);
+  const v = checkWritePath("~/repos/rd-director/jobs/local-v100/foo.yaml", {
+    home,
+    seat: "inference-lead",
+    ownershipMap: map,
+  });
+  expect(v.ok).toBe(true);
 });
